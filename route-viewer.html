@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>경로 뷰어 · GPS 로그 리플레이</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0e16;
+  --panel:#10151f;
+  --panel-2:#0d121b;
+  --line:#212a3a;
+  --line-soft:#171e2b;
+  --text:#e8edf5;
+  --text-dim:#8a94a8;
+  --text-faint:#4d566a;
+  --teal:#4fd8c7;
+  --teal-dim:#245952;
+  --amber:#f5a623;
+  --green:#5fd88a;
+  --red:#ff6b6b;
+  --radius:5px;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);}
+body{
+  font-family:'IBM Plex Sans','IBM Plex Sans KR',-apple-system,sans-serif;
+  min-height:100vh;
+  display:flex;flex-direction:column;
+  background-image:
+    linear-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size:34px 34px;
+  background-position:center top;
+}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;}
+
+/* ── Header ─────────────────────────────────────────── */
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 22px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg, rgba(16,21,31,.96), rgba(16,21,31,.88));
+  backdrop-filter:blur(6px);
+  position:sticky;top:0;z-index:20;
+}
+.brand{display:flex;align-items:center;gap:11px;}
+.brand-mark{
+  width:30px;height:30px;border-radius:7px;flex:none;
+  background:radial-gradient(circle at 35% 30%, var(--teal), var(--teal-dim) 70%);
+  position:relative;
+  box-shadow:0 0 0 1px var(--line), inset 0 0 8px rgba(0,0,0,.35);
+}
+.brand-mark::after{
+  content:'';position:absolute;inset:9px;border-radius:50%;
+  border:2px solid rgba(10,14,22,.55);
+}
+.brand-title{font-size:15px;font-weight:700;letter-spacing:.2px;}
+.brand-sub{font-size:10.5px;color:var(--text-dim);letter-spacing:.4px;margin-top:1px;}
+.badge{
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;
+  color:var(--amber);border:1px solid rgba(245,166,35,.4);background:rgba(245,166,35,.08);
+  padding:3px 8px;border-radius:4px;letter-spacing:.5px;
+}
+.clock{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-dim);letter-spacing:.4px;}
+
+/* ── Layout ─────────────────────────────────────────── */
+main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1180px;width:100%;margin:0 auto;}
+
+/* ── 모드 탭 ─────────────────────────────────────────── */
+#mode-tabs{display:flex;gap:6px;}
+.mode-tab{
+  border:1px solid var(--line);background:var(--panel);color:var(--text-dim);
+  border-radius:6px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;
+}
+.mode-tab.active{color:var(--bg);background:var(--teal);border-color:var(--teal);}
+.mode-tab:not(.active):hover{color:var(--text);border-color:var(--text-faint);}
+
+/* ── 달력 ───────────────────────────────────────────── */
+#calendar-view{display:none;flex-direction:column;gap:14px;}
+#cal-header{display:flex;align-items:center;justify-content:space-between;}
+#cal-title{font-size:16px;font-weight:700;font-family:'JetBrains Mono',monospace;letter-spacing:.3px;}
+#cal-nav{display:flex;gap:6px;}
+.cal-nav-btn{
+  width:30px;height:30px;border-radius:5px;border:1px solid var(--line);background:var(--panel);
+  color:var(--text-dim);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;
+}
+.cal-nav-btn:hover{color:var(--text);border-color:var(--text-faint);}
+.cal-nav-btn.today{width:auto;padding:0 12px;font-family:inherit;font-size:11.5px;font-weight:600;}
+#cal-status{
+  display:none;border:1px solid var(--line);background:var(--panel);border-radius:6px;
+  padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.7;
+}
+#cal-status code{color:var(--amber);font-family:'JetBrains Mono',monospace;font-size:11px;}
+#cal-grid{
+  display:grid;grid-template-columns:repeat(7,1fr);gap:6px;
+}
+.cal-dow{text-align:center;font-size:10px;color:var(--text-faint);letter-spacing:.6px;padding-bottom:2px;font-family:'JetBrains Mono',monospace;}
+.cal-cell{
+  min-height:84px;border:1px solid var(--line);border-radius:6px;background:var(--panel);
+  padding:7px 7px 6px;display:flex;flex-direction:column;gap:5px;position:relative;
+}
+.cal-cell.empty{background:transparent;border-color:transparent;}
+.cal-cell.has-data{cursor:pointer;border-color:var(--teal-dim);}
+.cal-cell.has-data:hover{border-color:var(--teal);background:rgba(79,216,199,.06);}
+.cal-cell.today .cal-daynum{color:var(--amber);}
+.cal-daynum{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-dim);font-weight:600;}
+.cal-chips{display:flex;flex-wrap:wrap;gap:3px;}
+.cal-chip{
+  font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;letter-spacing:.2px;
+  border-radius:3px;padding:1.5px 5px;line-height:1.5;white-space:nowrap;
+}
+.cal-chip.zone{background:rgba(79,216,199,.14);color:var(--teal);}
+.cal-chip.vehicle{background:rgba(245,166,35,.14);color:var(--amber);}
+.cal-cell .cal-count{margin-top:auto;font-size:9.5px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
+
+/* ── 일자 요약 패널 (콘솔 상단) ──────────────────────── */
+#day-summary{
+  display:none;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:13px 16px;
+}
+#day-summary .ds-title{font-size:13px;font-weight:700;margin-bottom:9px;}
+.ds-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;}
+.ds-row:last-child{margin-bottom:0;}
+.ds-label{font-size:10.5px;color:var(--text-faint);width:64px;flex:none;letter-spacing:.3px;}
+.ds-chip{
+  font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;border-radius:4px;padding:3px 8px;
+}
+.ds-chip.zone{background:rgba(79,216,199,.14);color:var(--teal);}
+.ds-chip.vehicle{background:rgba(245,166,35,.14);color:var(--amber);}
+.ds-chip .n{color:var(--text-dim);font-weight:400;margin-left:3px;}
+
+/* ── 누적 지도 ──────────────────────────────────────── */
+#accum-view{display:none;flex-direction:column;gap:14px;}
+#accum-status{
+  display:none;border:1px solid var(--line);background:var(--panel);border-radius:6px;
+  padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.7;
+}
+#accum-stats{
+  display:none;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;
+}
+#accum-map-wrap{
+  border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  height:min(58vh,560px);position:relative;background:var(--panel-2);
+}
+#accum-map{width:100%;height:100%;}
+
+/* 구역 필터 버튼 */
+#zone-filter-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.zone-btn{
+  border:1px solid var(--line);background:var(--panel);color:var(--text-dim);
+  border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;
+}
+.zone-btn.active{color:var(--bg);background:var(--teal);border-color:var(--teal);}
+.zone-btn:not(.active):hover{color:var(--text);border-color:var(--text-faint);}
+
+/* 마우스 호버 툴팁 — 지도 위 커서 근처에 즉석으로 뜸 */
+#accum-tooltip{
+  display:none;position:absolute;z-index:700;pointer-events:none;
+  background:#151c29;border:1px solid var(--amber);border-radius:7px;
+  padding:9px 12px;box-shadow:0 8px 24px rgba(0,0,0,.5);
+  min-width:150px;
+}
+#accum-tooltip .at-days{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;color:var(--amber);}
+#accum-tooltip .at-sub{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--text-dim);margin-top:3px;line-height:1.5;}
+.density-dot{background:var(--teal);border-radius:50%;}
+
+/* ── Drop zone ──────────────────────────────────────── */
+#dropzone{
+  border:1.5px dashed var(--line);border-radius:8px;
+  padding:52px 24px;text-align:center;cursor:pointer;
+  background:var(--panel);transition:border-color .15s, background .15s;
+}
+#dropzone.drag{border-color:var(--teal);background:rgba(79,216,199,.05);}
+#dropzone .dz-icon{
+  width:46px;height:46px;margin:0 auto 16px;border-radius:50%;
+  border:1.5px solid var(--line);display:flex;align-items:center;justify-content:center;
+  font-size:19px;color:var(--teal);
+}
+#dropzone h2{font-size:15px;font-weight:600;margin:0 0 6px;}
+#dropzone p{font-size:12px;color:var(--text-dim);margin:0 0 18px;line-height:1.6;}
+#dropzone .dz-hint{font-size:10.5px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
+#file-input{display:none;}
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  background:var(--teal);color:#08221e;border:none;border-radius:5px;
+  padding:9px 16px;font-size:12.5px;font-weight:600;cursor:pointer;
+  font-family:inherit;
+}
+.btn:hover{filter:brightness(1.08);}
+.btn.ghost{
+  background:transparent;color:var(--text-dim);border:1px solid var(--line);
+}
+.btn.ghost:hover{color:var(--text);border-color:var(--text-faint);}
+
+/* ── Error toast ────────────────────────────────────── */
+#error-box{
+  display:none;border:1px solid rgba(255,107,107,.4);background:rgba(255,107,107,.08);
+  color:#ffb4b4;border-radius:6px;padding:10px 14px;font-size:12px;line-height:1.6;
+}
+
+/* ── Console (loaded state) ─────────────────────────── */
+#console{display:none;flex-direction:column;gap:12px;}
+
+.toolbar{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+}
+.toolbar .file-chip{
+  display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-dim);
+  border:1px solid var(--line);background:var(--panel);border-radius:5px;padding:6px 10px;
+}
+.toolbar .file-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:none;}
+.toolbar .file-chip b{color:var(--text);font-weight:600;}
+
+/* stats readout */
+#stats{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;
+}
+.stat-cell{background:var(--panel);padding:12px 16px;}
+.stat-cell .k{font-size:10px;color:var(--text-faint);letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;}
+.stat-cell .v{font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;color:var(--text);}
+.stat-cell .v small{font-size:11px;color:var(--text-dim);font-weight:400;}
+
+/* map */
+#map-wrap{
+  border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  height:min(58vh,560px);position:relative;background:var(--panel-2);
+}
+#map{width:100%;height:100%;}
+.leaflet-popup-content-wrapper{background:#151c29;color:var(--text);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.5);}
+.leaflet-popup-content{font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.6;}
+.leaflet-popup-tip{background:#151c29;}
+.leaflet-control-attribution{background:rgba(10,14,22,.7)!important;color:var(--text-faint)!important;}
+.leaflet-control-attribution a{color:var(--text-dim)!important;}
+
+/* playhead marker */
+.playhead-icon{
+  width:16px;height:16px;border-radius:50%;
+  background:var(--amber);border:2.5px solid #1a1206;
+  box-shadow:0 0 0 4px rgba(245,166,35,.22);
+}
+
+/* ── Recorder tape (scrubber) ───────────────────────── */
+#tape-panel{
+  border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:14px 16px 12px;
+}
+.tape-readout{
+  display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px 16px;
+}
+.tape-readout .time{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:var(--teal);letter-spacing:.5px;}
+.tape-readout .fields{display:flex;gap:16px;flex-wrap:wrap;}
+.tape-readout .field{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-dim);}
+.tape-readout .field b{color:var(--text);font-weight:600;}
+.tape-track-wrap{position:relative;padding:2px 0 4px;}
+#tape-ticks{
+  position:absolute;left:0;right:0;top:16px;height:8px;pointer-events:none;
+  background-repeat:repeat-x;background-image:linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+}
+input#tape{
+  -webkit-appearance:none;appearance:none;width:100%;height:34px;background:transparent;margin:0;cursor:pointer;
+}
+input#tape::-webkit-slider-runnable-track{
+  height:5px;border-radius:3px;
+  background:linear-gradient(90deg, var(--teal) 0%, var(--teal) var(--pct,0%), var(--line-soft) var(--pct,0%), var(--line-soft) 100%);
+}
+input#tape::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;margin-top:-9px;
+  width:20px;height:20px;border-radius:50%;background:var(--amber);
+  border:3px solid #14100a;box-shadow:0 0 0 1px var(--line);
+}
+input#tape::-moz-range-track{height:5px;border-radius:3px;background:var(--line-soft);}
+input#tape::-moz-range-progress{height:5px;border-radius:3px;background:var(--teal);}
+input#tape::-moz-range-thumb{
+  width:16px;height:16px;border-radius:50%;background:var(--amber);border:3px solid #14100a;
+}
+.tape-endcaps{display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);margin-top:2px;}
+.tape-controls{display:flex;align-items:center;gap:8px;margin-top:10px;}
+.tape-btn{
+  width:30px;height:30px;border-radius:5px;border:1px solid var(--line);background:var(--panel-2);
+  color:var(--text-dim);cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;
+}
+.tape-btn:hover{color:var(--text);border-color:var(--text-faint);}
+.tape-btn.play{color:var(--teal);border-color:var(--teal-dim);}
+#speed-group{display:flex;gap:3px;margin-left:4px;}
+.speed-btn{
+  border:1px solid var(--line);background:var(--panel-2);color:var(--text-dim);
+  border-radius:4px;padding:0 8px;height:26px;font-size:10.5px;font-weight:600;cursor:pointer;
+  font-family:'JetBrains Mono',monospace;
+}
+.speed-btn:hover{color:var(--text);border-color:var(--text-faint);}
+.speed-btn.active{color:var(--bg);background:var(--amber);border-color:var(--amber);}
+
+footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-mark"></div>
+    <div>
+      <div class="brand-title">경로 뷰어</div>
+      <div class="brand-sub">GPS TRACE REPLAY · INTERNAL TOOL</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="badge">ADMIN ONLY</span>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+</header>
+
+<main>
+  <div id="mode-tabs">
+    <button class="mode-tab" id="tab-upload" onclick="switchTab('upload')">📂 파일 불러오기</button>
+    <button class="mode-tab" id="tab-calendar" onclick="switchTab('calendar')">📅 달력에서 보기</button>
+    <button class="mode-tab" id="tab-accum" onclick="switchTab('accum')">🗺 누적 지도</button>
+  </div>
+
+  <div id="dropzone" onclick="document.getElementById('file-input').click()">
+    <div class="dz-icon">⌁</div>
+    <h2>주행 기록 파일을 끌어놓으세요</h2>
+    <p>nav-app '오늘 기록 다운로드'로 받은 .xlsx 또는 .csv 파일<br/>기록된 GPS 좌표를 지도 위 경로로 리플레이합니다<br/><span style="color:var(--text-faint);">여러 날짜 파일을 한 번에 선택하면 달력으로 모아서 볼 수 있어요</span></p>
+    <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+      <button class="btn" type="button" onclick="event.stopPropagation();document.getElementById('file-input').click()">파일 선택</button>
+      <button class="btn ghost" type="button" onclick="event.stopPropagation();loadSampleData()">🎲 샘플 데이터로 미리보기</button>
+    </div>
+    <div class="dz-hint" style="margin-top:14px;">.XLSX · .XLS · .CSV · 여러 개 선택 가능</div>
+    <input type="file" id="file-input" accept=".xlsx,.xls,.csv" multiple/>
+  </div>
+
+  <div id="calendar-view">
+    <div id="cal-status"></div>
+    <div id="cal-header">
+      <div id="cal-title">—</div>
+      <div id="cal-nav">
+        <button class="cal-nav-btn today" onclick="calGoToday()">오늘</button>
+        <button class="cal-nav-btn" onclick="calShiftMonth(-1)">‹</button>
+        <button class="cal-nav-btn" onclick="calShiftMonth(1)">›</button>
+      </div>
+    </div>
+    <div id="cal-grid"></div>
+  </div>
+
+  <div id="accum-view">
+    <div id="accum-status"></div>
+    <div id="accum-stats"></div>
+    <div id="zone-filter-group">
+      <button class="zone-btn active" data-zone="all" onclick="setAccumZone('all')">전체</button>
+      <button class="zone-btn" data-zone="강남" onclick="setAccumZone('강남')">강남</button>
+      <button class="zone-btn" data-zone="판교" onclick="setAccumZone('판교')">판교</button>
+      <button class="zone-btn" data-zone="시흥" onclick="setAccumZone('시흥')">시흥</button>
+      <span class="mono" style="font-size:10.5px;color:var(--text-faint);margin-left:6px;">지도 위에 마우스를 가져다 대면 그 근처 기록이 바로 떠요</span>
+    </div>
+    <div id="accum-map-wrap">
+      <div id="accum-map"></div>
+      <div id="accum-tooltip"></div>
+    </div>
+  </div>
+
+  <div id="error-box"></div>
+
+  <div id="console">
+    <div class="toolbar">
+      <div class="file-chip"><span class="dot"></span><span id="chip-label">불러온 파일:</span> <b id="chip-filename">—</b></div>
+      <button class="btn ghost" type="button" id="back-btn" onclick="resetViewer()">↺ 다른 파일 불러오기</button>
+    </div>
+
+    <div id="day-summary"></div>
+
+    <div id="stats">
+      <div class="stat-cell"><div class="k">날짜</div><div class="v" id="stat-date">—</div></div>
+      <div class="stat-cell"><div class="k">기록 구간</div><div class="v" id="stat-range">—</div></div>
+      <div class="stat-cell"><div class="k">기록 지점</div><div class="v" id="stat-points">—</div></div>
+      <div class="stat-cell"><div class="k">총 이동거리</div><div class="v" id="stat-dist">—</div></div>
+    </div>
+
+    <div id="map-wrap"><div id="map"></div></div>
+
+    <div id="tape-panel">
+      <div class="tape-readout">
+        <div class="time mono" id="tape-time">--:--:--</div>
+        <div class="fields">
+          <div class="field">장소 <b id="tape-place">—</b></div>
+          <div class="field">속도 <b id="tape-speed">—</b></div>
+          <div class="field">도로 <b id="tape-road">—</b></div>
+          <div class="field">지점 <b id="tape-idx">0 / 0</b></div>
+        </div>
+      </div>
+      <div class="tape-track-wrap">
+        <input type="range" id="tape" min="0" max="0" value="0" step="1"/>
+      </div>
+      <div class="tape-endcaps"><span id="tape-start-lbl">--:--:--</span><span id="tape-end-lbl">--:--:--</span></div>
+      <div class="tape-controls">
+        <button class="tape-btn play" id="play-btn" onclick="togglePlay()" title="재생">▶</button>
+        <button class="tape-btn" onclick="stepTape(-1)" title="이전 지점">◀</button>
+        <button class="tape-btn" onclick="stepTape(1)" title="다음 지점">▶</button>
+        <div id="speed-group">
+          <button class="speed-btn" data-speed="0.5" onclick="setPlaySpeed(0.5)">0.5x</button>
+          <button class="speed-btn active" data-speed="1" onclick="setPlaySpeed(1)">1x</button>
+          <button class="speed-btn" data-speed="2" onclick="setPlaySpeed(2)">2x</button>
+          <button class="speed-btn" data-speed="4" onclick="setPlaySpeed(4)">4x</button>
+        </div>
+        <span class="mono" style="font-size:10.5px;color:var(--text-faint);margin-left:4px;">기록 지점 단위로 리플레이</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>route-viewer · nav-app 주행기록 전용 리플레이 도구 · 백엔드 연동 없음, 로컬 파일만 읽습니다</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+// ── 실시간 시계 ───────────────────────────────────────
+function tickClock(){
+  const n=new Date(),p=x=>String(x).padStart(2,'0');
+  document.getElementById('clock').textContent=`${p(n.getHours())}:${p(n.getMinutes())}:${p(n.getSeconds())}`;
+}
+tickClock(); setInterval(tickClock,1000);
+
+// ── 지도 ─────────────────────────────────────────────
+let map=null, routeLayer=null, playheadMarker=null, points=[];
+let playTimer=null;
+let currentSource=null; // 'file' | 'day'
+
+function initMap(){
+  if(map) return;
+  map=L.map('map',{zoomSnap:0.5,zoomDelta:0.5}).setView([37.498,127.032],12);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',{
+    subdomains:'abcd',maxZoom:20,attribution:'© OpenStreetMap © CARTO'
+  }).addTo(map);
+  routeLayer=L.layerGroup().addTo(map);
+}
+
+// ── haversine 거리(m) ─────────────────────────────────
+function haversine(lat1,lng1,lat2,lng2){
+  const R=6371000,d2r=Math.PI/180;
+  const dLat=(lat2-lat1)*d2r, dLng=(lng2-lng1)*d2r;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*d2r)*Math.cos(lat2*d2r)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+
+// ══════════════════════════════════════════════════════════
+//  파일에서 불러온 데이터를 날짜별로 모아 달력에 표시
+//  (여러 파일을 한 번에 선택하면 날짜별로 자동 그룹핑됨)
+// ══════════════════════════════════════════════════════════
+let entriesByDate=null; // Map<date, point[]>  (point = parseRouteWorkbook 한 줄 형식)
+let calMonth=new Date();
+let isSampleMode=false;
+
+function dstr(d){
+  const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+
+// point 배열(zone/vehicle/time 포함) → 요약(구역별/차량별 카운트, 시간범위)
+function summarizePoints(dayPoints){
+  const zoneCount={}, vehicleCount={};
+  let minTime=null, maxTime=null;
+  for(const p of dayPoints){
+    if(p.zone){ zoneCount[p.zone]=(zoneCount[p.zone]||0)+1; }
+    if(p.vehicle){ vehicleCount[p.vehicle]=(vehicleCount[p.vehicle]||0)+1; }
+    if(p.time){
+      if(minTime===null||p.time<minTime) minTime=p.time;
+      if(maxTime===null||p.time>maxTime) maxTime=p.time;
+    }
+  }
+  const sortDesc=obj=>Object.entries(obj).sort((a,b)=>b[1]-a[1]);
+  return{
+    zones:sortDesc(zoneCount), vehicles:sortDesc(vehicleCount),
+    startTime:minTime, endTime:maxTime, count:dayPoints.length,
+  };
+}
+
+function calGoToday(){ calMonth=new Date(); renderCalendarGrid(); }
+function calShiftMonth(delta){
+  calMonth=new Date(calMonth.getFullYear(),calMonth.getMonth()+delta,1);
+  renderCalendarGrid();
+}
+
+// ══════════════════════════════════════════════════════════
+//  모드 탭 (📅 달력에서 보기 / 📂 파일 불러오기)
+//  둘 다 로컬에서 불러온 파일 데이터(entriesByDate)만 사용 —
+//  서버·IndexedDB 연동 없음. 탭은 그 데이터를 보는 화면만 바꿔줌.
+// ══════════════════════════════════════════════════════════
+function switchTab(tab){
+  document.getElementById('tab-calendar').classList.toggle('active',tab==='calendar');
+  document.getElementById('tab-upload').classList.toggle('active',tab==='upload');
+  document.getElementById('tab-accum').classList.toggle('active',tab==='accum');
+  document.getElementById('console').style.display='none';
+  document.getElementById('day-summary').style.display='none';
+  document.getElementById('calendar-view').style.display='none';
+  document.getElementById('accum-view').style.display='none';
+  document.getElementById('dropzone').style.display='none';
+  clearError();
+  if(tab==='calendar'){
+    document.getElementById('calendar-view').style.display='flex';
+    renderCalendarGrid();
+    updateCalStatus();
+  }else if(tab==='accum'){
+    document.getElementById('accum-view').style.display='flex';
+    renderAccumView();
+  }else{
+    document.getElementById('dropzone').style.display='block';
+  }
+}
+
+function updateCalStatus(){
+  const el=document.getElementById('cal-status');
+  if(!entriesByDate||entriesByDate.size===0){
+    el.style.display='block';
+    el.innerHTML='아직 불러온 기록이 없어요. <b>"📂 파일 불러오기"</b> 탭에서 파일을 선택하거나, 그 탭의 <b>"🎲 샘플 데이터로 미리보기"</b>를 눌러보세요.';
+  }else if(isSampleMode){
+    el.style.display='block';
+    el.innerHTML='🎲 지금 보고 계신 건 <b>샘플 데이터</b>예요. 실제 파일을 불러오면 이 자리에 그대로 실제 기록이 표시돼요.';
+  }else{
+    el.style.display='none';
+  }
+}
+
+// 파일을 새로 불러온 직후 호출 — 가장 최근 기록이 있는 달로 이동시키고 달력 탭으로 전환
+function showCalendar(){
+  const dates=[...entriesByDate.keys()].sort();
+  if(dates.length) calMonth=new Date(dates[dates.length-1]+'T00:00:00');
+  switchTab('calendar');
+}
+
+// ══════════════════════════════════════════════════════════
+//  누적 지도 — 지금까지 불러온 모든 날짜의 기록을 한 지도에 합쳐서
+//  "과거부터 지금까지 어디를 돌았는지" 한눈에 보여준다.
+//  + 구역(강남/판교/시흥) 필터, + 마우스 호버 시 근처 기록을 즉석 툴팁으로 표시.
+// ══════════════════════════════════════════════════════════
+const ZONE_CENTERS={
+  강남:[37.498,127.032], 판교:[37.385,127.115], 시흥:[37.345,126.730],
+};
+const HOVER_RADIUS_M=120; // 마우스 근처 몇 m 이내 기록을 "이 근처"로 볼지
+
+let accumMap=null, accumDensityLayer=null;
+let accumZoneFilter='all';
+
+function getAllAccumPoints(){
+  if(!entriesByDate) return [];
+  const all=[];
+  for(const pts of entriesByDate.values()) all.push(...pts);
+  return all;
+}
+
+function getFilteredAccumPoints(){
+  const all=getAllAccumPoints();
+  return accumZoneFilter==='all' ? all : all.filter(p=>p.zone===accumZoneFilter);
+}
+
+function setAccumZone(zone){
+  accumZoneFilter=zone;
+  document.querySelectorAll('.zone-btn').forEach(b=>b.classList.toggle('active',b.dataset.zone===zone));
+  renderAccumView();
+}
+
+function initAccumMap(){
+  if(accumMap) return;
+  accumMap=L.map('accum-map',{zoomSnap:0.5,zoomDelta:0.5,preferCanvas:true}).setView([37.498,127.032],11);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',{
+    subdomains:'abcd',maxZoom:20,attribution:'© OpenStreetMap © CARTO'
+  }).addTo(accumMap);
+  accumDensityLayer=L.layerGroup().addTo(accumMap);
+  wireHoverTooltip();
+  accumMap.on('movestart zoomstart',hideAccumTooltip);
+}
+
+function renderAccumView(){
+  const statusEl=document.getElementById('accum-status');
+  const statsEl=document.getElementById('accum-stats');
+  const allPoints=getAllAccumPoints();
+
+  if(!allPoints.length){
+    statusEl.style.display='block';
+    statusEl.innerHTML='아직 쌓인 기록이 없어요. <b>"📂 파일 불러오기"</b> 탭에서 여러 날짜의 파일을 불러오면, 그동안 돌아다닌 곳이 전부 이 지도 위에 겹쳐 표시돼요.';
+    statsEl.style.display='none';
+    if(accumDensityLayer) accumDensityLayer.clearLayers();
+    hideAccumTooltip();
+    return;
+  }
+  statusEl.style.display='none';
+  initAccumMap();
+  setTimeout(()=>accumMap.invalidateSize(),60);
+  hideAccumTooltip();
+
+  const filtered=getFilteredAccumPoints();
+
+  // 통계 (필터된 구역 기준)
+  const dateSet=new Set(); const zoneCount={}, vehicleCount={};
+  filtered.forEach(p=>{
+    if(p.date) dateSet.add(p.date);
+    if(p.zone) zoneCount[p.zone]=(zoneCount[p.zone]||0)+1;
+    if(p.vehicle) vehicleCount[p.vehicle]=(vehicleCount[p.vehicle]||0)+1;
+  });
+  const sortDesc=obj=>Object.entries(obj).sort((a,b)=>b[1]-a[1]);
+  const topZones=sortDesc(zoneCount), topVehicles=sortDesc(vehicleCount);
+  statsEl.style.display='grid';
+  statsEl.innerHTML=`
+    <div class="stat-cell"><div class="k">누적 일수</div><div class="v">${dateSet.size}<small> 일</small></div></div>
+    <div class="stat-cell"><div class="k">총 기록 지점</div><div class="v">${filtered.length}<small> 개</small></div></div>
+    <div class="stat-cell"><div class="k">구역</div><div class="v" style="font-size:13px;">${topZones.map(([z,c])=>`${z} ${c}`).join(' · ')||'—'}</div></div>
+    <div class="stat-cell"><div class="k">차량</div><div class="v" style="font-size:13px;">${topVehicles.map(([v,c])=>`${v} ${c}`).join(' · ')||'—'}</div></div>
+  `;
+
+  // 밀도 시각화: 좌표를 작은 격자로 나눠 셀별 방문 횟수를 원 크기/투명도로 표현
+  accumDensityLayer.clearLayers();
+  if(filtered.length){
+    const CELL=0.0007; // 약 70~80m
+    const grid=new Map();
+    filtered.forEach(p=>{
+      const key=Math.round(p.lat/CELL)+'_'+Math.round(p.lng/CELL);
+      if(!grid.has(key)) grid.set(key,{lat:0,lng:0,n:0});
+      const g=grid.get(key);
+      g.lat+=p.lat; g.lng+=p.lng; g.n++;
+    });
+    const maxN=Math.max(...[...grid.values()].map(g=>g.n),1);
+    grid.forEach(g=>{
+      const lat=g.lat/g.n, lng=g.lng/g.n;
+      const t=Math.min(1,g.n/Math.max(3,maxN*0.6));
+      L.circleMarker([lat,lng],{
+        radius:4+t*5, weight:0, fillColor:'#4fd8c7',
+        fillOpacity:0.12+t*0.55,
+      }).addTo(accumDensityLayer);
+    });
+  }
+
+  // 구역을 선택했으면 그 구역 중심으로, 아니면 필터된 전체 범위로 화면 맞춤
+  if(accumZoneFilter!=='all'&&ZONE_CENTERS[accumZoneFilter]){
+    if(filtered.length){
+      accumMap.fitBounds(L.latLngBounds(filtered.map(p=>[p.lat,p.lng])),{padding:[26,26]});
+    }else{
+      accumMap.setView(ZONE_CENTERS[accumZoneFilter],13);
+    }
+  }else if(filtered.length){
+    accumMap.fitBounds(L.latLngBounds(filtered.map(p=>[p.lat,p.lng])),{padding:[26,26]});
+  }
+}
+
+// ── 마우스 호버 툴팁: 드래그/클릭 없이 그냥 지도 위에 커서를 올리면
+//    그 근처(HOVER_RADIUS_M 이내) 기록이 커서 옆에 바로 뜬다 ──
+let hoverPending=false, hoverPos=null, hoverLatLng=null;
+
+function wireHoverTooltip(){
+  const mapEl=document.getElementById('accum-map');
+  mapEl.addEventListener('mousemove',e=>{
+    const rect=mapEl.getBoundingClientRect();
+    hoverPos={x:e.clientX-rect.left,y:e.clientY-rect.top};
+    hoverLatLng=accumMap.containerPointToLatLng([hoverPos.x,hoverPos.y]);
+    if(!hoverPending){
+      hoverPending=true;
+      requestAnimationFrame(()=>{ hoverPending=false; updateAccumTooltip(); });
+    }
+  });
+  mapEl.addEventListener('mouseleave',hideAccumTooltip);
+}
+
+function hideAccumTooltip(){
+  const tip=document.getElementById('accum-tooltip');
+  if(tip) tip.style.display='none';
+  hoverLatLng=null;
+}
+
+function updateAccumTooltip(){
+  const tip=document.getElementById('accum-tooltip');
+  if(!hoverLatLng||!hoverPos){ tip.style.display='none'; return; }
+
+  const filtered=getFilteredAccumPoints();
+  const dateSet=new Set(); const zoneCount={}, vehicleCount={};
+  let total=0;
+  for(const p of filtered){
+    if(haversine(hoverLatLng.lat,hoverLatLng.lng,p.lat,p.lng)<=HOVER_RADIUS_M){
+      total++;
+      if(p.date) dateSet.add(p.date);
+      if(p.zone) zoneCount[p.zone]=(zoneCount[p.zone]||0)+1;
+      if(p.vehicle) vehicleCount[p.vehicle]=(vehicleCount[p.vehicle]||0)+1;
+    }
+  }
+  if(total===0){ tip.style.display='none'; return; }
+
+  const sortDesc=obj=>Object.entries(obj).sort((a,b)=>b[1]-a[1]);
+  const subParts=[`${total}개 지점`];
+  if(accumZoneFilter==='all'){
+    const zs=sortDesc(zoneCount).slice(0,2).map(([z])=>z);
+    if(zs.length) subParts.push(zs.join(', '));
+  }
+  const vs=sortDesc(vehicleCount).slice(0,2).map(([v])=>v);
+  if(vs.length) subParts.push(vs.join(', '));
+
+  tip.innerHTML=`<div class="at-days">${dateSet.size}일 지나감</div><div class="at-sub">${subParts.join(' · ')}</div>`;
+  tip.style.display='block';
+
+  // 커서 근처에 배치하되, 컨테이너 밖으로 나가지 않도록 위치 보정
+  const wrap=document.getElementById('accum-map-wrap');
+  const tw=tip.offsetWidth||160, th=tip.offsetHeight||50;
+  let x=hoverPos.x+16, y=hoverPos.y+16;
+  if(x+tw>wrap.clientWidth) x=hoverPos.x-tw-16;
+  if(y+th>wrap.clientHeight) y=hoverPos.y-th-16;
+  tip.style.left=Math.max(4,x)+'px';
+  tip.style.top=Math.max(4,y)+'px';
+}
+
+function renderCalendarGrid(){
+  document.getElementById('cal-title').textContent=
+    `${calMonth.getFullYear()}년 ${calMonth.getMonth()+1}월`;
+  const grid=document.getElementById('cal-grid');
+  grid.innerHTML='';
+  ['일','월','화','수','목','금','토'].forEach(d=>{
+    const el=document.createElement('div');
+    el.className='cal-dow'; el.textContent=d;
+    grid.appendChild(el);
+  });
+
+  const firstDay=new Date(calMonth.getFullYear(),calMonth.getMonth(),1);
+  const daysInMonth=new Date(calMonth.getFullYear(),calMonth.getMonth()+1,0).getDate();
+  const startWeekday=firstDay.getDay();
+  const todayStr=dstr(new Date());
+
+  for(let i=0;i<startWeekday;i++){
+    const el=document.createElement('div');
+    el.className='cal-cell empty';
+    grid.appendChild(el);
+  }
+  for(let day=1;day<=daysInMonth;day++){
+    const dateObj=new Date(calMonth.getFullYear(),calMonth.getMonth(),day);
+    const key=dstr(dateObj);
+    const dayPoints=(entriesByDate&&entriesByDate.get(key))||null;
+    const cell=document.createElement('div');
+    cell.className='cal-cell'+(dayPoints?' has-data':'')+(key===todayStr?' today':'');
+    const num=document.createElement('div');
+    num.className='cal-daynum'; num.textContent=day;
+    cell.appendChild(num);
+
+    if(dayPoints&&dayPoints.length){
+      const sum=summarizePoints(dayPoints);
+      const chips=document.createElement('div');
+      chips.className='cal-chips';
+      sum.zones.slice(0,2).forEach(([z])=>{
+        const c1=document.createElement('span');
+        c1.className='cal-chip zone'; c1.textContent=z;
+        chips.appendChild(c1);
+      });
+      sum.vehicles.slice(0,2).forEach(([v])=>{
+        const c2=document.createElement('span');
+        c2.className='cal-chip vehicle'; c2.textContent=v;
+        chips.appendChild(c2);
+      });
+      cell.appendChild(chips);
+      const cnt=document.createElement('div');
+      cnt.className='cal-count'; cnt.textContent=`${dayPoints.length}개 지점`;
+      cell.appendChild(cnt);
+      cell.onclick=()=>openDayDetail(key);
+    }
+    grid.appendChild(cell);
+  }
+}
+
+function openDayDetail(dateKey){
+  const dayPoints=(entriesByDate&&entriesByDate.get(dateKey))||[];
+  const sorted=[...dayPoints].sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+  if(!sorted.length){
+    showError(`${dateKey} 기록에는 지도에 표시할 GPS 좌표가 없어요.`);
+    return;
+  }
+  points=sorted;
+  currentSource='day';
+  document.getElementById('chip-label').textContent='선택한 날짜:';
+  document.getElementById('chip-filename').textContent=dateKey+(isSampleMode?' (샘플)':'');
+  document.getElementById('back-btn').textContent='← 달력으로';
+  document.getElementById('back-btn').onclick=()=>switchTab('calendar');
+  renderDaySummary(summarizePoints(sorted));
+  renderConsole();
+}
+
+function renderDaySummary(sum){
+  const el=document.getElementById('day-summary');
+  const zoneChips=sum.zones.length
+    ? sum.zones.map(([z])=>`<span class="ds-chip zone">${z}</span>`).join(' ')
+    : '<span style="color:var(--text-faint);font-size:11px;">구역 정보 없음(이전 버전 기록)</span>';
+  const vehicleChips=sum.vehicles.length
+    ? sum.vehicles.map(([v])=>`<span class="ds-chip vehicle">${v}</span>`).join(' ')
+    : '<span style="color:var(--text-faint);font-size:11px;">차량 정보 없음</span>';
+  el.innerHTML=`
+    <div class="ds-title">일자 요약</div>
+    <div class="ds-row"><span class="ds-label">운행 시간</span><span class="mono" style="font-size:12px;">${sum.startTime||'—'} → ${sum.endTime||'—'}</span></div>
+    <div class="ds-row"><span class="ds-label">구역</span>${zoneChips}</div>
+    <div class="ds-row"><span class="ds-label">차량</span>${vehicleChips}</div>
+  `;
+  el.style.display='block';
+}
+
+// ══════════════════════════════════════════════════════════
+//  샘플 데이터 미리보기 — 파일이 아직 없어도 달력·지도·테이프
+//  스크러버가 실제로 어떻게 보이는지 바로 확인할 수 있게 생성
+// ══════════════════════════════════════════════════════════
+function buildSampleData(){
+  const today=new Date();
+  const plans=[ // [일수 전, 구역, 차량, 시작시각(시,분), 지점수]
+    [0,'강남','2호차',9,20],
+    [1,'판교','1호차',13,26],
+    [2,'시흥','4호차',8,18],
+    [4,'강남','3호차',10,15],
+  ];
+  const out=new Map();
+  plans.forEach(([daysAgo,zone,vehicle,startHour,n])=>{
+    const d=new Date(today); d.setDate(d.getDate()-daysAgo);
+    const dateKey=dstr(d);
+    const center=ZONE_CENTERS[zone];
+    const dayPoints=[];
+    let lat=center[0], lng=center[1], t=startHour*3600;
+    for(let i=0;i<n;i++){
+      // 임의의 방향으로 조금씩 이동시켜 그럴듯한 경로 모양 생성
+      const angle=(i*47)%360*Math.PI/180;
+      lat+=Math.cos(angle)*0.0016; lng+=Math.sin(angle)*0.0016;
+      t+=30;
+      const hh=String(Math.floor(t/3600)%24).padStart(2,'0');
+      const mm=String(Math.floor(t/60)%60).padStart(2,'0');
+      const ss=String(t%60).padStart(2,'0');
+      dayPoints.push({
+        lat,lng,date:dateKey,time:`${hh}:${mm}:${ss}`,
+        place:zone+' 인근', road:i%3===0?'도심':'자동차전용',
+        speed:(15+Math.random()*20).toFixed(1),
+        zone, vehicle,
+      });
+    }
+    out.set(dateKey,dayPoints);
+  });
+  return out;
+}
+
+function loadSampleData(){
+  clearError();
+  entriesByDate=buildSampleData();
+  isSampleMode=true;
+  showCalendar();
+}
+
+// ── 드래그앤드롭 / 파일 선택 (여러 개 동시 선택 지원) ──────
+const dz=document.getElementById('dropzone');
+const fileInput=document.getElementById('file-input');
+['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag');}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag');}));
+dz.addEventListener('drop',e=>{
+  const files=e.dataTransfer.files;
+  if(files&&files.length) handleFiles(files);
+});
+fileInput.addEventListener('change',e=>{
+  const files=e.target.files;
+  if(files&&files.length) handleFiles(files);
+});
+
+function showError(msg){
+  const box=document.getElementById('error-box');
+  box.textContent=msg; box.style.display='block';
+}
+function clearError(){ document.getElementById('error-box').style.display='none'; }
+
+function readWorkbook(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      try{
+        const data=new Uint8Array(e.target.result);
+        const wb=XLSX.read(data,{type:'array'});
+        resolve(parseRouteWorkbook(wb));
+      }catch(err){ reject(err); }
+    };
+    reader.onerror=()=>reject(new Error('파일을 읽지 못했어요.'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+async function handleFiles(fileList){
+  clearError();
+  const files=Array.from(fileList);
+  // 파일을 새로 선택할 때마다 이전에 불러온 데이터는 지우고 새로 시작한다.
+  entriesByDate=new Map();
+  isSampleMode=false;
+  let failCount=0;
+  for(const file of files){
+    try{
+      const parsed=await readWorkbook(file);
+      if(!parsed.length){ failCount++; continue; }
+      parsed.forEach(p=>{
+        const key=p.date||'날짜미상';
+        if(!entriesByDate.has(key)) entriesByDate.set(key,[]);
+        entriesByDate.get(key).push(p);
+      });
+    }catch(err){
+      console.warn('[경로뷰어] 파싱 실패:',file.name,err);
+      failCount++;
+    }
+  }
+  if(entriesByDate.size===0){
+    showError(files.length>1
+      ? '선택한 파일들에서 GPS 좌표를 찾지 못했어요. nav-app "오늘 기록 다운로드"로 받은 파일이 맞는지 확인해주세요.'
+      : '파일에서 GPS 좌표를 찾지 못했어요. nav-app "오늘 기록 다운로드"로 받은 파일이 맞는지 확인해주세요.');
+    return;
+  }
+  if(failCount>0){
+    showError(`${failCount}개 파일은 읽지 못해 건너뛰었어요. (.xlsx/.csv 형식인지, GPS위치 열이 있는지 확인해주세요)`);
+  }
+  showCalendar();
+}
+
+// ── 워크북 파싱 (nav-app downloadTodayLogExcel 포맷 역파싱) ──
+function parseRouteWorkbook(wb){
+  const sheet=wb.Sheets[wb.SheetNames[0]];
+  if(!sheet) return [];
+  const rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:''});
+  if(!rows.length) return [];
+
+  let headerIdx=-1, colGps=-1, colTime=-1, colDate=-1, colPlace=-1, colSpeed=-1, colRoad=-1, colZone=-1, colVehicle=-1;
+  for(let i=0;i<Math.min(rows.length,10);i++){
+    const idx=rows[i].findIndex(c=>String(c).trim()==='GPS위치');
+    if(idx>=0){
+      headerIdx=i; colGps=idx;
+      colTime   =rows[i].findIndex(c=>String(c).trim()==='시각');
+      colDate   =rows[i].findIndex(c=>String(c).trim()==='날짜');
+      colPlace  =rows[i].findIndex(c=>String(c).trim()==='장소');
+      colRoad   =rows[i].findIndex(c=>String(c).trim()==='도로종류');
+      colSpeed  =rows[i].findIndex(c=>String(c).trim().startsWith('차량속도'));
+      colZone   =rows[i].findIndex(c=>String(c).trim()==='구역');
+      colVehicle=rows[i].findIndex(c=>String(c).trim()==='차량');
+      break;
+    }
+  }
+  if(headerIdx<0) return [];
+
+  const out=[];
+  for(let i=headerIdx+1;i<rows.length;i++){
+    const r=rows[i];
+    if(!r||!r.length) continue;
+    const raw=String(r[colGps]||'').trim();
+    const m=raw.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+    if(!m) continue;
+    const lat=parseFloat(m[1]), lng=parseFloat(m[2]);
+    if(!isFinite(lat)||!isFinite(lng)) continue;
+    const zoneVal=colZone>=0?String(r[colZone]||'').trim():'';
+    const vehicleVal=colVehicle>=0?String(r[colVehicle]||'').trim():'';
+    out.push({
+      lat,lng,
+      date:colDate>=0?String(r[colDate]||''):'',
+      time:colTime>=0?String(r[colTime]||''):'',
+      place:colPlace>=0?String(r[colPlace]||''):'',
+      road:colRoad>=0?String(r[colRoad]||''):'',
+      speed:colSpeed>=0?String(r[colSpeed]||''):'',
+      zone:(zoneVal&&zoneVal!=='—')?zoneVal:'',
+      vehicle:(vehicleVal&&vehicleVal!=='—')?vehicleVal:'',
+    });
+  }
+  return out;
+}
+
+// ── 콘솔(로드 후 화면) 구성 ────────────────────────────
+function renderConsole(){
+  document.getElementById('dropzone').style.display='none';
+  document.getElementById('calendar-view').style.display='none';
+  document.getElementById('console').style.display='flex';
+  initMap();
+  setTimeout(()=>map.invalidateSize(),60);
+
+  routeLayer.clearLayers();
+  const latlngs=points.map(p=>[p.lat,p.lng]);
+  L.polyline(latlngs,{color:'#4fd8c7',weight:4,opacity:.85}).addTo(routeLayer);
+
+  const start=points[0], end=points[points.length-1];
+  L.circleMarker([start.lat,start.lng],{radius:8,color:'#5fd88a',fillColor:'#5fd88a',fillOpacity:1,weight:2})
+    .bindPopup(`시작 · ${start.time||'—'}${start.place?('<br/>'+start.place):''}`).addTo(routeLayer);
+  L.circleMarker([end.lat,end.lng],{radius:8,color:'#ff6b6b',fillColor:'#ff6b6b',fillOpacity:1,weight:2})
+    .bindPopup(`종료 · ${end.time||'—'}${end.place?('<br/>'+end.place):''}`).addTo(routeLayer);
+
+  playheadMarker=L.marker([start.lat,start.lng],{
+    icon:L.divIcon({className:'playhead-icon',iconSize:[16,16]})
+  }).addTo(routeLayer);
+
+  map.fitBounds(L.latLngBounds(latlngs),{padding:[26,26]});
+
+  // 통계
+  let distM=0;
+  for(let i=1;i<points.length;i++) distM+=haversine(points[i-1].lat,points[i-1].lng,points[i].lat,points[i].lng);
+  document.getElementById('stat-date').textContent=start.date||'—';
+  document.getElementById('stat-range').innerHTML=(start.time&&end.time)?`${start.time}<small> → </small>${end.time}`:'—';
+  document.getElementById('stat-points').textContent=points.length+'개';
+  document.getElementById('stat-dist').innerHTML=(distM/1000).toFixed(2)+'<small> km</small>';
+
+  // 테이프(스크러버) 설정
+  const tape=document.getElementById('tape');
+  tape.min=0; tape.max=points.length-1; tape.value=0;
+  tape.oninput=()=>setTapeIndex(parseInt(tape.value,10));
+  document.getElementById('tape-start-lbl').textContent=start.time||'--:--:--';
+  document.getElementById('tape-end-lbl').textContent=end.time||'--:--:--';
+  setTapeIndex(0);
+}
+
+function setTapeIndex(idx){
+  if(!points.length) return;
+  idx=Math.max(0,Math.min(points.length-1,idx));
+  const p=points[idx];
+  document.getElementById('tape').value=idx;
+  const pct=points.length>1?(idx/(points.length-1)*100):0;
+  document.getElementById('tape').style.setProperty('--pct',pct+'%');
+  document.getElementById('tape-time').textContent=p.time||'--:--:--';
+  document.getElementById('tape-place').textContent=p.place||'—';
+  document.getElementById('tape-speed').textContent=p.speed?(p.speed+' km/h'):'—';
+  document.getElementById('tape-road').textContent=p.road||'—';
+  document.getElementById('tape-idx').textContent=`${idx+1} / ${points.length}`;
+  if(playheadMarker) playheadMarker.setLatLng([p.lat,p.lng]);
+  if(map && !map._tapePanning){
+    map.panTo([p.lat,p.lng],{animate:true,duration:.25});
+  }
+}
+
+function stepTape(delta){
+  const tape=document.getElementById('tape');
+  setTapeIndex(parseInt(tape.value,10)+delta);
+}
+
+const PLAY_BASE_MS=180;
+let playSpeed=1;
+
+function setPlaySpeed(mult){
+  playSpeed=mult;
+  document.querySelectorAll('.speed-btn').forEach(b=>{
+    b.classList.toggle('active',parseFloat(b.dataset.speed)===mult);
+  });
+  if(playTimer){ clearInterval(playTimer); startPlayInterval(); }
+}
+
+function startPlayInterval(){
+  playTimer=setInterval(()=>{
+    const tape=document.getElementById('tape');
+    let idx=parseInt(tape.value,10)+1;
+    if(idx>points.length-1){ clearInterval(playTimer); playTimer=null; document.getElementById('play-btn').textContent='▶'; return; }
+    setTapeIndex(idx);
+  },PLAY_BASE_MS/playSpeed);
+}
+
+function togglePlay(){
+  const btn=document.getElementById('play-btn');
+  if(playTimer){
+    clearInterval(playTimer); playTimer=null; btn.textContent='▶';
+    return;
+  }
+  btn.textContent='⏸';
+  startPlayInterval();
+}
+
+function resetViewer(){
+  points=[];
+  currentSource=null;
+  entriesByDate=null;
+  isSampleMode=false;
+  if(playTimer){ clearInterval(playTimer); playTimer=null; }
+  document.getElementById('play-btn').textContent='▶';
+  fileInput.value='';
+  switchTab('upload');
+}
+
+// ── 시작 화면: 파일 불러오기 탭 기본 노출 ───────────────
+switchTab('upload');
+</script>
+</body>
+</html>
