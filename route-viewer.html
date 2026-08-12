@@ -50,13 +50,9 @@ header{
 .brand{display:flex;align-items:center;gap:11px;}
 .brand-mark{
   width:30px;height:30px;border-radius:7px;flex:none;
-  background:radial-gradient(circle at 35% 30%, var(--teal), var(--teal-dim) 70%);
-  position:relative;
-  box-shadow:0 0 0 1px var(--line), inset 0 0 8px rgba(0,0,0,.35);
-}
-.brand-mark::after{
-  content:'';position:absolute;inset:9px;border-radius:50%;
-  border:2px solid rgba(10,14,22,.55);
+  background:var(--bg);border:1.5px solid var(--teal);
+  position:relative;display:flex;align-items:center;justify-content:center;
+  font-size:15px;
 }
 .brand-title{font-size:15px;font-weight:700;letter-spacing:.2px;}
 .brand-sub{font-size:10.5px;color:var(--text-dim);letter-spacing:.4px;margin-top:1px;}
@@ -71,13 +67,15 @@ header{
 main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1180px;width:100%;margin:0 auto;}
 
 /* ── 모드 탭 ─────────────────────────────────────────── */
-#mode-tabs{display:flex;gap:6px;}
+#mode-tabs{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
 .mode-tab{
   border:1px solid var(--line);background:var(--panel);color:var(--text-dim);
   border-radius:6px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;
 }
 .mode-tab.active{color:var(--bg);background:var(--teal);border-color:var(--teal);}
 .mode-tab:not(.active):hover{color:var(--text);border-color:var(--text-faint);}
+.mode-tab.ghost-tab{color:var(--text-dim);}
+.mode-tab.ghost-tab:hover{color:var(--amber);border-color:var(--amber);}
 
 /* ── 달력 ───────────────────────────────────────────── */
 #calendar-view{display:none;flex-direction:column;gap:14px;}
@@ -295,19 +293,84 @@ input#tape::-moz-range-thumb{
 .speed-btn.active{color:var(--bg);background:var(--amber);border-color:var(--amber);}
 
 footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
+#version-badge{
+  position:fixed;left:14px;bottom:12px;z-index:10;pointer-events:none;
+  font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);
+  letter-spacing:.3px;opacity:.7;
+}
+
+/* ── 로그인 화면 ────────────────────────────────────── */
+#login-screen{
+  position:fixed;inset:0;z-index:5000;background:var(--bg);
+  display:flex;align-items:center;justify-content:center;padding:20px;
+  background-image:
+    linear-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size:34px 34px;
+}
+#login-screen.hidden{display:none;}
+#login-box{
+  width:min(360px,100%);background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;padding:32px 28px;text-align:center;box-shadow:0 16px 50px rgba(0,0,0,.5);
+}
+#login-mark{
+  width:52px;height:52px;margin:0 auto 16px;border-radius:12px;
+  background:var(--bg);border:1.5px solid var(--teal);
+  display:flex;align-items:center;justify-content:center;font-size:26px;
+}
+#login-title{font-size:16px;font-weight:700;margin-bottom:6px;}
+#login-sub{font-size:12px;color:var(--text-dim);margin-bottom:20px;line-height:1.6;}
+#login-name-input{
+  width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+  border-radius:6px;padding:11px 13px;font-size:13.5px;font-family:inherit;outline:none;
+  box-sizing:border-box;margin-bottom:12px;text-align:center;
+}
+#login-name-input:focus{border-color:var(--teal);}
+#login-name-input::placeholder{color:var(--text-faint);}
+#login-submit{
+  width:100%;border:none;border-radius:6px;padding:11px;font-size:13px;font-weight:700;
+  cursor:pointer;font-family:inherit;background:var(--teal);color:#08221e;
+}
+#login-submit:disabled{background:var(--line);color:var(--text-faint);cursor:not-allowed;}
+#login-error{
+  display:none;margin-top:10px;font-size:11.5px;color:#ffb4b4;
+  background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.35);
+  border-radius:6px;padding:8px 10px;line-height:1.5;
+}
+#login-hint{margin-top:14px;font-size:10.5px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
+.user-badge{
+  display:flex;align-items:center;gap:6px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-dim);
+  border:1px solid var(--line);background:var(--panel);border-radius:5px;padding:5px 10px;cursor:pointer;
+}
+.user-badge:hover{color:var(--text);border-color:var(--text-faint);}
+.user-badge b{color:var(--teal);font-weight:700;}
 </style>
 </head>
 <body>
 
+<div id="login-screen">
+  <div id="login-box">
+    <div id="login-mark">🐑</div>
+    <div id="login-title">경로 뷰어</div>
+    <div id="login-sub">이름을 입력하고 시작하세요<br/>확인 목적으로만 표시돼요 · 서버에 저장되지 않아요</div>
+    <input type="text" id="login-name-input" placeholder="이름을 입력하세요" autocomplete="off" maxlength="20"/>
+    <button id="login-submit" onclick="submitLogin()" disabled>입장하기</button>
+    <div id="login-error"></div>
+    <div id="login-hint">이 브라우저 탭을 닫으면 다시 물어봐요</div>
+  </div>
+</div>
+
 <header>
   <div class="brand">
-    <div class="brand-mark"></div>
+    <div class="brand-mark">🐑</div>
     <div>
       <div class="brand-title">경로 뷰어</div>
       <div class="brand-sub">GPS TRACE REPLAY · INTERNAL TOOL</div>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
+    <span class="user-badge" id="user-badge" onclick="showLoginScreen()" title="클릭하면 이름을 바꿀 수 있어요">👤 <b id="user-badge-name">—</b></span>
     <span class="badge">ADMIN ONLY</span>
     <span class="clock" id="clock">--:--:--</span>
   </div>
@@ -315,9 +378,13 @@ footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--tex
 
 <main>
   <div id="mode-tabs">
-    <button class="mode-tab" id="tab-upload" onclick="switchTab('upload')">📂 파일 불러오기</button>
-    <button class="mode-tab" id="tab-calendar" onclick="switchTab('calendar')">📅 달력에서 보기</button>
-    <button class="mode-tab" id="tab-accum" onclick="switchTab('accum')">🗺 누적 지도</button>
+    <button class="mode-tab" id="tab-upload" onclick="switchTab('upload')">파일 불러오기</button>
+    <button class="mode-tab" id="tab-calendar" onclick="switchTab('calendar')">달력</button>
+    <button class="mode-tab" id="tab-accum" onclick="switchTab('accum')">누적 지도</button>
+    <span style="flex:1;"></span>
+    <button class="mode-tab ghost-tab" onclick="exportBackup()" title="지금까지 쌓인 달력·누적 지도 데이터를 파일 하나로 저장">백업 저장</button>
+    <button class="mode-tab ghost-tab" onclick="document.getElementById('backup-input').click()" title="백업 파일을 불러와 복구">백업 복구</button>
+    <input type="file" id="backup-input" accept=".json" style="display:none" onchange="handleBackupImport(event)"/>
   </div>
 
   <div id="dropzone" onclick="document.getElementById('file-input').click()">
@@ -411,16 +478,105 @@ footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--tex
 </main>
 
 <footer>route-viewer · nav-app 주행기록 전용 리플레이 도구 · 백엔드 연동 없음, 로컬 파일만 읽습니다</footer>
+<div id="version-badge"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
+// ── 버전 표시 ────────────────────────────────────────
+// 기능을 추가/수정할 때마다 이 값만 올려주면 화면 좌측 하단에 반영됨
+const APP_VERSION='v1.0.0';
+document.getElementById('version-badge').textContent=APP_VERSION;
+
 // ── 실시간 시계 ───────────────────────────────────────
 function tickClock(){
   const n=new Date(),p=x=>String(x).padStart(2,'0');
   document.getElementById('clock').textContent=`${p(n.getHours())}:${p(n.getMinutes())}:${p(n.getSeconds())}`;
 }
 tickClock(); setInterval(tickClock,1000);
+
+// ══════════════════════════════════════════════════════════
+//  로그인 — 이름 확인용. 서버 인증이 아니라 "지금 이 세션은 누가
+//  보고 있는지" 표시하기 위한 용도. sessionStorage에만 저장되며
+//  탭을 닫으면 사라진다 (nav-app 로그인과 동일한 성격/저장 방식).
+// ══════════════════════════════════════════════════════════
+const LOGIN_KEY='route_viewer_user';
+
+// ⚠️ 이 목록에 있는 이름만 경로 뷰어를 볼 수 있어요.
+// 파일 안의 값이라 완전한 보안은 아니고(개발자도구로 우회 가능), 팀 내부에서
+// "아무나 못 열게" 하는 용도의 가벼운 출입 명단이에요. 필요하면 이 배열만 수정하면 됩니다.
+const ALLOWED_USERS=['양은규','최수헌'];
+
+function isAllowedUser(name){
+  const norm=n=>n.trim().toLowerCase();
+  return ALLOWED_USERS.some(u=>norm(u)===norm(name));
+}
+
+function initLogin(){
+  let saved='';
+  try{ saved=sessionStorage.getItem(LOGIN_KEY)||''; }catch(_){}
+  if(saved&&isAllowedUser(saved)){
+    applyLoggedInUser(saved);
+    hideLoginScreen();
+  }else{
+    if(saved){ try{ sessionStorage.removeItem(LOGIN_KEY); }catch(_){} }
+    showLoginScreen();
+  }
+}
+
+function showLoginScreen(){
+  const input=document.getElementById('login-name-input');
+  let saved='';
+  try{ saved=sessionStorage.getItem(LOGIN_KEY)||''; }catch(_){}
+  input.value=saved;
+  hideLoginError();
+  updateLoginButton();
+  document.getElementById('login-screen').classList.remove('hidden');
+  setTimeout(()=>input.focus(),80);
+}
+
+function hideLoginScreen(){
+  document.getElementById('login-screen').classList.add('hidden');
+}
+
+function showLoginError(msg){
+  const el=document.getElementById('login-error');
+  el.textContent=msg; el.style.display='block';
+}
+function hideLoginError(){
+  document.getElementById('login-error').style.display='none';
+}
+
+function updateLoginButton(){
+  const name=document.getElementById('login-name-input').value.trim();
+  document.getElementById('login-submit').disabled=!name;
+}
+
+function submitLogin(){
+  const name=document.getElementById('login-name-input').value.trim();
+  if(!name) return;
+  if(!isAllowedUser(name)){
+    showLoginError('등록되지 않은 이름이에요. 접근 권한이 있는 이름인지 확인해주세요.');
+    return;
+  }
+  hideLoginError();
+  try{ sessionStorage.setItem(LOGIN_KEY,name); }catch(_){}
+  applyLoggedInUser(name);
+  hideLoginScreen();
+}
+
+function applyLoggedInUser(name){
+  document.getElementById('user-badge-name').textContent=name;
+}
+
+document.getElementById('login-name-input').addEventListener('input',()=>{
+  updateLoginButton();
+  hideLoginError();
+});
+document.getElementById('login-name-input').addEventListener('keydown',e=>{
+  if(e.key==='Enter') submitLogin();
+});
+initLogin();
 
 // ── 지도 ─────────────────────────────────────────────
 let map=null, routeLayer=null, playheadMarker=null, points=[];
@@ -513,7 +669,7 @@ function updateCalStatus(){
   const el=document.getElementById('cal-status');
   if(!entriesByDate||entriesByDate.size===0){
     el.style.display='block';
-    el.innerHTML='아직 불러온 기록이 없어요. <b>"📂 파일 불러오기"</b> 탭에서 파일을 선택하거나, 그 탭의 <b>"🎲 샘플 데이터로 미리보기"</b>를 눌러보세요.';
+    el.innerHTML='아직 불러온 기록이 없어요. <b>"파일 불러오기"</b> 탭에서 파일을 선택하거나, 그 탭의 <b>"🎲 샘플 데이터로 미리보기"</b>를 눌러보세요.';
   }else if(isSampleMode){
     el.style.display='block';
     el.innerHTML='🎲 지금 보고 계신 건 <b>샘플 데이터</b>예요. 실제 파일을 불러오면 이 자리에 그대로 실제 기록이 표시돼요.';
@@ -838,6 +994,64 @@ function loadSampleData(){
   entriesByDate=buildSampleData();
   isSampleMode=true;
   showCalendar();
+}
+
+// ══════════════════════════════════════════════════════════
+//  백업 저장 / 복구 — 지금까지 불러온 모든 날짜의 기록(달력·누적 지도가
+//  보고 있는 데이터 그대로)을 JSON 파일 하나로 내보내고, 나중에 그
+//  파일을 다시 불러오면 원본 엑셀 파일들을 다시 모을 필요 없이
+//  한 번에 복구된다.
+// ══════════════════════════════════════════════════════════
+function exportBackup(){
+  if(!entriesByDate||entriesByDate.size===0){
+    alert('백업할 데이터가 없어요. 먼저 "📂 파일 불러오기"에서 기록을 불러오거나 샘플 데이터를 확인해보세요.');
+    return;
+  }
+  const backup={
+    type:'route-viewer-backup',
+    version:1,
+    exportedAt:new Date().toISOString(),
+    dateCount:entriesByDate.size,
+    data:Object.fromEntries(entriesByDate),
+  };
+  const json=JSON.stringify(backup);
+  const blob=new Blob([json],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  const today=dstr(new Date());
+  a.href=url; a.download=`route-viewer-backup_${today}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+function handleBackupImport(evt){
+  const file=evt.target.files&&evt.target.files[0];
+  if(!file) return;
+  clearError();
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const parsed=JSON.parse(e.target.result);
+      if(!parsed||parsed.type!=='route-viewer-backup'||!parsed.data||typeof parsed.data!=='object'){
+        showError('백업 파일 형식이 아니에요. "💾 백업 저장"으로 받은 .json 파일인지 확인해주세요.');
+        return;
+      }
+      const restored=new Map(Object.entries(parsed.data));
+      if(restored.size===0){
+        showError('백업 파일에 복구할 기록이 없어요.');
+        return;
+      }
+      entriesByDate=restored;
+      isSampleMode=false;
+      showCalendar();
+    }catch(err){
+      console.warn('[경로뷰어] 백업 복구 실패:',err);
+      showError('백업 파일을 읽지 못했어요. 파일이 손상되지 않았는지 확인해주세요.');
+    }
+  };
+  reader.onerror=()=>showError('백업 파일을 읽지 못했어요.');
+  reader.readAsText(file);
+  evt.target.value='';
 }
 
 // ── 드래그앤드롭 / 파일 선택 (여러 개 동시 선택 지원) ──────
