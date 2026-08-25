@@ -76,6 +76,11 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
 .mode-tab:not(.active):hover{color:var(--text);border-color:var(--text-faint);}
 .mode-tab.ghost-tab{color:var(--text-dim);}
 .mode-tab.ghost-tab:hover{color:var(--amber);border-color:var(--amber);}
+.backup-status{
+  font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);
+  border:1px solid var(--line);background:var(--panel);border-radius:5px;padding:6px 9px;
+  white-space:nowrap;
+}
 
 /* ── 달력 ───────────────────────────────────────────── */
 #calendar-view{display:none;flex-direction:column;gap:14px;}
@@ -191,6 +196,7 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
 }
 .zone-btn.active{color:var(--bg);background:var(--teal);border-color:var(--teal);}
 .zone-btn:not(.active):hover{color:var(--text);border-color:var(--text-faint);}
+.btn:disabled{opacity:.45;cursor:not-allowed;}
 
 /* 마우스 호버 툴팁 — 지도 위 커서 근처에 즉석으로 뜸 */
 #accum-tooltip{
@@ -213,9 +219,15 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
   display:none;grid-template-columns:repeat(4,1fr);gap:1px;
   background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;
 }
-#stats-zone-filter-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
-#dist-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-@media (max-width:640px){#dist-grid{grid-template-columns:1fr;}}
+#stats-type-tabs,#stats-zone-filter-group,#stats-vehicle-filter-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+#region-stats-panel,#vehicle-stats-panel{display:none;flex-direction:column;gap:14px;}
+#region-stats-panel.active,#vehicle-stats-panel.active{display:flex;}
+#dist-grid,#vehicle-dist-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.stats-section-title{
+  font-size:12px;font-weight:700;color:var(--text-dim);letter-spacing:.4px;
+  padding-top:2px;
+}
+@media (max-width:640px){#dist-grid,#vehicle-dist-grid{grid-template-columns:1fr;}}
 .dist-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;}
 .dist-card .dc-title{
   font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--text-faint);
@@ -224,7 +236,7 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
 .dist-card .dc-empty{font-size:11.5px;color:var(--text-faint);}
 .dist-row{display:flex;align-items:center;gap:9px;margin-bottom:8px;}
 .dist-row:last-child{margin-bottom:0;}
-.dist-label{width:56px;flex:none;font-size:11px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.dist-label{width:78px;flex:none;font-size:11px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .dist-bar-wrap{flex:1;height:9px;background:var(--panel-2);border-radius:4px;overflow:hidden;}
 .dist-bar{display:block;height:100%;background:var(--teal);border-radius:4px;}
 .dist-count{width:64px;flex:none;text-align:right;font-size:10px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;}
@@ -442,6 +454,7 @@ footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--tex
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
     <span class="user-badge" id="user-badge" onclick="showLoginScreen()" title="클릭하면 이름을 바꿀 수 있어요">👤 <b id="user-badge-name">—</b></span>
+    <span class="badge" id="storage-badge" title="현재 저장 위치">LOCAL</span>
     <span class="badge">ADMIN ONLY</span>
     <span class="clock" id="clock">--:--:--</span>
   </div>
@@ -456,6 +469,7 @@ footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--tex
     <span style="flex:1;"></span>
     <button class="mode-tab ghost-tab" onclick="exportBackup()" title="지금까지 쌓인 달력·누적 지도 데이터를 파일 하나로 저장">백업 저장</button>
     <button class="mode-tab ghost-tab" onclick="document.getElementById('backup-input').click()" title="백업 파일을 불러와 복구">백업 복구</button>
+    <span class="backup-status" id="backup-status" title="최근 백업 기록">백업 기록: 없음</span>
     <input type="file" id="backup-input" accept=".json" style="display:none" onchange="handleBackupImport(event)"/>
   </div>
 
@@ -516,13 +530,31 @@ footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--tex
   <div id="stats-view">
     <div id="stats-status"></div>
     <div id="stats-summary"></div>
-    <div id="stats-zone-filter-group">
-      <button class="zone-btn active" data-zone="all" onclick="setStatsZone('all')">전체</button>
-      <button class="zone-btn" data-zone="강남" onclick="setStatsZone('강남')">강남</button>
-      <button class="zone-btn" data-zone="판교" onclick="setStatsZone('판교')">판교</button>
-      <button class="zone-btn" data-zone="시흥" onclick="setStatsZone('시흥')">시흥</button>
+    <div id="stats-type-tabs">
+      <button class="zone-btn active" id="stats-type-region" onclick="setStatsMode('region')">지역별 통계</button>
+      <button class="zone-btn" id="stats-type-vehicle" onclick="setStatsMode('vehicle')">차량별 통계</button>
     </div>
-    <div id="dist-grid"></div>
+    <div id="region-stats-panel" class="active">
+      <div class="stats-section-title">지역별 통계</div>
+      <div id="stats-zone-filter-group">
+        <button class="zone-btn active" data-zone="all" onclick="setStatsZone('all')">전체</button>
+        <button class="zone-btn" data-zone="강남" onclick="setStatsZone('강남')">강남</button>
+        <button class="zone-btn" data-zone="판교" onclick="setStatsZone('판교')">판교</button>
+        <button class="zone-btn" data-zone="시흥" onclick="setStatsZone('시흥')">시흥</button>
+      </div>
+      <div id="dist-grid"></div>
+    </div>
+    <div id="vehicle-stats-panel">
+      <div class="stats-section-title">차량별 통계</div>
+      <div id="stats-vehicle-filter-group">
+        <button class="zone-btn active" data-vehicle="all" onclick="setStatsVehicle('all')">전체</button>
+        <button class="zone-btn" data-vehicle="토레스 1호" onclick="setStatsVehicle('토레스 1호')">토레스 1호</button>
+        <button class="zone-btn" data-vehicle="토레스 2호" onclick="setStatsVehicle('토레스 2호')">토레스 2호</button>
+        <button class="zone-btn" data-vehicle="토레스 3호" onclick="setStatsVehicle('토레스 3호')">토레스 3호</button>
+        <button class="zone-btn" data-vehicle="토레스 4호" onclick="setStatsVehicle('토레스 4호')">토레스 4호</button>
+      </div>
+      <div id="vehicle-dist-grid"></div>
+    </div>
   </div>
 
   <div id="error-box"></div>
@@ -575,7 +607,7 @@ footer{padding:14px 22px 22px;text-align:center;font-size:10.5px;color:var(--tex
   </div>
 </main>
 
-<footer>route-viewer · nav-app 주행기록 전용 리플레이 도구 · 백엔드 연동 없음, 로컬 파일만 읽습니다</footer>
+<footer>route-viewer · nav-app 주행기록 전용 리플레이 도구 · 서버 실행 시 공유 저장, 파일 직접 열기 시 브라우저 저장</footer>
 <div id="version-badge"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -680,6 +712,12 @@ initLogin();
 let map=null, routeLayer=null, playheadMarker=null, points=[];
 let playTimer=null;
 let currentSource=null; // 'file' | 'day'
+const VEHICLE_STORAGE_PLACE={
+  name:'차량 보관 장소',
+  address:'서울 강남구 테헤란로 207',
+  lat:37.50167609739,
+  lng:127.03873445954,
+};
 
 function initMap(){
   if(map) return;
@@ -688,6 +726,20 @@ function initMap(){
     subdomains:'abcd',maxZoom:20,attribution:'© OpenStreetMap © CARTO'
   }).addTo(map);
   routeLayer=L.layerGroup().addTo(map);
+}
+
+function addVehicleStorageMarker(targetMap,targetLayer){
+  if(!targetMap) return null;
+  const marker=L.circleMarker([VEHICLE_STORAGE_PLACE.lat,VEHICLE_STORAGE_PLACE.lng],{
+    radius:8,
+    color:'#ff6b6b',
+    fillColor:'#ff2f2f',
+    fillOpacity:.95,
+    weight:2,
+  }).bindPopup(`${VEHICLE_STORAGE_PLACE.name}<br/>${VEHICLE_STORAGE_PLACE.address}`);
+  marker.addTo(targetLayer||targetMap);
+  marker.bringToFront();
+  return marker;
 }
 
 // ── haversine 거리(m) ─────────────────────────────────
@@ -770,15 +822,143 @@ function renderQualityPanel(quality){
 //  파일에서 불러온 데이터를 날짜별로 모아 달력에 표시
 //  (여러 파일을 한 번에 선택하면 날짜별로 자동 그룹핑됨)
 //
-//  + 자동 저장: 불러온 데이터는 매번 localStorage에도 저장돼서,
-//    페이지를 닫았다가 다시 열어도 그대로 남아있다. 매번 백업
-//    저장/복구를 안 해도 되게 하려는 목적. (구역 경계와 같은 원리)
+//  + 자동 저장: 서버로 열면 공용 JSON에 저장해서 모두 같은 데이터를 보고,
+//    파일로 직접 열면 기존처럼 localStorage에 저장한다.
 // ══════════════════════════════════════════════════════════
 let entriesByDate=null; // Map<date, point[]>  (point = parseRouteWorkbook 한 줄 형식)
 let calMonth=new Date();
 const ENTRIES_STORAGE_KEY='route_viewer_entries_by_date';
+const SHARED_STORAGE_API=/^https?:$/.test(location.protocol)?'./api/route-data':'';
+const SHARED_WRITE_TOKEN_KEY='route_viewer_shared_write_token';
+const BACKUP_HISTORY_KEY='route_viewer_backup_history';
+let sharedStorageAvailable=false;
+let suppressSharedPersist=false;
 
-function persistEntries(){
+function setStorageBadge(text,title){
+  const el=document.getElementById('storage-badge');
+  if(!el) return;
+  el.textContent=text;
+  el.title=title||'현재 저장 위치';
+  const shared=text.includes('공유');
+  el.style.color=shared?'var(--teal)':'var(--amber)';
+  el.style.borderColor=shared?'rgba(79,216,199,.45)':'rgba(245,166,35,.4)';
+  el.style.background=shared?'rgba(79,216,199,.08)':'rgba(245,166,35,.08)';
+}
+
+function buildBackupPayload(){
+  return {
+    type:'route-viewer-backup',
+    version:2,
+    exportedAt:new Date().toISOString(),
+    dateCount:entriesByDate?entriesByDate.size:0,
+    data:entriesByDate?Object.fromEntries(entriesByDate):{},
+    zonePolygons:typeof ZONE_POLYGONS==='object'&&ZONE_POLYGONS?ZONE_POLYGONS:{},
+    backupHistory:getBackupHistory(),
+  };
+}
+
+function formatBackupTime(iso){
+  if(!iso) return '알 수 없음';
+  const d=new Date(iso);
+  if(isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString('ko-KR',{
+    year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit',
+    hour12:false,
+  });
+}
+
+function getBackupHistory(){
+  try{
+    const raw=localStorage.getItem(BACKUP_HISTORY_KEY);
+    const parsed=raw?JSON.parse(raw):[];
+    return normalizeBackupHistory(parsed);
+  }catch(_){
+    return [];
+  }
+}
+
+function normalizeBackupHistory(history){
+  const rows=Array.isArray(history)?history:[];
+  const seen=new Set();
+  return rows
+    .filter(h=>h&&h.at)
+    .map(h=>({
+      kind:String(h.kind||'백업 기록'),
+      at:String(h.at),
+      detail:String(h.detail||''),
+    }))
+    .filter(h=>{
+      const key=`${h.kind}|${h.at}|${h.detail}`;
+      if(seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a,b)=>(new Date(b.at).getTime()||0)-(new Date(a.at).getTime()||0))
+    .slice(0,10);
+}
+
+function setBackupHistory(history){
+  const normalized=normalizeBackupHistory(history);
+  try{ localStorage.setItem(BACKUP_HISTORY_KEY,JSON.stringify(normalized)); }catch(_){}
+  updateBackupStatus();
+}
+
+function mergeBackupHistory(history){
+  setBackupHistory([...(Array.isArray(history)?history:[]),...getBackupHistory()]);
+}
+
+function recordBackupHistory(kind,iso,detail,syncShared=true){
+  const entry={kind,at:iso||new Date().toISOString(),detail:detail||''};
+  mergeBackupHistory([entry]);
+  if(syncShared) persistSharedState('백업 기록');
+}
+
+function updateBackupStatus(){
+  const el=document.getElementById('backup-status');
+  if(!el) return;
+  const history=getBackupHistory();
+  if(!history.length){
+    el.textContent='백업 기록: 없음';
+    el.title='아직 백업 저장/복구 기록이 없어요';
+    return;
+  }
+  const latest=history[0];
+  el.textContent=`백업 기록: ${formatBackupTime(latest.at)}`;
+  el.title=history.map(h=>`${formatBackupTime(h.at)} · ${h.kind}${h.detail?' · '+h.detail:''}`).join('\n');
+}
+updateBackupStatus();
+
+function applyBackupPayload(parsed,opts={}){
+  if(!parsed||parsed.type!=='route-viewer-backup'||!parsed.data||typeof parsed.data!=='object'){
+    throw new Error('invalid backup payload');
+  }
+  const restored=new Map(Object.entries(parsed.data).filter(([,value])=>Array.isArray(value)));
+  if(restored.size===0) throw new Error('empty backup payload');
+  entriesByDate=restored;
+  if(Array.isArray(parsed.backupHistory)){
+    if(opts.replaceBackupHistory){
+      setBackupHistory(parsed.backupHistory);
+    }else{
+      mergeBackupHistory(parsed.backupHistory);
+    }
+  }else if(opts.replaceBackupHistory){
+    setBackupHistory([]);
+  }
+  if(parsed.zonePolygons&&typeof parsed.zonePolygons==='object'){
+    ZONE_POLYGONS={};
+    Object.keys(parsed.zonePolygons).forEach(zone=>{
+      if(Array.isArray(parsed.zonePolygons[zone])&&parsed.zonePolygons[zone].length>=3){
+        ZONE_POLYGONS[zone]=parsed.zonePolygons[zone];
+      }
+    });
+    suppressSharedPersist=true;
+    saveZonePolygonsToStorage();
+    suppressSharedPersist=false;
+  }
+}
+
+function persistEntriesToLocalStorage(){
   try{
     if(entriesByDate&&entriesByDate.size){
       localStorage.setItem(ENTRIES_STORAGE_KEY,JSON.stringify(Object.fromEntries(entriesByDate)));
@@ -791,6 +971,77 @@ function persistEntries(){
   }
 }
 
+function getSavedSharedWriteToken(){
+  try{ return sessionStorage.getItem(SHARED_WRITE_TOKEN_KEY)||''; }catch(_){ return ''; }
+}
+
+function askSharedWriteToken(){
+  const token=(prompt('공유 저장 암호를 입력하세요.')||'').trim();
+  if(token){
+    try{ sessionStorage.setItem(SHARED_WRITE_TOKEN_KEY,token); }catch(_){}
+  }
+  return token;
+}
+
+function clearSharedWriteToken(){
+  try{ sessionStorage.removeItem(SHARED_WRITE_TOKEN_KEY); }catch(_){}
+}
+
+async function persistSharedState(label,retryAfterAuth=true){
+  if(!SHARED_STORAGE_API||!entriesByDate||entriesByDate.size===0||suppressSharedPersist) return;
+  const headers={'Content-Type':'application/json'};
+  const token=getSavedSharedWriteToken();
+  if(token) headers['X-Route-Viewer-Token']=token;
+  try{
+    const res=await fetch(SHARED_STORAGE_API,{
+      method:'PUT',
+      headers,
+      body:JSON.stringify(buildBackupPayload()),
+    });
+    if(res.status===401&&retryAfterAuth){
+      clearSharedWriteToken();
+      if(askSharedWriteToken()) return persistSharedState(label,false);
+    }
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    sharedStorageAvailable=true;
+    setStorageBadge('공유 저장','서버 공용 저장소에 자동 저장 중');
+  }catch(err){
+    console.warn('[경로뷰어] 공유 저장 실패:',err);
+    setStorageBadge('내 브라우저','공유 저장 실패: 이 브라우저에만 저장됨');
+    showError(`${label||'데이터'}은 이 브라우저에는 저장됐지만 공유 서버 저장은 실패했어요. 서버를 node server.js로 실행 중인지 확인해주세요.`);
+  }
+}
+
+function persistEntries(){
+  persistEntriesToLocalStorage();
+  persistSharedState('주행 기록');
+}
+
+async function restoreEntriesFromSharedStorage(){
+  if(!SHARED_STORAGE_API){
+    setStorageBadge('내 브라우저','HTML 파일로 직접 열어서 localStorage에만 저장됨');
+    return false;
+  }
+  try{
+    const res=await fetch(SHARED_STORAGE_API,{cache:'no-store'});
+    if(res.status===404){
+      setStorageBadge('공유 대기','서버는 연결됐고 아직 저장된 공유 기록은 없음');
+      return false;
+    }
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const parsed=await res.json();
+    applyBackupPayload(parsed,{replaceBackupHistory:true});
+    persistEntriesToLocalStorage();
+    sharedStorageAvailable=true;
+    setStorageBadge('공유 저장','서버 공용 저장소에서 불러옴');
+    return true;
+  }catch(err){
+    console.warn('[경로뷰어] 공유 저장소 복원 실패:',err);
+    setStorageBadge('공유 실패','공유 저장소를 읽지 못함');
+    return false;
+  }
+}
+
 function restoreEntriesFromStorage(){
   try{
     const raw=localStorage.getItem(ENTRIES_STORAGE_KEY);
@@ -799,6 +1050,10 @@ function restoreEntriesFromStorage(){
     const map=new Map(Object.entries(obj));
     if(map.size===0) return false;
     entriesByDate=map;
+    if(!sharedStorageAvailable){
+      setStorageBadge(SHARED_STORAGE_API?'내 복사본':'내 브라우저',
+        SHARED_STORAGE_API?'서버에 공유 기록이 없어 이 브라우저 저장본을 표시 중':'localStorage에서 불러옴');
+    }
     return true;
   }catch(err){
     console.warn('[경로뷰어] 자동 저장된 데이터 복원 실패:',err);
@@ -838,8 +1093,7 @@ function calShiftMonth(delta){
 
 // ══════════════════════════════════════════════════════════
 //  모드 탭 (📅 달력에서 보기 / 📂 파일 불러오기)
-//  둘 다 로컬에서 불러온 파일 데이터(entriesByDate)만 사용 —
-//  서버·IndexedDB 연동 없음. 탭은 그 데이터를 보는 화면만 바꿔줌.
+//  탭은 현재 복원/불러오기된 데이터(entriesByDate)를 보는 화면만 바꿔줌.
 // ══════════════════════════════════════════════════════════
 function switchTab(tab){
   document.getElementById('tab-calendar').classList.toggle('active',tab==='calendar');
@@ -912,14 +1166,14 @@ function styleZoneButtons(containerId,zone){
 }
 const HOVER_MAX_DIST_M=90; // 커서가 셀 중심에서 이만큼(m) 이내일 때만 그 점의 정보를 보여줌
 
-let accumMap=null, accumDensityLayer=null, coverageLayer=null;
+let accumMap=null, accumDensityLayer=null, coverageLayer=null, vehicleStorageLayer=null;
 let showCoverageGaps=false;
-const GAP_CELL_SIZE_M=200; // 커버리지 격자 한 칸 크기
+const GAP_CELL_SIZE_M=50; // 커버리지 격자 한 칸 크기
 
 // ══════════════════════════════════════════════════════════
 //  구역 경계(섹터) — nav-app의 "섹터 그리기"와 같은 방식.
 //  원으로 근사하지 않고, 지도를 클릭해서 실제 모양대로 직접 그린다.
-//  그린 경계는 브라우저(localStorage)에 저장돼서 다음에 열어도 유지된다.
+//  그린 경계는 브라우저(localStorage)에 저장되고, 서버 모드에서는 공유 저장에도 포함된다.
 // ══════════════════════════════════════════════════════════
 let ZONE_POLYGONS={};
 const ZONE_POLYGON_STORAGE_KEY='route_viewer_zone_polygons';
@@ -938,6 +1192,7 @@ loadZonePolygonsFromStorage();
 
 function saveZonePolygonsToStorage(){
   try{ localStorage.setItem(ZONE_POLYGON_STORAGE_KEY,JSON.stringify(ZONE_POLYGONS)); }catch(_){}
+  persistSharedState('구역 경계');
 }
 
 // 레이 캐스팅으로 점이 다각형 안에 있는지 판정 (nav-app pointInPolygon과 동일한 로직)
@@ -957,11 +1212,23 @@ let boundaryDrawMode=false, boundaryDrawZone=null;
 let boundaryDraftPts=[], boundaryDraftLayer=null, boundaryDraftMarkers=[];
 
 function startBoundaryDraw(){
-  if(accumZoneFilter==='all') return;
+  if(accumZoneFilter==='all'){
+    const hintEl=document.getElementById('accum-hint');
+    if(hintEl) hintEl.textContent='커버리지 갭을 보려면 먼저 강남, 판교, 시흥 중 하나를 선택하세요.';
+    return;
+  }
+  initAccumMap();
   boundaryDrawMode=true;
   boundaryDrawZone=accumZoneFilter;
   boundaryDraftPts=[];
   clearBoundaryDraft();
+  coverageLayer.clearLayers();
+  accumDensityLayer.clearLayers();
+  accumCells=[];
+  if(ZONE_CENTERS[accumZoneFilter]){
+    accumMap.setView(ZONE_CENTERS[accumZoneFilter],13);
+  }
+  document.getElementById('accum-hint').textContent=`${accumZoneFilter} 경계를 그리는 중입니다. 지도 위를 클릭해서 꼭짓점을 찍고 완료를 누르세요.`;
   document.getElementById('boundary-draw-bar').classList.add('show');
 }
 
@@ -1037,9 +1304,9 @@ function updateBoundaryUI(){
   if(!btn) return;
   const noZone=accumZoneFilter==='all';
   const has=!noZone&&ZONE_POLYGONS[accumZoneFilter];
-  btn.textContent=noZone?'구역을 먼저 선택하세요':(has?`${accumZoneFilter} 경계 다시 그리기`:`${accumZoneFilter} 경계 그리기`);
+  btn.textContent=noZone?'강남/판교/시흥을 선택하세요':(has?`${accumZoneFilter} 경계 다시 그리기`:`${accumZoneFilter} 경계 그리기`);
   btn.disabled=noZone;
-  clearBtn.style.display=has?'inline-flex':'none';
+  if(clearBtn) clearBtn.style.display=has?'inline-flex':'none';
 }
 
 // 커버리지 갭 격자 칠하기 — insideTest(lat,lng)가 true인 칸 중,
@@ -1062,7 +1329,7 @@ function paintZoneGapGrid(allPoints,insideTest,minLat,maxLat,minLng,maxLng,refLa
       if(!insideTest(cellLat,cellLng)) continue;
       if(visited.has(la+'_'+lo)) continue;
       const bounds=[[la*latDeg,lo*lngDeg],[(la+1)*latDeg,(lo+1)*lngDeg]];
-      L.rectangle(bounds,{stroke:false,fillColor:'#ff6b6b',fillOpacity:.24}).addTo(coverageLayer);
+      L.rectangle(bounds,{stroke:false,fillColor:'#ff6b6b',fillOpacity:.24,interactive:false}).addTo(coverageLayer);
     }
   }
 }
@@ -1088,8 +1355,11 @@ function setAccumZone(zone){
   if(boundaryDrawMode) cancelBoundaryDraw();
   accumZoneFilter=zone;
   styleZoneButtons('zone-filter-group',zone);
-  if(showCoverageGaps) updateBoundaryUI();
+  updateBoundaryUI();
   renderAccumView();
+  if(showCoverageGaps&&zone!=='all'&&!ZONE_POLYGONS[zone]){
+    startBoundaryDraw();
+  }
 }
 
 function initAccumMap(){
@@ -1100,6 +1370,8 @@ function initAccumMap(){
   }).addTo(accumMap);
   accumDensityLayer=L.layerGroup().addTo(accumMap);
   coverageLayer=L.layerGroup().addTo(accumMap);
+  vehicleStorageLayer=L.layerGroup().addTo(accumMap);
+  addVehicleStorageMarker(accumMap,vehicleStorageLayer);
   wireHoverTooltip();
   accumMap.on('movestart zoomstart',hideAccumTooltip);
   accumMap.on('click',onBoundaryMapClick);
@@ -1117,6 +1389,9 @@ function toggleCoverageGaps(){
   if(!showCoverageGaps&&boundaryDrawMode) cancelBoundaryDraw();
   if(showCoverageGaps) updateBoundaryUI();
   renderAccumView();
+  if(showCoverageGaps&&accumZoneFilter!=='all'&&!ZONE_POLYGONS[accumZoneFilter]){
+    startBoundaryDraw();
+  }
 }
 
 // 구역 경계원(근사치) 없이, 직접 그린 다각형만으로 갭을 표시한다.
@@ -1132,7 +1407,9 @@ function renderCoverageGapLayer(){
     const color=ZONE_COLORS[zone]||'#4fd8c7';
     const poly=ZONE_POLYGONS[zone];
     L.polygon(poly,{color,weight:2,dashArray:'6 5',fill:false,opacity:.9})
-      .bindTooltip(`${zone} 운영 구역(직접 그린 경계)`,{sticky:true}).addTo(coverageLayer);
+      .bindTooltip(`${zone} 운영 구역(직접 그린 경계)`,{sticky:true})
+      .on('click',()=>setAccumZone(zone))
+      .addTo(coverageLayer);
     const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
     const minLat=Math.min(...lats), maxLat=Math.max(...lats);
     const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
@@ -1145,6 +1422,8 @@ function renderCoverageGapLayer(){
     hintEl.textContent=accumZoneFilter==='all'
       ? '아직 그린 구역 경계가 없어요. 위에서 구역을 선택하고 "경계 그리기"로 먼저 만들어보세요.'
       : `아직 ${accumZoneFilter} 구역 경계가 없어요. 위 "경계 그리기" 버튼으로 지도를 클릭해서 그려보세요.`;
+  }else{
+    hintEl.textContent='실선/점선 도형 = 직접 그린 구역 경계 · 빨간 칸 = 아직 한 번도 지나가지 않은 곳';
   }
 
   // 화면 맞춤
@@ -1167,6 +1446,9 @@ function renderAccumView(){
     statusEl.style.display='block';
     statusEl.innerHTML='아직 쌓인 기록이 없어요. <b>"파일 불러오기"</b> 탭에서 여러 날짜의 파일을 불러오면, 그동안 돌아다닌 곳이 전부 이 지도 위에 겹쳐 표시돼요.';
     statsEl.style.display='none';
+    initAccumMap();
+    setTimeout(()=>accumMap.invalidateSize(),60);
+    accumMap.setView([VEHICLE_STORAGE_PLACE.lat,VEHICLE_STORAGE_PLACE.lng],15);
     if(accumDensityLayer) accumDensityLayer.clearLayers();
     if(coverageLayer) coverageLayer.clearLayers();
     accumCells=[];
@@ -1306,11 +1588,20 @@ function updateAccumTooltip(){
 }
 
 // ══════════════════════════════════════════════════════════
-//  통계 — 지금까지 쌓인 기록의 구역·차량·도로종류·날씨·시간대·교통밀도
+//  통계 — 지금까지 쌓인 기록의 구역·차량·장소·도로종류·날씨·시간대
 //  분포를 막대그래프로 보여준다. 학습 데이터가 특정 조건(예: 맑은 날,
 //  자동차전용도로)에만 쏠려있지 않은지 한눈에 확인하는 용도.
 // ══════════════════════════════════════════════════════════
 let statsZoneFilter='all';
+let statsMode='region';
+let statsVehicleFilter='all';
+const VEHICLE_ORDER=['토레스 1호','토레스 2호','토레스 3호','토레스 4호'];
+const VEHICLE_COLORS={
+  '토레스 1호':'#9ca3af',
+  '토레스 2호':'#f97316',
+  '토레스 3호':'#8b5cf6',
+  '토레스 4호':'#a3e635',
+};
 
 function setStatsZone(zone){
   statsZoneFilter=zone;
@@ -1318,10 +1609,57 @@ function setStatsZone(zone){
   renderStatsView();
 }
 
+function setStatsMode(mode){
+  statsMode=mode;
+  renderStatsView();
+}
+
+function setStatsVehicle(vehicle){
+  statsVehicleFilter=vehicle;
+  styleVehicleButtons();
+  renderStatsView();
+}
+
+function updateStatsModeUI(){
+  document.getElementById('stats-type-region').classList.toggle('active',statsMode==='region');
+  document.getElementById('stats-type-vehicle').classList.toggle('active',statsMode==='vehicle');
+  document.getElementById('region-stats-panel').classList.toggle('active',statsMode==='region');
+  document.getElementById('vehicle-stats-panel').classList.toggle('active',statsMode==='vehicle');
+}
+
+function styleVehicleButtons(){
+  document.querySelectorAll('#stats-vehicle-filter-group .zone-btn').forEach(b=>{
+    const isActive=b.dataset.vehicle===statsVehicleFilter;
+    b.classList.toggle('active',isActive);
+    if(isActive&&statsVehicleFilter!=='all'){
+      const color=VEHICLE_COLORS[statsVehicleFilter]||'#4fd8c7';
+      b.style.background=color; b.style.borderColor=color; b.style.color='#08110f';
+    }else{
+      b.style.background=''; b.style.borderColor=''; b.style.color='';
+    }
+  });
+}
+
+function normalizeVehicleLabel(vehicle){
+  const text=String(vehicle||'').replace(/\s+/g,' ').trim();
+  if(!text||text==='—') return '';
+  const matched=VEHICLE_ORDER.find(name=>text.includes(name));
+  return matched||text;
+}
+
 function buildDistribution(points,field){
   const counts={};
   points.forEach(p=>{
     const v=p[field];
+    if(v) counts[v]=(counts[v]||0)+1;
+  });
+  return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+}
+
+function buildVehicleDistribution(points){
+  const counts={};
+  points.forEach(p=>{
+    const v=normalizeVehicleLabel(p.vehicle);
     if(v) counts[v]=(counts[v]||0)+1;
   });
   return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
@@ -1345,6 +1683,11 @@ function buildTimeBucketDistribution(points){
   });
   // 개수 순이 아니라 시간 흐름 순으로 정렬하는 게 더 직관적
   return TIME_BUCKET_ORDER.filter(k=>counts[k]).map(k=>[k,counts[k]]);
+}
+
+function buildTimeOfDayDistribution(points){
+  const named=buildDistribution(points,'timeOfDay');
+  return named.length ? named : buildTimeBucketDistribution(points);
 }
 
 // showPct=false면 퍼센트 없이 개수만 표시 (특정 구역 하나로 필터된 상태에서는
@@ -1401,52 +1744,76 @@ function donutCardHTML(title,entries,total,colorFn){
 function renderStatsView(){
   const statusEl=document.getElementById('stats-status');
   const summaryEl=document.getElementById('stats-summary');
-  const gridEl=document.getElementById('dist-grid');
+  const regionGridEl=document.getElementById('dist-grid');
+  const vehicleGridEl=document.getElementById('vehicle-dist-grid');
   const allPoints=getAllAccumPoints();
+  updateStatsModeUI();
+  styleZoneButtons('stats-zone-filter-group',statsZoneFilter);
+  styleVehicleButtons();
 
   if(!allPoints.length){
     statusEl.style.display='block';
-    statusEl.innerHTML='아직 쌓인 기록이 없어요. <b>"파일 불러오기"</b> 탭에서 파일을 불러오면 구역·차량·도로종류·날씨·시간대·교통밀도 분포를 여기서 볼 수 있어요.';
+    statusEl.innerHTML='아직 쌓인 기록이 없어요. <b>"파일 불러오기"</b> 탭에서 파일을 불러오면 구역·차량·장소·도로종류·날씨·시간대 분포를 여기서 볼 수 있어요.';
     summaryEl.style.display='none';
-    gridEl.innerHTML='';
+    regionGridEl.innerHTML='';
+    vehicleGridEl.innerHTML='';
     return;
   }
   statusEl.style.display='none';
 
-  const filtered=statsZoneFilter==='all' ? allPoints : allPoints.filter(p=>p.zone===statsZoneFilter);
+  const filtered=statsMode==='region'
+    ? (statsZoneFilter==='all' ? allPoints : allPoints.filter(p=>p.zone===statsZoneFilter))
+    : (statsVehicleFilter==='all' ? allPoints : allPoints.filter(p=>normalizeVehicleLabel(p.vehicle)===statsVehicleFilter));
   const dateSet=new Set(filtered.map(p=>p.date).filter(Boolean));
+  const activeLabel=statsMode==='region'
+    ? (statsZoneFilter==='all'?'전체':statsZoneFilter)
+    : (statsVehicleFilter==='all'?'전체':statsVehicleFilter);
+  const secondaryDist=statsMode==='region'
+    ? buildVehicleDistribution(filtered).map(([v,c])=>`${v} ${c}`).join(' · ')
+    : buildDistribution(filtered,'zone').map(([z,c])=>`${z} ${c}`).join(' · ');
 
   summaryEl.style.display='grid';
   summaryEl.innerHTML=`
     <div class="stat-cell"><div class="k">누적 일수</div><div class="v">${dateSet.size}<small> 일</small></div></div>
     <div class="stat-cell"><div class="k">총 기록 지점</div><div class="v">${filtered.length}<small> 개</small></div></div>
-    <div class="stat-cell"><div class="k">구역</div><div class="v" style="font-size:13px;">${statsZoneFilter==='all'?'전체':statsZoneFilter}</div></div>
-    <div class="stat-cell"><div class="k">차량</div><div class="v" style="font-size:13px;">${buildDistribution(filtered,'vehicle').map(([v,c])=>`${v} ${c}`).join(' · ')||'—'}</div></div>
+    <div class="stat-cell"><div class="k">${statsMode==='region'?'지역':'차량'}</div><div class="v" style="font-size:13px;">${activeLabel}</div></div>
+    <div class="stat-cell"><div class="k">${statsMode==='region'?'차량':'지역'}</div><div class="v" style="font-size:13px;">${secondaryDist||'—'}</div></div>
   `;
 
   if(!filtered.length){
-    gridEl.innerHTML=`<div class="dist-card" style="grid-column:1/-1;"><div class="dc-empty">선택한 구역(${statsZoneFilter})에는 아직 기록이 없어요.</div></div>`;
+    const emptyHTML=`<div class="dist-card" style="grid-column:1/-1;"><div class="dc-empty">선택한 ${statsMode==='region'?'지역':'차량'}(${activeLabel})에는 아직 기록이 없어요.</div></div>`;
+    regionGridEl.innerHTML=statsMode==='region'?emptyHTML:'';
+    vehicleGridEl.innerHTML=statsMode==='vehicle'?emptyHTML:'';
     return;
   }
 
   const total=filtered.length;
-  const showPct=statsZoneFilter==='all'; // 특정 구역으로 필터했을 땐 %가 의미 없으니 개수만
-  const barColor=statsZoneFilter==='all' ? null : ZONE_COLORS[statsZoneFilter]; // 특정 구역 탭이면 그 구역 색으로 막대 전체를 물들임
+  const showPct=statsMode==='vehicle'||statsZoneFilter==='all';
+  const barColor=statsMode==='region'
+    ? (statsZoneFilter==='all' ? null : ZONE_COLORS[statsZoneFilter])
+    : (statsVehicleFilter==='all' ? null : VEHICLE_COLORS[statsVehicleFilter]);
   const cardsHTML=[];
 
-  // "전체"일 때만 구역 분포를 도넛으로 보여준다. 특정 구역 하나로 필터된 상태에서는
-  // 그 구역 100%인 게 당연해서 카드 자체를 아예 표시하지 않는다.
-  if(statsZoneFilter==='all'){
-    cardsHTML.push(donutCardHTML('구역',buildDistribution(filtered,'zone'),total,
-      (label,i)=>ZONE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
+  if(statsMode==='region'){
+    if(statsZoneFilter==='all'){
+      cardsHTML.push(donutCardHTML('구역',buildDistribution(filtered,'zone'),total,
+        (label,i)=>ZONE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
+    }
+    cardsHTML.push(distCardHTML('차량',buildVehicleDistribution(filtered),total,showPct,barColor));
+  }else{
+    if(statsVehicleFilter==='all'){
+      cardsHTML.push(donutCardHTML('차량',buildVehicleDistribution(filtered),total,
+        (label,i)=>VEHICLE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
+    }
+    cardsHTML.push(distCardHTML('구역',buildDistribution(filtered,'zone'),total,true,barColor));
   }
-  cardsHTML.push(distCardHTML('차량',buildDistribution(filtered,'vehicle'),total,showPct,barColor));
+  cardsHTML.push(distCardHTML('장소',buildDistribution(filtered,'place'),total,showPct,barColor));
   cardsHTML.push(distCardHTML('도로종류',buildDistribution(filtered,'road'),total,showPct,barColor));
   cardsHTML.push(distCardHTML('날씨',buildDistribution(filtered,'weather'),total,showPct,barColor));
-  cardsHTML.push(distCardHTML('시간대 (4시간 단위)',buildTimeBucketDistribution(filtered),total,showPct,barColor));
-  cardsHTML.push(distCardHTML('교통밀도',buildDistribution(filtered,'traffic'),total,showPct,barColor));
+  cardsHTML.push(distCardHTML('시간대',buildTimeOfDayDistribution(filtered),total,showPct,barColor));
 
-  gridEl.innerHTML=cardsHTML.join('');
+  regionGridEl.innerHTML=statsMode==='region'?cardsHTML.join(''):'';
+  vehicleGridEl.innerHTML=statsMode==='vehicle'?cardsHTML.join(''):'';
 }
 
 function renderCalendarGrid(){
@@ -1558,13 +1925,9 @@ function exportBackup(){
     alert('백업할 데이터가 없어요. 먼저 "파일 불러오기"에서 기록을 불러와주세요.');
     return;
   }
-  const backup={
-    type:'route-viewer-backup',
-    version:1,
-    exportedAt:new Date().toISOString(),
-    dateCount:entriesByDate.size,
-    data:Object.fromEntries(entriesByDate),
-  };
+  const backup=buildBackupPayload();
+  recordBackupHistory('백업 저장',backup.exportedAt,`${backup.dateCount}일 기록`);
+  backup.backupHistory=getBackupHistory();
   const json=JSON.stringify(backup);
   const blob=new Blob([json],{type:'application/json'});
   const url=URL.createObjectURL(blob);
@@ -1583,21 +1946,14 @@ function handleBackupImport(evt){
   reader.onload=e=>{
     try{
       const parsed=JSON.parse(e.target.result);
-      if(!parsed||parsed.type!=='route-viewer-backup'||!parsed.data||typeof parsed.data!=='object'){
-        showError('백업 파일 형식이 아니에요. "💾 백업 저장"으로 받은 .json 파일인지 확인해주세요.');
-        return;
-      }
-      const restored=new Map(Object.entries(parsed.data));
-      if(restored.size===0){
-        showError('백업 파일에 복구할 기록이 없어요.');
-        return;
-      }
-      entriesByDate=restored;
+      applyBackupPayload(parsed);
+      recordBackupHistory('백업 복구',parsed.exportedAt||new Date().toISOString(),
+        parsed.exportedAt?'백업 파일 생성 시각':'복구 시각',false);
       persistEntries();
       showCalendar();
     }catch(err){
       console.warn('[경로뷰어] 백업 복구 실패:',err);
-      showError('백업 파일을 읽지 못했어요. 파일이 손상되지 않았는지 확인해주세요.');
+      showError('백업 파일을 읽지 못했어요. "백업 저장"으로 받은 .json 파일인지, 파일이 손상되지 않았는지 확인해주세요.');
     }
   };
   reader.onerror=()=>showError('백업 파일을 읽지 못했어요.');
@@ -1687,7 +2043,7 @@ function parseRouteWorkbook(wb){
     infoRowVehicle=String(rows[0][1]||'').trim();
   }
 
-  let headerIdx=-1, colGps=-1, colTime=-1, colDate=-1, colPlace=-1, colSpeed=-1, colRoad=-1, colZone=-1, colVehicle=-1, colWeather=-1, colTimeOfDay=-1, colTraffic=-1;
+  let headerIdx=-1, colGps=-1, colTime=-1, colDate=-1, colPlace=-1, colSpeed=-1, colRoad=-1, colZone=-1, colVehicle=-1, colWeather=-1, colTimeOfDay=-1;
   for(let i=0;i<Math.min(rows.length,10);i++){
     const idx=rows[i].findIndex(c=>String(c).trim()==='GPS위치');
     if(idx>=0){
@@ -1701,7 +2057,6 @@ function parseRouteWorkbook(wb){
       colVehicle   =rows[i].findIndex(c=>String(c).trim()==='차량');
       colWeather   =rows[i].findIndex(c=>String(c).trim()==='날씨');
       colTimeOfDay =rows[i].findIndex(c=>String(c).trim()==='시간대');
-      colTraffic   =rows[i].findIndex(c=>String(c).trim()==='교통밀도');
       break;
     }
   }
@@ -1727,7 +2082,6 @@ function parseRouteWorkbook(wb){
     if((!vehicleVal||vehicleVal==='—')&&infoRowVehicle) vehicleVal=infoRowVehicle;
     const weatherVal=colWeather>=0?String(r[colWeather]||'').trim():'';
     const timeOfDayVal=colTimeOfDay>=0?String(r[colTimeOfDay]||'').trim():'';
-    const trafficVal=colTraffic>=0?String(r[colTraffic]||'').trim():'';
     out.push({
       lat,lng,
       date:colDate>=0?String(r[colDate]||''):'',
@@ -1739,7 +2093,6 @@ function parseRouteWorkbook(wb){
       vehicle:(vehicleVal&&vehicleVal!=='—')?vehicleVal:'',
       weather:(weatherVal&&weatherVal!=='—')?weatherVal:'',
       timeOfDay:(timeOfDayVal&&timeOfDayVal!=='—')?timeOfDayVal:'',
-      traffic:(trafficVal&&trafficVal!=='—')?trafficVal:'',
     });
   }
   return out;
@@ -1756,6 +2109,7 @@ function renderConsole(){
   routeLayer.clearLayers();
   const latlngs=points.map(p=>[p.lat,p.lng]);
   L.polyline(latlngs,{color:'#4fd8c7',weight:4,opacity:.85}).addTo(routeLayer);
+  addVehicleStorageMarker(map,routeLayer);
 
   const start=points[0], end=points[points.length-1];
   L.circleMarker([start.lat,start.lng],{radius:8,color:'#5fd88a',fillColor:'#5fd88a',fillOpacity:1,weight:2})
@@ -1866,12 +2220,21 @@ function resetViewer(){
   switchTab('upload');
 }
 
-// ── 시작 화면: 자동 저장된 기록이 있으면 바로 복원, 없으면 파일 불러오기 탭 노출 ──
-if(restoreEntriesFromStorage()){
-  showCalendar();
-}else{
-  switchTab('upload');
+// ── 시작 화면: 서버 모드는 공유 저장소만, 파일 직접 열기는 localStorage만 복원 ──
+async function startRouteViewer(){
+  if(SHARED_STORAGE_API){
+    if(await restoreEntriesFromSharedStorage()){
+      showCalendar();
+    }else{
+      switchTab('upload');
+    }
+  }else if(restoreEntriesFromStorage()){
+    showCalendar();
+  }else{
+    switchTab('upload');
+  }
 }
+startRouteViewer();
 </script>
 </body>
 </html>
