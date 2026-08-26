@@ -1,0 +1,266 @@
+// ══════════════════════════════════════════════════════════
+//  statistics — 지역별/차량별 통계
+// ══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
+//  통계 — 지금까지 쌓인 기록의 구역·차량·장소·도로종류·날씨·시간대
+//  분포를 막대그래프로 보여준다. 학습 데이터가 특정 조건(예: 맑은 날,
+//  자동차전용도로)에만 쏠려있지 않은지 한눈에 확인하는 용도.
+// ══════════════════════════════════════════════════════════
+let statsZoneFilter='all';
+let statsMode='region';
+let statsVehicleFilter='all';
+
+// 예전엔 여기 토레스 1~4호가 하드코딩돼 있었다(요구사항 13~14). 이제 [설정] 탭의
+// 차량 관리(vehicles 테이블)에서 채워지는 캐시다. VEHICLE_ORDER 는 비활성 차량도
+// 포함한다 — 과거 기록의 라벨(normalizeVehicleLabel)은 비활성화해도 정상 표시돼야
+// 하기 때문. ACTIVE_VEHICLE_NAMES 만 필터 버튼에 쓰인다.
+let VEHICLE_ORDER=[];
+let VEHICLE_COLORS={};
+let ACTIVE_VEHICLE_NAMES=[];
+
+async function refreshVehicleCache(){
+  let vehicles=[];
+  try{ vehicles=await RouteDB.listVehicles(); }
+  catch(err){ console.warn('[경로뷰어] 차량 설정 불러오기 실패:',err); vehicles=[]; }
+  VEHICLE_ORDER=vehicles.map(v=>v.name);
+  VEHICLE_COLORS={}; ACTIVE_VEHICLE_NAMES=[];
+  vehicles.forEach(v=>{
+    if(v.color) VEHICLE_COLORS[v.name]=v.color;
+    if(v.active) ACTIVE_VEHICLE_NAMES.push(v.name);
+  });
+  return vehicles;
+}
+
+function setStatsZone(zone){
+  statsZoneFilter=zone;
+  styleZoneButtons('stats-zone-filter-group',zone);
+  renderStatsView();
+}
+
+function setStatsMode(mode){
+  statsMode=mode;
+  renderStatsView();
+}
+
+function setStatsVehicle(vehicle){
+  statsVehicleFilter=vehicle;
+  styleVehicleButtons();
+  renderStatsView();
+}
+
+function updateStatsModeUI(){
+  document.getElementById('stats-type-region').classList.toggle('active',statsMode==='region');
+  document.getElementById('stats-type-vehicle').classList.toggle('active',statsMode==='vehicle');
+  document.getElementById('region-stats-panel').classList.toggle('active',statsMode==='region');
+  document.getElementById('vehicle-stats-panel').classList.toggle('active',statsMode==='vehicle');
+}
+
+function styleVehicleButtons(){
+  document.querySelectorAll('#stats-vehicle-filter-group .zone-btn').forEach(b=>{
+    const isActive=b.dataset.vehicle===statsVehicleFilter;
+    b.classList.toggle('active',isActive);
+    if(isActive&&statsVehicleFilter!=='all'){
+      const color=VEHICLE_COLORS[statsVehicleFilter]||'#4fd8c7';
+      b.style.background=color; b.style.borderColor=color; b.style.color='#08110f';
+    }else{
+      b.style.background=''; b.style.borderColor=''; b.style.color='';
+    }
+  });
+}
+
+function normalizeVehicleLabel(vehicle){
+  const text=String(vehicle||'').replace(/\s+/g,' ').trim();
+  if(!text||text==='—') return '';
+  const matched=VEHICLE_ORDER.find(name=>text.includes(name));
+  return matched||text;
+}
+
+// DB가 준 [라벨,개수] 목록을 차량 표기 규칙('토레스 3호차' → '토레스 3호')으로 합친다.
+// 파일에는 '…호차'로 들어있고 화면 필터 버튼은 '…호'라서 맞춰줘야 한다.
+function normalizeVehicleEntries(entries){
+  const counts={};
+  (entries||[]).forEach(([label,n])=>{
+    const v=normalizeVehicleLabel(label);
+    if(v) counts[v]=(counts[v]||0)+n;
+  });
+  return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+}
+
+// 시각(HH:MM:SS)을 4시간 단위 구간으로 묶는다 (00-04시, 04-08시, ... 20-24시)
+const TIME_BUCKET_ORDER=['00-04시','04-08시','08-12시','12-16시','16-20시','20-24시'];
+function timeBucket4h(timeStr){
+  if(!timeStr) return '';
+  const h=parseInt(String(timeStr).split(':')[0],10);
+  if(isNaN(h)||h<0||h>23) return '';
+  const start=Math.floor(h/4)*4;
+  const p=n=>String(n).padStart(2,'0');
+  return `${p(start)}-${p(start+4)}시`;
+}
+// '시간대' 열이 비어있는 옛 파일 대비 — 시각을 4시간 구간으로 묶은 분포로 대체
+async function buildTimeOfDayDistribution(filter){
+  const named=await RouteDB.getDistribution('timeOfDay',filter);
+  if(named.length) return named;
+  const buckets=await RouteDB.getTimeBucketDistribution(filter);
+  return TIME_BUCKET_ORDER.filter(k=>buckets.some(b=>b[0]===k))
+    .map(k=>[k,buckets.find(b=>b[0]===k)[1]]);
+}
+
+// showPct=false면 퍼센트 없이 개수만 표시 (특정 구역 하나로 필터된 상태에서는
+// 예를 들어 "구역: 강남 100%" 처럼 당연한 숫자가 나와 의미가 없기 때문)
+function distCardHTML(title,entries,total,showPct,barColor){
+  if(!entries.length){
+    return `<div class="dist-card"><div class="dc-title">${title}</div><div class="dc-empty">데이터 없음</div></div>`;
+  }
+  const maxCount=entries[0][1];
+  const colorStyle=barColor?`background:${barColor};`:'';
+  const rows=entries.map(([label,count])=>{
+    const barPct=Math.round(count/maxCount*100);
+    const countLabel=showPct?`${count}개 (${total?Math.round(count/total*100):0}%)`:`${count}개`;
+    return `
+      <div class="dist-row">
+        <span class="dist-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+        <span class="dist-bar-wrap"><span class="dist-bar" style="width:${barPct}%;${colorStyle}"></span></span>
+        <span class="dist-count">${countLabel}</span>
+      </div>`;
+  }).join('');
+  return `<div class="dist-card"><div class="dc-title">${title}</div>${rows}</div>`;
+}
+
+const DONUT_COLORS=['#4fd8c7','#f5a623','#8b7cf6','#ff6b6b','#5fd88a','#7d8798'];
+function donutCardHTML(title,entries,total,colorFn){
+  if(!entries.length){
+    return `<div class="dist-card"><div class="dc-title">${title}</div><div class="dc-empty">데이터 없음</div></div>`;
+  }
+  const getColor=colorFn||((label,i)=>DONUT_COLORS[i%DONUT_COLORS.length]);
+  let acc=0;
+  const stops=entries.map(([label,count],i)=>{
+    const start=total?acc/total*360:0; acc+=count; const end=total?acc/total*360:360;
+    return `${getColor(label,i)} ${start}deg ${end}deg`;
+  }).join(', ');
+  const legend=entries.map(([label,count],i)=>{
+    const pct=total?Math.round(count/total*100):0;
+    return `
+      <div class="donut-legend-row">
+        <span class="donut-swatch" style="background:${getColor(label,i)}"></span>
+        <span class="donut-label">${escapeHtml(label)}</span>
+        <span class="donut-value">${fmtNum(count)}개 (${pct}%)</span>
+      </div>`;
+  }).join('');
+  return `
+    <div class="dist-card">
+      <div class="dc-title">${title}</div>
+      <div class="donut-wrap">
+        <div class="donut-ring" style="background:conic-gradient(${stops});"></div>
+        <div class="donut-legend">${legend}</div>
+      </div>
+    </div>`;
+}
+
+// 현재 탭/필터 상태를 DB 조회 조건으로
+function statsFilter(){
+  if(statsMode==='region'){
+    return statsZoneFilter==='all' ? {} : {zone:statsZoneFilter};
+  }
+  // 차량 필터는 '토레스 3호' 로 고르고 데이터에는 '토레스 3호차' 로 들어있다
+  return statsVehicleFilter==='all' ? {} : {vehicleLike:statsVehicleFilter};
+}
+
+let statsRenderToken=0;
+
+async function renderStatsView(){
+  const token=++statsRenderToken; // 필터를 빠르게 바꿔도 늦게 온 결과가 덮지 않게
+  const statusEl=document.getElementById('stats-status');
+  const summaryEl=document.getElementById('stats-summary');
+  const regionGridEl=document.getElementById('dist-grid');
+  const vehicleGridEl=document.getElementById('vehicle-dist-grid');
+  updateStatsModeUI();
+  renderFilterButtons('stats-zone-filter-group',ACTIVE_ZONE_NAMES.map(z=>({value:z,label:z})),'zone',setStatsZone);
+  renderFilterButtons('stats-vehicle-filter-group',ACTIVE_VEHICLE_NAMES.map(v=>({value:v,label:v})),'vehicle',setStatsVehicle);
+  styleZoneButtons('stats-zone-filter-group',statsZoneFilter);
+  styleVehicleButtons();
+
+  let totalStats;
+  try{
+    totalStats=await RouteDB.stats();
+  }catch(err){
+    console.warn('[경로뷰어] 통계 집계 실패:',err);
+    showError('통계를 계산하지 못했어요. ('+err.message+')');
+    return;
+  }
+  if(token!==statsRenderToken) return;
+
+  if(!totalStats.points){
+    statusEl.style.display='block';
+    statusEl.innerHTML='아직 쌓인 기록이 없어요. <b>"파일 불러오기"</b> 탭에서 파일을 불러오면 구역·차량·장소·도로종류·날씨·시간대 분포를 여기서 볼 수 있어요.';
+    summaryEl.style.display='none';
+    regionGridEl.innerHTML='';
+    vehicleGridEl.innerHTML='';
+    return;
+  }
+  statusEl.style.display='none';
+
+  const filter=statsFilter();
+  const overview=await RouteDB.getOverview(filter);
+  if(token!==statsRenderToken) return;
+
+  const activeLabel=statsMode==='region'
+    ? (statsZoneFilter==='all'?'전체':statsZoneFilter)
+    : (statsVehicleFilter==='all'?'전체':statsVehicleFilter);
+  const vehicleDist=normalizeVehicleEntries(overview.vehicles);
+  const zoneDist=overview.zones;
+  const secondaryDist=statsMode==='region'
+    ? vehicleDist.map(([v,c])=>`${escapeHtml(v)} ${fmtNum(c)}`).join(' · ')
+    : zoneDist.map(([z,c])=>`${escapeHtml(z)} ${fmtNum(c)}`).join(' · ');
+
+  summaryEl.style.display='grid';
+  summaryEl.innerHTML=`
+    <div class="stat-cell"><div class="k">누적 일수</div><div class="v">${fmtNum(overview.days)}<small> 일</small></div></div>
+    <div class="stat-cell"><div class="k">총 기록 지점</div><div class="v">${fmtNum(overview.points)}<small> 개</small></div></div>
+    <div class="stat-cell"><div class="k">${statsMode==='region'?'지역':'차량'}</div><div class="v" style="font-size:13px;">${escapeHtml(activeLabel)}</div></div>
+    <div class="stat-cell"><div class="k">${statsMode==='region'?'차량':'지역'}</div><div class="v" style="font-size:13px;">${secondaryDist||'—'}</div></div>
+  `;
+
+  if(!overview.points){
+    const emptyHTML=`<div class="dist-card" style="grid-column:1/-1;"><div class="dc-empty">선택한 ${statsMode==='region'?'지역':'차량'}(${escapeHtml(activeLabel)})에는 아직 기록이 없어요.</div></div>`;
+    regionGridEl.innerHTML=statsMode==='region'?emptyHTML:'';
+    vehicleGridEl.innerHTML=statsMode==='vehicle'?emptyHTML:'';
+    return;
+  }
+
+  // 나머지 분포는 한 번에 조회 (구역/차량은 위 overview 에서 이미 받았다)
+  const [placeDist,roadDist,weatherDist,timeDist]=await Promise.all([
+    RouteDB.getDistribution('place',filter),
+    RouteDB.getDistribution('road',filter),
+    RouteDB.getDistribution('weather',filter),
+    buildTimeOfDayDistribution(filter),
+  ]);
+  if(token!==statsRenderToken) return;
+
+  const total=overview.points;
+  const showPct=statsMode==='vehicle'||statsZoneFilter==='all';
+  const barColor=statsMode==='region'
+    ? (statsZoneFilter==='all' ? null : ZONE_COLORS[statsZoneFilter])
+    : (statsVehicleFilter==='all' ? null : VEHICLE_COLORS[statsVehicleFilter]);
+  const cardsHTML=[];
+
+  if(statsMode==='region'){
+    if(statsZoneFilter==='all'){
+      cardsHTML.push(donutCardHTML('구역',zoneDist,total,
+        (label,i)=>ZONE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
+    }
+    cardsHTML.push(distCardHTML('차량',vehicleDist,total,showPct,barColor));
+  }else{
+    if(statsVehicleFilter==='all'){
+      cardsHTML.push(donutCardHTML('차량',vehicleDist,total,
+        (label,i)=>VEHICLE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
+    }
+    cardsHTML.push(distCardHTML('구역',zoneDist,total,true,barColor));
+  }
+  cardsHTML.push(distCardHTML('장소',placeDist,total,showPct,barColor));
+  cardsHTML.push(distCardHTML('도로종류',roadDist,total,showPct,barColor));
+  cardsHTML.push(distCardHTML('날씨',weatherDist,total,showPct,barColor));
+  cardsHTML.push(distCardHTML('시간대',timeDist,total,showPct,barColor));
+
+  regionGridEl.innerHTML=statsMode==='region'?cardsHTML.join(''):'';
+  vehicleGridEl.innerHTML=statsMode==='vehicle'?cardsHTML.join(''):'';
+}

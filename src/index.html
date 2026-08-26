@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<!-- 스크립트는 이 앱 안의 파일만 실행한다. 밖에서 받아오는 건 지도 타일과 웹폰트뿐.
+     'unsafe-inline'이 script-src에 있는 이유: 화면 전체가 onclick="..." 인라인
+     핸들러(정적 HTML + innerHTML로 만든 버튼 모두)로 동작해서, 이게 없으면
+     탭/버튼이 전부 눌리지 않는다(실제로 겪은 회귀 — CSP가 조용히 막고 콘솔에만
+     "Refused to execute inline event handler" 로 남긴다). 원격 스크립트는 여전히
+     차단되고(script-src 'self'), 화면에 들어가는 문자열은 escapeHtml()을 거치므로
+     위험은 낮다고 판단했다. -->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self' 'unsafe-inline';
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src 'self' https://fonts.gstatic.com;
+  img-src 'self' data: blob: https://*.basemaps.cartocdn.com;
+  connect-src 'self';
+  object-src 'none';
+  base-uri 'none';
+  form-action 'none';
+"/>
+<title>경로 뷰어 · GPS 로그 리플레이</title>
+<link rel="stylesheet" href="../vendor/leaflet/leaflet.css"/>
+<!-- 웹폰트는 온라인일 때만 적용되고, 오프라인이면 style.css 의 대체 글꼴로 자연스럽게 내려간다.
+     (지도 타일도 인터넷이 있어야 보이므로 기존 화면과 같은 조건이다) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css"/>
+<link rel="stylesheet" href="css/additions.css"/>
+</head>
+<body>
+
+<div id="login-screen">
+  <div id="login-box">
+    <div id="login-mark">🐑</div>
+    <div id="login-title">경로 뷰어</div>
+    <div id="login-sub">이름을 입력하고 시작하세요<br/>확인 목적으로만 표시돼요 · 서버에 저장되지 않아요</div>
+    <input type="text" id="login-name-input" placeholder="이름을 입력하세요" autocomplete="off" maxlength="20"/>
+    <button id="login-submit" onclick="submitLogin()" disabled>입장하기</button>
+    <div id="login-error"></div>
+    <div id="login-hint">이 창을 닫으면 다시 물어봐요</div>
+  </div>
+</div>
+
+<header>
+  <div class="brand">
+    <div class="brand-mark">🐑</div>
+    <div>
+      <div class="brand-title">경로 뷰어</div>
+      <div class="brand-sub">GPS TRACE REPLAY · INTERNAL TOOL</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="user-badge" id="user-badge" onclick="showLoginScreen()" title="클릭하면 이름을 바꿀 수 있어요">👤 <b id="user-badge-name">—</b></span>
+    <span class="badge" id="storage-badge" title="현재 저장 위치">연결 중…</span>
+    <span class="badge">ADMIN ONLY</span>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+</header>
+
+<main>
+  <div id="mode-tabs">
+    <button class="mode-tab" id="tab-upload" onclick="switchTab('upload')">파일 불러오기</button>
+    <button class="mode-tab" id="tab-calendar" onclick="switchTab('calendar')">달력</button>
+    <button class="mode-tab" id="tab-accum" onclick="switchTab('accum')">누적 지도</button>
+    <button class="mode-tab" id="tab-stats" onclick="switchTab('stats')">통계</button>
+    <button class="mode-tab" id="tab-data" onclick="switchTab('data')">데이터 관리</button>
+    <button class="mode-tab" id="tab-settings" onclick="switchTab('settings')">설정</button>
+    <span style="flex:1;"></span>
+    <button class="mode-tab ghost-tab" onclick="exportBackup()" title="지금까지 쌓인 달력·누적 지도 데이터를 파일 하나로 저장">백업 저장</button>
+    <button class="mode-tab ghost-tab" onclick="startBackupRestore()" title="백업 파일을 불러와 복구(병합 / 전체 교체 선택)">백업 복구</button>
+    <span class="backup-status" id="backup-status" title="최근 백업 기록">백업 기록: 없음</span>
+    <input type="file" id="backup-input" accept=".json" style="display:none" onchange="handleBackupImport(event)"/>
+  </div>
+
+  <div id="dropzone" onclick="openRouteFileDialog()">
+    <div class="dz-icon">⌁</div>
+    <h2>주행 기록 파일을 끌어놓으세요</h2>
+    <p>nav-app '오늘 기록 다운로드'로 받은 .xlsx 또는 .csv 파일<br/>기록된 GPS 좌표를 지도 위 경로로 리플레이합니다<br/><span style="color:var(--text-faint);">여러 날짜 파일을 한 번에 선택하면 달력으로 모아서 볼 수 있어요</span></p>
+    <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+      <button class="btn" type="button" onclick="event.stopPropagation();openRouteFileDialog()">파일 선택</button>
+    </div>
+    <div class="dz-hint" style="margin-top:14px;">.XLSX · .XLS · .CSV · 여러 개 선택 가능</div>
+    <div id="dz-summary"></div>
+    <input type="file" id="file-input" accept=".xlsx,.xls,.csv" multiple/>
+  </div>
+
+  <div id="import-progress">
+    <span class="spinner"></span>
+    <span id="import-progress-text">불러오는 중…</span>
+  </div>
+
+  <div id="calendar-view">
+    <div id="cal-status"></div>
+    <div id="cal-header">
+      <div id="cal-title">—</div>
+      <div id="cal-nav">
+        <button class="cal-nav-btn today" onclick="calGoToday()">오늘</button>
+        <button class="cal-nav-btn" onclick="calShiftMonth(-1)">‹</button>
+        <button class="cal-nav-btn" onclick="calShiftMonth(1)">›</button>
+      </div>
+    </div>
+    <div id="cal-grid"></div>
+  </div>
+
+  <div id="accum-view">
+    <div id="accum-status"></div>
+    <div id="accum-stats"></div>
+    <div id="zone-filter-group">
+      <div id="zone-filter-buttons" class="zone-filter-buttons"></div>
+      <span style="flex:1;"></span>
+      <button class="btn ghost" type="button" id="coverage-toggle-btn" onclick="toggleCoverageGaps()">커버리지 갭 보기</button>
+    </div>
+    <div id="accum-hint" class="mono">지도 위에 마우스를 가져다 대면 그 근처 기록이 바로 떠요</div>
+    <div id="boundary-controls">
+      <span class="mono" style="font-size:10.5px;color:var(--text-faint);">구역 경계는 nav-app 섹터 그리기와 같은 방식으로, 지도를 직접 클릭해서 그려요</span>
+      <button class="btn ghost" type="button" id="boundary-draw-btn" onclick="startBoundaryDraw()">구역을 먼저 선택하세요</button>
+      <button class="btn ghost" type="button" id="boundary-clear-btn" onclick="clearZoneBoundary()" style="display:none;">경계 지우기</button>
+    </div>
+    <!-- 지역별 Coverage 요약(요구사항 10) — 커버리지 갭 모드에서 전체 지역을 한눈에 -->
+    <div id="coverage-summary" class="coverage-summary"></div>
+    <!-- 선택한 지역 하나의 상세 Coverage %/Cell 수/Depth 분포(요구사항 9,11) -->
+    <div id="coverage-detail" class="coverage-detail"></div>
+    <div id="accum-map-wrap">
+      <div id="accum-map"></div>
+      <div id="accum-tooltip"></div>
+      <!-- 섹터(구역 경계) 그리기 툴바 — nav-app의 sector-draw-bar와 같은 방식 -->
+      <div id="boundary-draw-bar">
+        <span id="boundary-pt-count">꼭짓점 0개</span>
+        <button onclick="undoBoundaryPoint()">↩ 취소</button>
+        <button onclick="finishBoundaryDraw()" class="primary">✓ 완료</button>
+        <button onclick="cancelBoundaryDraw()">✕ 닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="stats-view">
+    <div id="stats-status"></div>
+    <div id="stats-summary"></div>
+    <div id="stats-type-tabs">
+      <button class="zone-btn active" id="stats-type-region" onclick="setStatsMode('region')">지역별 통계</button>
+      <button class="zone-btn" id="stats-type-vehicle" onclick="setStatsMode('vehicle')">차량별 통계</button>
+    </div>
+    <div id="region-stats-panel" class="active">
+      <div class="stats-section-title">지역별 통계</div>
+      <div id="stats-zone-filter-group"></div>
+      <div id="dist-grid"></div>
+    </div>
+    <div id="vehicle-stats-panel">
+      <div class="stats-section-title">차량별 통계</div>
+      <div id="stats-vehicle-filter-group"></div>
+      <div id="vehicle-dist-grid"></div>
+    </div>
+  </div>
+
+  <!-- ── 데이터 관리 — 삭제는 오직 여기서만 ────────────── -->
+  <div id="data-view">
+    <div id="data-status"></div>
+    <div id="data-summary"></div>
+
+    <!-- ── 서버 동기화 — 데스크톱 앱에서만 보임 ─────────── -->
+    <div id="sync-panel" class="sync-panel">
+      <div class="sync-head">
+        <div class="sync-title">여러 명이 같은 기록 보기 (서버 동기화)</div>
+        <div class="sync-sub">한 사람이 <code>node server.js</code>로 서버를 띄우고 그 주소를 모두가 넣으면, "지금 동기화"를 누를 때마다 서로의 기록이 자동으로 합쳐져요. 지우는 기록은 없고, 겹치는 기록은 자동으로 걸러져요.</div>
+      </div>
+      <div class="sync-row">
+        <label class="sync-label" for="sync-url-input">서버 주소</label>
+        <input type="text" id="sync-url-input" class="sync-input mono" placeholder="http://192.168.0.5:8080" autocomplete="off"/>
+      </div>
+      <div class="sync-row">
+        <label class="sync-label" for="sync-token-input">저장 암호</label>
+        <input type="password" id="sync-token-input" class="sync-input mono" placeholder="설정했다면 입력 (선택)" autocomplete="off"/>
+      </div>
+      <div class="sync-row">
+        <label class="sync-checkbox">
+          <input type="checkbox" id="sync-auto-checkbox"/>
+          앱을 켤 때 자동으로 동기화
+        </label>
+      </div>
+      <div class="sync-actions">
+        <button class="btn ghost" type="button" onclick="saveSyncConfigFromForm()">저장</button>
+        <button class="btn" type="button" id="sync-run-btn" onclick="runServerSync(false)">지금 동기화</button>
+        <button class="btn ghost" type="button" onclick="checkForAppUpdates()" title="같은 서버 주소에서 새 버전이 있는지 확인">업데이트 확인</button>
+        <span class="sync-last mono" id="sync-last">아직 동기화한 적 없어요</span>
+      </div>
+    </div>
+
+    <div class="stats-section-title">저장된 날짜</div>
+    <div id="data-date-list"></div>
+    <div id="data-imports"></div>
+    <div id="data-danger">
+      <div>
+        <div class="dd-title">전체 데이터 삭제</div>
+        <div class="dd-desc">저장된 모든 주행 기록을 지웁니다. 되돌릴 수 없으니 먼저 "백업 저장"을 해두는 걸 권해요.</div>
+      </div>
+      <button class="btn danger" type="button" onclick="deleteAllData()">전체 데이터 삭제</button>
+    </div>
+  </div>
+
+  <!-- ── 설정 — 차량 관리 · 지역 관리 · Coverage Depth 기준(요구사항 13~16) ── -->
+  <div id="settings-view">
+    <div class="stats-section-title">차량 관리</div>
+    <div id="settings-vehicle-list" class="settings-list"></div>
+    <button class="btn ghost" type="button" onclick="openAddVehicleModal()">+ 차량 추가</button>
+
+    <div class="stats-section-title" style="margin-top:8px;">지역 관리</div>
+    <div id="settings-zone-list" class="settings-list"></div>
+    <button class="btn ghost" type="button" onclick="openAddZoneModal()">+ 지역 추가</button>
+
+    <div class="stats-section-title" style="margin-top:8px;">Coverage Depth 기준</div>
+    <div class="ir-note" style="margin:0;">누적 지도의 "커버리지 갭 보기 → Coverage Depth 보기"에서 칸을 몇 등급으로 나눌지 정해요. 숫자를 바꾸면 바로 저장돼요.</div>
+    <div id="settings-depth-tiers" class="settings-list"></div>
+  </div>
+
+  <div id="error-box"></div>
+
+  <div id="console">
+    <div class="toolbar">
+      <div class="file-chip"><span class="dot"></span><span id="chip-label">불러온 파일:</span> <b id="chip-filename">—</b></div>
+      <button class="btn ghost" type="button" id="back-btn" onclick="resetViewer()">↺ 다른 파일 불러오기</button>
+    </div>
+
+    <div id="day-summary"></div>
+    <div id="quality-panel"></div>
+
+    <div id="stats">
+      <div class="stat-cell"><div class="k">날짜</div><div class="v" id="stat-date">—</div></div>
+      <div class="stat-cell"><div class="k">기록 구간</div><div class="v" id="stat-range">—</div></div>
+      <div class="stat-cell"><div class="k">기록 지점</div><div class="v" id="stat-points">—</div></div>
+      <div class="stat-cell"><div class="k">총 이동거리</div><div class="v" id="stat-dist">—</div></div>
+    </div>
+
+    <div id="map-wrap"><div id="map"></div></div>
+
+    <div id="tape-panel">
+      <div class="tape-readout">
+        <div class="time mono" id="tape-time">--:--:--</div>
+        <div class="fields">
+          <div class="field">장소 <b id="tape-place">—</b></div>
+          <div class="field">속도 <b id="tape-speed">—</b></div>
+          <div class="field">도로 <b id="tape-road">—</b></div>
+          <div class="field">지점 <b id="tape-idx">0 / 0</b></div>
+        </div>
+      </div>
+      <div class="tape-track-wrap">
+        <input type="range" id="tape" min="0" max="0" value="0" step="1"/>
+      </div>
+      <div class="tape-endcaps"><span id="tape-start-lbl">--:--:--</span><span id="tape-end-lbl">--:--:--</span></div>
+      <div class="tape-controls">
+        <button class="tape-btn play" id="play-btn" onclick="togglePlay()" title="재생">▶</button>
+        <button class="tape-btn" onclick="stepTape(-1)" title="이전 지점">◀</button>
+        <button class="tape-btn" onclick="stepTape(1)" title="다음 지점">▶</button>
+        <div id="speed-group">
+          <button class="speed-btn" data-speed="0.5" onclick="setPlaySpeed(0.5)">0.5x</button>
+          <button class="speed-btn active" data-speed="1" onclick="setPlaySpeed(1)">1x</button>
+          <button class="speed-btn" data-speed="2" onclick="setPlaySpeed(2)">2x</button>
+          <button class="speed-btn" data-speed="4" onclick="setPlaySpeed(4)">4x</button>
+        </div>
+        <span class="mono" style="font-size:10.5px;color:var(--text-faint);margin-left:4px;">기록 지점 단위로 리플레이</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>route-viewer · nav-app 주행기록 전용 리플레이 도구 · 주행 기록은 로컬 데이터베이스에 영구 저장됩니다</footer>
+<div id="version-badge"></div>
+
+<!-- ── 공용 모달 ─────────────────────────────────────── -->
+<div id="modal-backdrop">
+  <div id="modal-box">
+    <div id="modal-head">
+      <div id="modal-icon"></div>
+      <div id="modal-title"></div>
+    </div>
+    <div id="modal-body"></div>
+    <div id="modal-foot"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="../vendor/leaflet/leaflet.js"></script>
+<script src="../vendor/xlsx/xlsx.full.min.js"></script>
+<script src="js/parser.js"></script>
+<script src="js/core.js"></script>
+<script src="js/quality.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/calendar.js"></script>
+<script src="js/accum.js"></script>
+<script src="js/statistics.js"></script>
+<script src="js/replay.js"></script>
+<script src="js/importer.js"></script>
+<script src="js/backup.js"></script>
+<script src="js/sync.js"></script>
+<script src="js/datamanager.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($f = \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\route-viewer.html\"; \\(Get-Content $f | Measure-Object -Line\\).Lines)",
+      "PowerShell(node --version; npm --version; Write-Output \"---\"; $env:npm_config_yes=\"true\")",
+      "PowerShell($f=\"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\백업\\\\route-viewer-backup_2026-08-25.json\"; $s=Get-Content $f -Raw -Encoding UTF8; $s.Substring\\(0,1500\\))",
+      "PowerShell(& \"C:\\\\Users\\\\User\\\\anaconda3\\\\python.exe\" -c \"import sqlite3,sys;print\\('python',sys.version\\);print\\('sqlite',sqlite3.sqlite_version\\)\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\User\\\\anaconda3\\\\python.exe\" \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_inspect.py\")",
+      "PowerShell(& powershell -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_setup_node.ps1\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\User\\\\anaconda3\\\\python.exe\" \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_split.py\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\User\\\\anaconda3\\\\python.exe\" \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_assemble.py\"; Write-Output \"--- node ---\"; & \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\tooling\\\\node-v24.19.0-win-x64\\\\node.exe\" --version)",
+      "PowerShell(& powershell -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_npm.ps1\")",
+      "PowerShell($root='c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main'; $node=\"$root\\\\tooling\\\\node-v24.19.0-win-x64\\\\node.exe\"; Set-Location $root; & $node \"$root\\\\tests\\\\run-tests.js\")",
+      "PowerShell($root='c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main'; $node=\"$root\\\\tooling\\\\node-v24.19.0-win-x64\\\\node.exe\"; Set-Location $root; & $node \"$root\\\\tests\\\\run-tests.js\" 2>&1 | Select-Object -First 200)",
+      "PowerShell($root='c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main'; & \"$root\\\\tooling\\\\node-v24.19.0-win-x64\\\\node.exe\" \"$root\\\\tests\\\\check-dedup-key.js\")",
+      "PowerShell(& powershell -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_vendor.ps1\")",
+      "PowerShell(& powershell -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_e2e.ps1\" 2>&1 | Select-Object -First 120)",
+      "PowerShell(& powershell -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_e2e.ps1\" 2>&1 | Select-Object -First 140)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; & \"C:\\\\Users\\\\User\\\\anaconda3\\\\python.exe\" \"c:\\\\Users\\\\User\\\\Downloads\\\\route-viewer-main\\\\route-viewer-main\\\\_icon.py\")"
+    ]
+  }
+}
