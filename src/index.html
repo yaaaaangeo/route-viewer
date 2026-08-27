@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<!-- 스크립트는 이 앱 안의 파일만 실행한다. 밖에서 받아오는 건 지도 타일과 웹폰트뿐.
+<!-- 스크립트는 이 앱 안의 파일만 실행한다. 밖에서 받아오는 건 지도 타일·웹폰트·
+     커버리지 계산용 OSM 건물 외곽선(Overpass API)뿐.
      'unsafe-inline'이 script-src에 있는 이유: 화면 전체가 onclick="..." 인라인
      핸들러(정적 HTML + innerHTML로 만든 버튼 모두)로 동작해서, 이게 없으면
      탭/버튼이 전부 눌리지 않는다(실제로 겪은 회귀 — CSP가 조용히 막고 콘솔에만
@@ -16,7 +17,7 @@
   style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
   font-src 'self' https://fonts.gstatic.com;
   img-src 'self' data: blob: https://*.basemaps.cartocdn.com;
-  connect-src 'self';
+  connect-src 'self' https://overpass-api.de;
   object-src 'none';
   base-uri 'none';
   form-action 'none';

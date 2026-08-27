@@ -171,6 +171,8 @@ function finishBoundaryDraw(){
 function clearZoneBoundary(){
   if(accumZoneFilter==='all'||!ZONE_POLYGONS[accumZoneFilter]) return;
   delete ZONE_POLYGONS[accumZoneFilter];
+  delete loadZoneBuildingsCache()[accumZoneFilter];
+  saveZoneBuildingsCache();
   saveZonePolygonsToStorage();
   updateBoundaryUI();
   if(showCoverageGaps) renderAccumView();
@@ -187,6 +189,110 @@ function updateBoundaryUI(){
   if(clearBtn) clearBtn.style.display=has?'inline-flex':'none';
 }
 
+// ══════════════════════════════════════════════════════════
+//  구역 건물 폴리곤(OSM) — 커버리지 계산에서 건물 위 칸을 뺀다.
+//  거리를 다 돌아도 건물 내부까지 "미방문 칸"으로 잡히면 100%를 영원히
+//  못 채우게 되므로, Overpass API로 구역 bbox 안 건물 외곽선을 받아와
+//  그 위에 중심점이 있는 격자 칸은 total/visited 계산에서 아예 뺀다.
+//  구역별로 localStorage에 캐싱하고, 구역 경계(bbox)가 바뀌기 전까지는
+//  다시 받아오지 않는다. 오프라인 등으로 못 받아오면 예전 캐시(있으면)
+//  또는 빈 목록(=건물 제외 없이 예전 방식)으로 조용히 넘어간다.
+// ══════════════════════════════════════════════════════════
+const ZONE_BUILDINGS_LS_KEY='route_viewer_zone_buildings_v1';
+let zoneBuildingsCache=null;
+let zoneBuildingsFetchPromise={};
+
+function loadZoneBuildingsCache(){
+  if(zoneBuildingsCache) return zoneBuildingsCache;
+  try{ zoneBuildingsCache=JSON.parse(localStorage.getItem(ZONE_BUILDINGS_LS_KEY)||'{}'); }
+  catch(_){ zoneBuildingsCache={}; }
+  return zoneBuildingsCache;
+}
+
+function saveZoneBuildingsCache(){
+  try{ localStorage.setItem(ZONE_BUILDINGS_LS_KEY,JSON.stringify(zoneBuildingsCache)); }
+  catch(err){ console.warn('[경로뷰어] 건물 캐시 저장 실패:',err); }
+}
+
+function bboxKeyFor(poly){
+  const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
+  return [Math.min(...lats),Math.max(...lats),Math.min(...lngs),Math.max(...lngs)].map(n=>n.toFixed(5)).join(',');
+}
+
+async function fetchBuildingsForBbox(minLat,minLng,maxLat,maxLng){
+  const query=`[out:json][timeout:25];way["building"](${minLat},${minLng},${maxLat},${maxLng});out geom;`;
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),15000);
+  try{
+    const res=await fetch('https://overpass-api.de/api/interpreter',{
+      method:'POST',
+      headers:{'Content-Type':'text/plain'},
+      body:query,
+      signal:controller.signal,
+    });
+    if(!res.ok) throw new Error('overpass HTTP '+res.status);
+    const data=await res.json();
+    const polygons=[];
+    (data.elements||[]).forEach(el=>{
+      if(el.type==='way'&&Array.isArray(el.geometry)&&el.geometry.length>=3){
+        polygons.push(el.geometry.map(pt=>[pt.lat,pt.lon]));
+      }
+    });
+    return polygons;
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
+// zoneName의 건물 폴리곤 목록. 캐시가 있고 구역 경계가 그대로면 캐시를 쓰고,
+// 없거나 경계가 바뀌었으면 Overpass에서 새로 받아온다.
+async function getZoneBuildingPolygons(zoneName){
+  const poly=ZONE_POLYGONS[zoneName];
+  if(!poly||poly.length<3) return [];
+  const cache=loadZoneBuildingsCache();
+  const key=bboxKeyFor(poly);
+  const cached=cache[zoneName];
+  if(cached&&cached.bboxKey===key) return cached.polygons;
+  if(zoneBuildingsFetchPromise[zoneName]) return zoneBuildingsFetchPromise[zoneName];
+  const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
+  const minLat=Math.min(...lats), maxLat=Math.max(...lats);
+  const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
+  const promise=fetchBuildingsForBbox(minLat,minLng,maxLat,maxLng).then(polygons=>{
+    cache[zoneName]={bboxKey:key,polygons,fetchedAt:Date.now()};
+    saveZoneBuildingsCache();
+    delete zoneBuildingsFetchPromise[zoneName];
+    return polygons;
+  }).catch(err=>{
+    console.warn('[경로뷰어] '+zoneName+' 건물 데이터를 가져오지 못했어요(오프라인일 수 있음):',err);
+    delete zoneBuildingsFetchPromise[zoneName];
+    return cached?cached.polygons:[];
+  });
+  zoneBuildingsFetchPromise[zoneName]=promise;
+  return promise;
+}
+
+// 건물 폴리곤들이 덮는 격자 칸 key 집합. 건물 하나하나의 bbox 안 칸만 훑으므로
+// (칸 수 × 전체 건물 수)가 아니라 (건물마다 자기 bbox 칸 수)로 끝난다.
+function buildExcludedCellSet(buildingPolygons,latDeg,lngDeg){
+  const excluded=new Set();
+  buildingPolygons.forEach(poly=>{
+    const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
+    const minLat=Math.min(...lats), maxLat=Math.max(...lats);
+    const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
+    const laStart=Math.floor(minLat/latDeg), laEnd=Math.ceil(maxLat/latDeg);
+    const loStart=Math.floor(minLng/lngDeg), loEnd=Math.ceil(maxLng/lngDeg);
+    for(let la=laStart;la<=laEnd;la++){
+      for(let lo=loStart;lo<=loEnd;lo++){
+        const key=la+'_'+lo;
+        if(excluded.has(key)) continue;
+        const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
+        if(pointInPolygon(cellLat,cellLng,poly)) excluded.add(key);
+      }
+    }
+  });
+  return excluded;
+}
+
 // 커버리지 갭 격자 칠하기 — insideTest(lat,lng)가 true인 칸 중,
 // 그동안 기록이 없던 칸만 빨갛게 칠한다. (다각형 경계 전용, 원 근사는 더 이상 없음)
 //
@@ -201,16 +307,20 @@ function updateBoundaryUI(){
 //
 // showCoverageDepth 가 켜져 있으면 방문 횟수 등급(0/1/2~4/5+)별로 칸을 칠하고
 // (요구사항 11), 꺼져 있으면 기존처럼 "미방문 칸만 빨갛게"(요구사항 9 이전 방식)를 유지한다.
-async function paintZoneGapGrid(insideTest,minLat,maxLat,minLng,maxLng,refLat){
+async function paintZoneGapGrid(insideTest,minLat,maxLat,minLng,maxLng,refLat,zoneName){
   const latDeg=GAP_CELL_SIZE_M/111320;
   const lngDeg=GAP_CELL_SIZE_M/(111320*Math.cos(refLat*Math.PI/180));
   const marginLat=latDeg*2, marginLng=lngDeg*2;
-  const visitRows=await RouteDB.getCellVisitCounts({
-    minLat:minLat-marginLat, maxLat:maxLat+marginLat,
-    minLng:minLng-marginLng, maxLng:maxLng+marginLng,
-    refLat, lngDeg,
-  },GAP_CELL_SIZE_M);
+  const [visitRows,buildingPolygons]=await Promise.all([
+    RouteDB.getCellVisitCounts({
+      minLat:minLat-marginLat, maxLat:maxLat+marginLat,
+      minLng:minLng-marginLng, maxLng:maxLng+marginLng,
+      refLat, lngDeg,
+    },GAP_CELL_SIZE_M),
+    zoneName?getZoneBuildingPolygons(zoneName):Promise.resolve([]),
+  ]);
   const visitMap=new Map(visitRows.map(r=>[r.gy+'_'+r.gx,r.visits]));
+  const excludedCells=buildExcludedCellSet(buildingPolygons,latDeg,lngDeg);
 
   const latStart=Math.floor(minLat/latDeg), latEnd=Math.ceil(maxLat/latDeg);
   const lngStart=Math.floor(minLng/lngDeg), lngEnd=Math.ceil(maxLng/lngDeg);
@@ -218,6 +328,7 @@ async function paintZoneGapGrid(insideTest,minLat,maxLat,minLng,maxLng,refLat){
     for(let lo=lngStart;lo<=lngEnd;lo++){
       const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
       if(!insideTest(cellLat,cellLng)) continue;
+      if(excludedCells.has(la+'_'+lo)) continue;
       const visits=visitMap.get(la+'_'+lo)||0;
       const bounds=[[la*latDeg,lo*lngDeg],[(la+1)*latDeg,(lo+1)*lngDeg]];
       if(showCoverageDepth){
@@ -275,8 +386,12 @@ async function computeZoneCoverage(zoneName){
   const latDeg=GAP_CELL_SIZE_M/111320;
   const lngDeg=GAP_CELL_SIZE_M/(111320*Math.cos(refLat*Math.PI/180));
 
-  const visitRows=await RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg},GAP_CELL_SIZE_M);
+  const [visitRows,buildingPolygons]=await Promise.all([
+    RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg},GAP_CELL_SIZE_M),
+    getZoneBuildingPolygons(zoneName),
+  ]);
   const visitMap=new Map(visitRows.map(r=>[r.gy+'_'+r.gx,r.visits]));
+  const excludedCells=buildExcludedCellSet(buildingPolygons,latDeg,lngDeg);
 
   const latStart=Math.floor(minLat/latDeg), latEnd=Math.ceil(maxLat/latDeg);
   const lngStart=Math.floor(minLng/lngDeg), lngEnd=Math.ceil(maxLng/lngDeg);
@@ -286,6 +401,7 @@ async function computeZoneCoverage(zoneName){
     for(let lo=lngStart;lo<=lngEnd;lo++){
       const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
       if(!pointInPolygon(cellLat,cellLng,poly)) continue;
+      if(excludedCells.has(la+'_'+lo)) continue;
       total++;
       const visits=visitMap.get(la+'_'+lo)||0;
       const tier=tierForCountJS(depthTiers,visits);
@@ -448,7 +564,7 @@ async function renderCoverageGapLayer(){
     const minLat=Math.min(...lats), maxLat=Math.max(...lats);
     const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
     await paintZoneGapGrid((la,lo)=>pointInPolygon(la,lo,poly),
-      minLat,maxLat,minLng,maxLng,(minLat+maxLat)/2);
+      minLat,maxLat,minLng,maxLng,(minLat+maxLat)/2,zone);
   }
 
   const hintEl=document.getElementById('accum-hint');

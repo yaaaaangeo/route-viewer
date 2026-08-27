@@ -217,6 +217,11 @@ E2E는 `tests/screenshots/` 에 화면 캡처도 남깁니다.
 
 **Coverage 계산** — 기존 커버리지 갭과 같은 50m 격자·같은 폴리곤 판정(cell 중심점이
 polygon 안이면 유효 cell)을 그대로 씁니다. `Coverage % = 방문 cell / 전체 유효 cell`.
+차량이 지나갈 수 없는 건물 내부 때문에 100%를 영원히 못 채우는 문제가 있어서,
+cell 중심점이 건물(OSM `building`, Overpass API로 구역 bbox 안만 조회) 위에 있으면
+그 cell은 애초에 "유효 cell"에서 뺍니다. 구역별로 결과를 캐싱해서(경계가 바뀌기
+전까진) 다시 받아오지 않고, 오프라인이면 예전 캐시나 건물 제외 없이(예전 방식)로
+조용히 넘어갑니다.
 
 **Coverage Depth 계산** — GPS point 개수가 아니라 "방문 세션" 기준입니다. SQLite
 `LAG()` 윈도우 함수로 `(date, vehicle)`별 시간순 정렬 후 직전 행과 cell이 다를 때만
