@@ -9,3 +9,5 @@ tests/packaged-smoke.log
 database/*.db
 database/*.db-*
 route-viewer-shared-data.json
+
+node_modules/
