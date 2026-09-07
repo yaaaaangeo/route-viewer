@@ -6,7 +6,7 @@
 // v3.0.0 — 저장소를 SQLite/IndexedDB로 바꾸고, 파일 불러오기를 "추가(merge)"로 변경
 // v3.1.0 — 값 충돌 검사 · Import History 강화 · Coverage %/Depth · 설정(차량/지역)
 // v3.1.1 — 비교 탭을 없애고, 그 정보(거리·기록수·주행시간·GPS공백/점프)를 달력 일자 요약에 통합
-const APP_VERSION='v3.1.1';
+const APP_VERSION='v3.1.2';
 document.getElementById('version-badge').textContent=APP_VERSION;
 
 // 숫자에 천 단위 쉼표 — import 결과·통계 화면에서 공통으로 쓴다
@@ -37,12 +37,18 @@ const VEHICLE_STORAGE_PLACE={
   lng:127.03873445954,
 };
 
+function addNoKeyOsmTileLayer(targetMap){
+  return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    subdomains:'abc',
+    maxZoom:19,
+    attribution:'© OpenStreetMap contributors',
+  }).addTo(targetMap);
+}
+
 function initMap(){
   if(map) return;
   map=L.map('map',{zoomSnap:0.5,zoomDelta:0.5}).setView([37.498,127.032],12);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',{
-    subdomains:'abcd',maxZoom:20,attribution:'© OpenStreetMap © CARTO'
-  }).addTo(map);
+  addNoKeyOsmTileLayer(map);
   routeLayer=L.layerGroup().addTo(map);
 }
 
@@ -129,7 +135,7 @@ window.dedupeBackupHistory=function(history){
 // 지역/차량 필터 버튼을 설정 데이터로부터 다시 그린다 (요구사항 13~16).
 // "전체" + items 순서로 만들고, 클릭하면 onSelect(value)를 부른다.
 // active 스타일은 이후 styleZoneButtons()/styleVehicleButtons() 가 입힌다.
-function renderFilterButtons(containerId,items,dataAttr,onSelect){
+function renderFilterButtons(containerId,items,dataAttr,onSelect,includeAll){
   const el=document.getElementById(containerId);
   if(!el) return;
   el.innerHTML='';
@@ -139,7 +145,7 @@ function renderFilterButtons(containerId,items,dataAttr,onSelect){
     b.addEventListener('click',()=>onSelect(value));
     return b;
   };
-  el.appendChild(mk('all','전체'));
+  if(includeAll!==false) el.appendChild(mk('all','전체'));
   (items||[]).forEach(it=>el.appendChild(mk(it.value,it.label)));
 }
 

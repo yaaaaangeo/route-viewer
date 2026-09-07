@@ -9,7 +9,6 @@
 'use strict';
 
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
-const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 
@@ -19,6 +18,7 @@ const APP_ID = 'com.navapp.routeviewer';
 let mainWindow = null;
 let db = null;
 let updateCheckIsManual = false;
+let autoUpdater = null;
 
 function dbFilePath() {
   return path.join(app.getPath('userData'), 'database', 'route-viewer.db');
@@ -40,6 +40,14 @@ function normalizeServerUrl(url) {
 //  release/ 폴더(설치 파일 + latest.yml)를 그대로 받아온다.
 // ══════════════════════════════════════════════════════════
 function configureAutoUpdater() {
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+  } catch (err) {
+    console.warn('[route-viewer] auto updater disabled:', err);
+    autoUpdater = null;
+    return;
+  }
+
   autoUpdater.autoDownload = false;
 
   autoUpdater.on('error', err => {
@@ -104,6 +112,17 @@ function configureAutoUpdater() {
 }
 
 async function triggerUpdateCheck(manual) {
+  if (!autoUpdater) {
+    if (manual) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: '업데이트 확인',
+        message: '이 실행 환경에서는 자동 업데이트 모듈을 사용할 수 없어요.',
+        buttons: ['확인'],
+      });
+    }
+    return;
+  }
   if (!app.isPackaged) {
     if (manual) {
       dialog.showMessageBox(mainWindow, {
@@ -287,6 +306,8 @@ function registerIpc() {
   handle('db:listZones', () => openDatabase().listZones());
   handle('db:saveZone', z => openDatabase().saveZone(z));
   handle('db:setZoneActive', (name, active) => openDatabase().setZoneActive(name, active));
+  handle('db:getZoneManualCells', name => openDatabase().getZoneManualCells(name));
+  handle('db:saveZoneManualCells', (name, data) => openDatabase().saveZoneManualCells(name, data));
   handle('db:getSettings', () => openDatabase().getSettings());
   handle('db:setSettings', partial => openDatabase().setSettings(partial));
   handle('db:getCellVisitCounts', (box, cellSizeM) => openDatabase().getCellVisitCounts(box, cellSizeM));

@@ -44,9 +44,12 @@ function styleZoneButtons(containerId,zone){
 }
 const HOVER_MAX_DIST_M=90; // 커서가 셀 중심에서 이만큼(m) 이내일 때만 그 점의 정보를 보여줌
 
-let accumMap=null, accumDensityLayer=null, coverageLayer=null, vehicleStorageLayer=null;
+let accumMap=null, accumDensityLayer=null, coverageLayer=null, manualCellsLayer=null, vehicleStorageLayer=null;
 let showCoverageGaps=false;
-const GAP_CELL_SIZE_M=50; // 커버리지 격자 한 칸 크기
+const GAP_CELL_SIZE_M=20; // 커버리지 격자 한 칸 크기 — 건물을 더 정확히 빼려고 50m에서 줄임
+let accumDateFrom='';
+let accumDateTo='';
+let coverageCellLayers=new Map(); // 현재 화면에 그려진 커버리지 셀 layer — 수동 선택 중 즉시 숨김/복원용
 
 // ══════════════════════════════════════════════════════════
 //  구역 경계(섹터) — nav-app의 "섹터 그리기"와 같은 방식.
@@ -85,9 +88,398 @@ function pointInPolygon(lat,lng,poly){
   return inside;
 }
 
+// ── "칸 중심에서 도로/건물 geometry까지 실제 거리(m)" 공통 계산 ──────────
+// 진짜 polygon buffer 라이브러리 없이도, 도로 대각선 교차부 틈/건물·아파트
+// 제외를 전부 이 하나의 원리로 처리한다: refLat 기준 등장방형 근사로 lat/lng를
+// 평면 미터 좌표로 바꾼 뒤 점-선분 최단거리를 잰다. 구역 하나 스케일(수 km
+// 이내)에서는 이 근사 오차가 무시할 만하다.
+function mPerDegAt(refLat){
+  return { mLat:111320, mLng:111320*Math.cos(refLat*Math.PI/180) };
+}
+
+function distPointToSegmentM(lat,lng,aLat,aLng,bLat,bLng,refLat){
+  const {mLat,mLng}=mPerDegAt(refLat);
+  const px=(lng-aLng)*mLng, py=(lat-aLat)*mLat;
+  const dx=(bLng-aLng)*mLng, dy=(bLat-aLat)*mLat;
+  const lenSq=dx*dx+dy*dy;
+  const t=lenSq>0 ? Math.max(0,Math.min(1,(px*dx+py*dy)/lenSq)) : 0;
+  return Math.hypot(px-dx*t, py-dy*t);
+}
+
+// 점이 폴리곤 안이면 0, 아니면 가장 가까운 변까지의 거리(m).
+function polygonDistanceM(lat,lng,poly,refLat){
+  if(pointInPolygon(lat,lng,poly)) return 0;
+  let best=Infinity;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const d=distPointToSegmentM(lat,lng,poly[j][0],poly[j][1],poly[i][0],poly[i][1],refLat);
+    if(d<best) best=d;
+  }
+  return best;
+}
+
+// 두 폴리곤 사이 최단거리(m) — 한쪽 꼭짓점들을 다른 쪽 폴리곤까지 거리로 재는
+// 근사(볼록에 가까운 건물 footprint끼리는 충분히 정확하다).
+function polygonToPolygonDistanceM(polyA,polyB,refLat){
+  let best=Infinity;
+  for(const [lat,lng] of polyA){
+    const d=polygonDistanceM(lat,lng,polyB,refLat);
+    if(d<best) best=d;
+    if(best===0) return 0;
+  }
+  for(const [lat,lng] of polyB){
+    const d=polygonDistanceM(lat,lng,polyA,refLat);
+    if(d<best) best=d;
+    if(best===0) return 0;
+  }
+  return best;
+}
+
+// 폴리곤 면적(m²) — Shoelace, refLat 기준 평면 근사(구역 하나 스케일에서 충분).
+function polygonAreaM2(poly,refLat){
+  const {mLat,mLng}=mPerDegAt(refLat);
+  let area=0;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const xi=poly[i][1]*mLng, yi=poly[i][0]*mLat;
+    const xj=poly[j][1]*mLng, yj=poly[j][0]*mLat;
+    area+=xj*yi-xi*yj;
+  }
+  return Math.abs(area)/2;
+}
+
+function polygonCentroid(poly){
+  let sLat=0,sLng=0;
+  poly.forEach(([lat,lng])=>{ sLat+=lat; sLng+=lng; });
+  return [sLat/poly.length, sLng/poly.length];
+}
+
+// ── 아파트 "단지 전체 영역" 추정 ─────────────────────────────────────
+// 1순위: landuse=residential + residential=apartments 조합(매퍼가 직접
+// 그린 단지 부지 경계) — 있으면 그대로 쓴다. 사람이 그린 경계가 추정보다
+// 항상 정확하다. (신현대아파트로 실측 확인: way 436407134가 정확히 이
+// 조합, 18개 꼭짓점의 실제 단지 경계 — 예전엔 이 태그를 아예 안 받아와서
+// 통째로 놓쳤었다.)
+// 2순위(이 태그가 없는 단지를 위한 폴백): 동 하나하나를 원형 버퍼로
+// 부풀려 옆 동과 겹치길 바라는 방식은, 동 사이 간격이 buffer×2보다 넓은
+// 대단지에서 안쪽 내부도로가 안 잘린다. 대신 같은 단지에 속하는 동들을
+// 먼저 묶고(union-find, linkM 이내면 같은 단지), 그 동들 footprint 전체의
+// 볼록껍질(convex hull)을 단지 영역으로 쓴다.
+// landuse=residential "전체"는 절대 신호로 안 쓴다(일반 주거지역까지
+// 지워짐) — residential=apartments가 붙은 것만 명시적 경계로 인정한다.
+const APARTMENT_CLUSTER_LINK_M=80; // 이 이내면 "같은 단지"로 묶음(동 사이 내부도로/광장 스케일)
+const APARTMENT_COMPLEX_BUFFER_M=15; // hull(추정 경계) 가장자리 여유
+const APARTMENT_EXPLICIT_BUFFER_M=5; // 명시적 경계는 이미 정확해서 여유를 작게만 준다
+
+function clusterApartmentBuildings(apartmentPolygons,refLat,linkM){
+  const n=apartmentPolygons.length;
+  const parent=Array.from({length:n},(_,i)=>i);
+  function find(x){ while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; } return x; }
+  function union(a,b){ const ra=find(a),rb=find(b); if(ra!==rb) parent[ra]=rb; }
+
+  const bboxes=apartmentPolygons.map(poly=>{
+    const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
+    return {minLat:Math.min(...lats),maxLat:Math.max(...lats),minLng:Math.min(...lngs),maxLng:Math.max(...lngs)};
+  });
+  const {mLat,mLng}=mPerDegAt(refLat);
+  const marginLat=linkM/mLat, marginLng=linkM/mLng;
+
+  for(let i=0;i<n;i++){
+    for(let j=i+1;j<n;j++){
+      if(find(i)===find(j)) continue;
+      const bi=bboxes[i], bj=bboxes[j];
+      // bbox(+여유)가 안 겹치면 확실히 linkM보다 멀다 — 정밀 거리 계산을 건너뛰는 사전 필터
+      const overlap=bi.minLat-marginLat<=bj.maxLat+marginLat && bi.maxLat+marginLat>=bj.minLat-marginLat
+        && bi.minLng-marginLng<=bj.maxLng+marginLng && bi.maxLng+marginLng>=bj.minLng-marginLng;
+      if(!overlap) continue;
+      if(polygonToPolygonDistanceM(apartmentPolygons[i],apartmentPolygons[j],refLat)<=linkM) union(i,j);
+    }
+  }
+  const groups=new Map();
+  for(let i=0;i<n;i++){
+    const r=find(i);
+    if(!groups.has(r)) groups.set(r,[]);
+    groups.get(r).push(apartmentPolygons[i]);
+  }
+  return [...groups.values()];
+}
+
+// Andrew's monotone chain — lat/lng를 그냥 평면 좌표처럼 써도, 이 스케일(zone
+// 하나)에서 볼록껍질의 위상(어느 점이 껍질 위인지)은 그대로 성립한다.
+function convexHull(points){
+  const pts=[...points].sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  if(pts.length<3) return pts;
+  const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lower=[];
+  for(const p of pts){
+    while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop();
+    lower.push(p);
+  }
+  const upper=[];
+  for(let i=pts.length-1;i>=0;i--){
+    const p=pts[i];
+    while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper);
+}
+
+// 아파트 동 + 명시적 단지 경계 → 최종 "단지 전체 영역" 폴리곤들.
+// 어느 explicit 경계 안에 이미 들어있는 동은 hull 클러스터링에서 빼서
+// (같은 단지를 두 번 겹쳐 계산하지 않게) explicit과 hull-추정을 분리해
+// 반환한다 — 디버그 시각화·로그에서 "명시적 경계로 잡았는지 추정으로
+// 잡았는지"를 구분해서 보여주기 위함이기도 하다.
+function buildApartmentComplexPolygons(apartmentPolygons,explicitComplexPolygons,refLat){
+  const explicit=(explicitComplexPolygons||[]).filter(p=>p.length>=3);
+  const uncovered=(apartmentPolygons||[]).filter(bldg=>{
+    const [cLat,cLng]=polygonCentroid(bldg);
+    return !explicit.some(poly=>pointInPolygon(cLat,cLng,poly));
+  });
+  const clusters=uncovered.length?clusterApartmentBuildings(uncovered,refLat,APARTMENT_CLUSTER_LINK_M):[];
+  const hullEstimated=clusters.map(cluster=>convexHull(cluster.flat())).filter(h=>h.length>=3);
+  return {explicit,hullEstimated};
+}
+
 // ── 경계 그리기 상태 (nav-app sectorDrawMode/sectorDraftPts와 같은 구조) ──
 let boundaryDrawMode=false, boundaryDrawZone=null;
 let boundaryDraftPts=[], boundaryDraftLayer=null, boundaryDraftMarkers=[];
+// "수정" 버튼을 눌러야만 다시 그리기/경계 지우기 버튼이 펼쳐진다(기본은 접힘)
+let boundaryEditOpen=false;
+
+function toggleBoundaryEdit(){
+  boundaryEditOpen=!boundaryEditOpen;
+  if(!boundaryEditOpen){ cellEditMode=null; exitVertexEditMode(); }
+  updateBoundaryUI();
+}
+
+// 도로였지만 건물/아파트 제외 마스크에 걸려 빠진 칸을 색으로 보여주는 디버그
+// 토글 — 건물=회색, 아파트=보라. paintZoneGapGrid가 실제로 색을 칠한다.
+let showExclusionDebug=false;
+
+function toggleExclusionDebug(){
+  showExclusionDebug=!showExclusionDebug;
+  renderAccumView();
+}
+
+// ══════════════════════════════════════════════════════════
+//  수동 셀 오버라이드 — "이 칸은 애초에 도로가 아니다(제외)" /
+//  "이 칸은 방문한 걸로 친다"를 사용자가 직접 지정. ⚙️(수정) 패널이
+//  열려있을 때 지도를 클릭해서 칸을 토글한다. 칸은 gy/gx가 아니라
+//  칸 중심 위경도로 저장해서(DB), 매 렌더링 시점의 격자 기준(GAP_CELL_SIZE_M
+//  + 그 구역 refLat)으로 다시 gy/gx를 계산한다 — 그래서 구역 경계를
+//  다시 그려도(=refLat이 살짝 바뀌어도) 저장된 칸이 어긋나지 않는다.
+// ══════════════════════════════════════════════════════════
+let cellEditMode=null; // null | 'exclude' | 'visit'
+let zoneManualCells={excluded:[],visited:[]};
+let zoneManualCellsZone=null; // zoneManualCells가 어느 구역 것인지(캐시 키)
+let manualCellEditsDirty=false; // 여러 칸을 찍은 뒤 "선택 적용"에서 한 번에 저장/재계산
+let manualCellPendingKeys=new Set(); // 아직 적용하지 않은, 화면에 임시 표시할 셀 키
+
+async function loadZoneManualCells(zoneName){
+  if(zoneManualCellsZone===zoneName) return zoneManualCells;
+  try{
+    const data=await RouteDB.getZoneManualCells(zoneName);
+    zoneManualCells={excluded:Array.isArray(data&&data.excluded)?data.excluded:[],visited:Array.isArray(data&&data.visited)?data.visited:[]};
+  }catch(err){
+    console.warn('[경로뷰어] '+zoneName+' 수동 셀 오버라이드를 불러오지 못했어요:',err);
+    zoneManualCells={excluded:[],visited:[]};
+  }
+  zoneManualCellsZone=zoneName;
+  return zoneManualCells;
+}
+
+// zoneManualCells의 위경도 점들을 "지금 이 순간의" 격자 기준으로 gy_gx Set으로 바꾼다.
+function manualCellKeySet(points,latDeg,lngDeg){
+  const set=new Set();
+  (points||[]).forEach(([lat,lng])=>{
+    set.add(Math.floor(lat/latDeg)+'_'+Math.floor(lng/lngDeg));
+  });
+  return set;
+}
+
+function findManualCellIndex(list,latDeg,lngDeg,gy,gx){
+  return (list||[]).findIndex(([la,lo])=>Math.floor(la/latDeg)===gy&&Math.floor(lo/lngDeg)===gx);
+}
+
+function defaultCoverageHint(){
+  return '실선/점선 도형 = 직접 그린 구역 경계 · 빨간 칸 = 아직 한 번도 지나가지 않은 곳';
+}
+
+function updateCellEditHint(){
+  const hintEl=document.getElementById('accum-hint');
+  if(!hintEl) return;
+  const dirtyText=manualCellEditsDirty?' · 선택 적용을 눌러 반영':'';
+  if(cellEditMode==='exclude'){
+    hintEl.textContent=`${accumZoneFilter}에서 제외할 칸을 지도에서 클릭하세요. 여러 칸을 찍은 뒤 선택 적용을 누르세요${dirtyText}.`;
+  }else if(cellEditMode==='visit'){
+    hintEl.textContent=`${accumZoneFilter}에서 방문 처리할 칸을 지도에서 클릭하세요. 여러 칸을 찍은 뒤 선택 적용을 누르세요${dirtyText}.`;
+  }else if(showCoverageGaps){
+    hintEl.textContent=manualCellEditsDirty
+      ? '선택 적용을 누르면 찍어둔 셀을 저장하고 커버리지를 다시 계산해요.'
+      : defaultCoverageHint();
+  }
+}
+
+function manualCellCount(){
+  return (zoneManualCells.excluded||[]).length+(zoneManualCells.visited||[]).length;
+}
+
+function setCellEditMode(mode){
+  if(!showCoverageGaps) return;
+  if(accumZoneFilter==='all'||!ZONE_POLYGONS[accumZoneFilter]||ZONE_POLYGONS[accumZoneFilter].length<3){
+    cellEditMode=null;
+    updateBoundaryUI();
+    const hintEl=document.getElementById('accum-hint');
+    if(hintEl) hintEl.textContent='먼저 구역을 선택하고 경계를 그려주세요.';
+    return;
+  }
+  cellEditMode=(cellEditMode===mode)?null:mode; // 같은 버튼 다시 누르면 끔
+  if(cellEditMode) exitVertexEditMode(); // 꼭짓점 드래그 모드와 동시에 안 켜지게
+  updateBoundaryUI();
+  updateCellEditHint();
+}
+
+async function applyManualCellEdits(){
+  if(accumZoneFilter==='all'||zoneManualCellsZone!==accumZoneFilter) return;
+  try{
+    await RouteDB.saveZoneManualCells(accumZoneFilter,zoneManualCells);
+    manualCellEditsDirty=false;
+    manualCellPendingKeys.clear();
+    cellEditMode=null;
+    updateBoundaryUI();
+    if(typeof showToast==='function') showToast(`${accumZoneFilter} 선택 셀을 적용했어요.`);
+    renderAccumView();
+  }catch(err){
+    console.warn('[경로뷰어] 수동 셀 오버라이드 저장 실패:',err);
+    showError('선택 셀을 저장하지 못했어요. ('+err.message+')');
+  }
+}
+
+async function clearManualCells(){
+  if(accumZoneFilter==='all') return;
+  if(!confirm(`${accumZoneFilter} 구역에서 직접 선택한 제외/방문 칸을 전부 초기화할까요?`)) return;
+  zoneManualCells={excluded:[],visited:[]};
+  zoneManualCellsZone=accumZoneFilter;
+  manualCellEditsDirty=false;
+  manualCellPendingKeys.clear();
+  try{
+    await RouteDB.saveZoneManualCells(accumZoneFilter,zoneManualCells);
+  }catch(err){
+    console.warn('[경로뷰어] 수동 셀 오버라이드 초기화 실패:',err);
+  }
+  renderAccumView();
+}
+
+function renderManualCellsOverlayForCurrentZone(){
+  if(!manualCellsLayer) return;
+  manualCellsLayer.clearLayers();
+  if(accumZoneFilter==='all'||zoneManualCellsZone!==accumZoneFilter) return;
+  const poly=ZONE_POLYGONS[accumZoneFilter];
+  if(!poly||poly.length<3) return;
+  const lats=poly.map(p=>p[0]);
+  const refLat=(Math.min(...lats)+Math.max(...lats))/2;
+  const latDeg=GAP_CELL_SIZE_M/111320;
+  const lngDeg=GAP_CELL_SIZE_M/(111320*Math.cos(refLat*Math.PI/180));
+  paintManualCellOverrides(zoneManualCells,latDeg,lngDeg,(la,lo)=>pointInPolygon(la,lo,poly));
+}
+
+async function toggleManualCellAt(lat,lng){
+  if(!cellEditMode||accumZoneFilter==='all') return;
+  const poly=ZONE_POLYGONS[accumZoneFilter];
+  if(!poly||poly.length<3) return;
+  if(!pointInPolygon(lat,lng,poly)) return; // 구역 경계 밖 클릭은 무시
+
+  const lats=poly.map(p=>p[0]);
+  const refLat=(Math.min(...lats)+Math.max(...lats))/2;
+  const latDeg=GAP_CELL_SIZE_M/111320;
+  const lngDeg=GAP_CELL_SIZE_M/(111320*Math.cos(refLat*Math.PI/180));
+  const gy=Math.floor(lat/latDeg), gx=Math.floor(lng/lngDeg);
+  const key=gy+'_'+gx;
+  const cellLat=(gy+0.5)*latDeg, cellLng=(gx+0.5)*lngDeg;
+
+  await loadZoneManualCells(accumZoneFilter);
+  const listKey=cellEditMode==='exclude'?'excluded':'visited';
+  const otherKey=cellEditMode==='exclude'?'visited':'excluded';
+  const list=zoneManualCells[listKey];
+  const other=zoneManualCells[otherKey];
+  const idx=findManualCellIndex(list,latDeg,lngDeg,gy,gx);
+  if(idx>=0){
+    list.splice(idx,1);
+  }else{
+    const otherIdx=findManualCellIndex(other,latDeg,lngDeg,gy,gx);
+    if(otherIdx>=0) other.splice(otherIdx,1);
+    list.push([cellLat,cellLng]);
+  }
+  manualCellPendingKeys.add(key);
+  manualCellEditsDirty=true;
+  renderManualCellsOverlayForCurrentZone();
+  updateBoundaryUI();
+  updateCellEditHint();
+}
+
+// ── 구역 경계 꼭짓점 드래그 편집 ──────────────────────────────────
+// ⚙️ 패널이 열려있을 때 구역 경계선을 클릭하면(요구사항 12) 꼭짓점마다
+// 드래그 가능한 핸들을 띄운다. L.circleMarker/L.polygon은 코어 Leaflet에서
+// 드래그를 지원하지 않아서(플러그인 필요), 대신 draggable 옵션을 기본
+// 지원하는 L.marker(divIcon)를 꼭짓점 핸들로 쓴다.
+let vertexEditActive=false;
+let vertexEditZone=null;
+let vertexEditLayers=[];
+
+function clearVertexEditLayers(){
+  vertexEditLayers.forEach(l=>accumMap.removeLayer(l));
+  vertexEditLayers=[];
+}
+
+function exitVertexEditMode(){
+  if(!vertexEditActive) return;
+  vertexEditActive=false;
+  vertexEditZone=null;
+  clearVertexEditLayers();
+}
+
+function renderVertexEditHandles(zone){
+  clearVertexEditLayers();
+  const poly=ZONE_POLYGONS[zone];
+  if(!poly||poly.length<3) return;
+  const liveOutline=L.polygon(poly,{color:'#f59e0b',weight:3,dashArray:'6,6',fillOpacity:.08,interactive:false}).addTo(accumMap);
+  vertexEditLayers.push(liveOutline);
+  poly.forEach((pt,idx)=>{
+    const marker=L.marker(pt,{
+      draggable:true,
+      icon:L.divIcon({className:'vertex-handle',iconSize:[16,16],iconAnchor:[8,8]}),
+    }).addTo(accumMap);
+    marker.on('drag',()=>{
+      const ll=marker.getLatLng();
+      poly[idx]=[ll.lat,ll.lng];
+      liveOutline.setLatLngs(poly);
+    });
+    marker.on('dragend',()=>{
+      saveZonePolygonsToStorage();
+      // 건물/아파트/도로 캐시는 경계 bbox가 바뀌면 다시 받아와야 하니 무효화한다
+      delete loadZoneBuildingsCache()[zone];
+      delete loadZoneRoadsCache()[zone];
+      saveZoneBuildingsCache();
+      saveZoneRoadsCache();
+      if(showCoverageGaps) renderAccumView();
+    });
+    vertexEditLayers.push(marker);
+  });
+}
+
+function toggleVertexEditMode(zone){
+  if(!boundaryEditOpen) return; // ⚙️ 패널이 열려있을 때만 허용
+  if(vertexEditActive&&vertexEditZone===zone){
+    exitVertexEditMode();
+    document.getElementById('accum-hint').textContent=defaultCoverageHint();
+    return;
+  }
+  cellEditMode=null; // 칸 편집 모드와 동시에 안 켜지게
+  updateBoundaryUI();
+  vertexEditActive=true;
+  vertexEditZone=zone;
+  renderVertexEditHandles(zone);
+  document.getElementById('accum-hint').textContent=`${zone} 경계 꼭짓점을 드래그해서 모양을 바꿀 수 있어요. 마치려면 경계선을 다시 누르세요.`;
+}
 
 function startBoundaryDraw(){
   if(accumZoneFilter==='all'){
@@ -96,6 +488,8 @@ function startBoundaryDraw(){
     return;
   }
   initAccumMap();
+  cellEditMode=null;
+  exitVertexEditMode();
   boundaryDrawMode=true;
   boundaryDrawZone=accumZoneFilter;
   boundaryDraftPts=[];
@@ -111,9 +505,14 @@ function startBoundaryDraw(){
 }
 
 function onBoundaryMapClick(e){
-  if(!boundaryDrawMode) return;
-  boundaryDraftPts.push([e.latlng.lat,e.latlng.lng]);
-  drawBoundaryDraft();
+  if(boundaryDrawMode){
+    boundaryDraftPts.push([e.latlng.lat,e.latlng.lng]);
+    drawBoundaryDraft();
+    return;
+  }
+  if(cellEditMode&&showCoverageGaps){
+    toggleManualCellAt(e.latlng.lat,e.latlng.lng);
+  }
 }
 
 function drawBoundaryDraft(){
@@ -172,13 +571,43 @@ function clearZoneBoundary(){
   if(accumZoneFilter==='all'||!ZONE_POLYGONS[accumZoneFilter]) return;
   delete ZONE_POLYGONS[accumZoneFilter];
   delete loadZoneBuildingsCache()[accumZoneFilter];
+  delete loadZoneRoadsCache()[accumZoneFilter];
   saveZoneBuildingsCache();
+  saveZoneRoadsCache();
   saveZonePolygonsToStorage();
   updateBoundaryUI();
   if(showCoverageGaps) renderAccumView();
 }
 
 function updateBoundaryUI(){
+  const editBtn=document.getElementById('boundary-edit-toggle-btn');
+  if(editBtn){
+    editBtn.style.display=showCoverageGaps?'inline-flex':'none';
+    editBtn.classList.toggle('active',boundaryEditOpen);
+  }
+  const controls=document.getElementById('boundary-controls');
+  if(controls) controls.style.display=(showCoverageGaps&&boundaryEditOpen)?'flex':'none';
+
+  const debugBtn=document.getElementById('exclusion-debug-toggle-btn');
+  if(debugBtn){
+    debugBtn.style.display=showCoverageGaps?'inline-flex':'none';
+    debugBtn.classList.toggle('active',showExclusionDebug);
+  }
+
+  const excludeBtn=document.getElementById('cell-exclude-btn');
+  if(excludeBtn) excludeBtn.classList.toggle('active',cellEditMode==='exclude');
+  const visitBtn=document.getElementById('cell-visit-btn');
+  if(visitBtn) visitBtn.classList.toggle('active',cellEditMode==='visit');
+  const applyBtn=document.getElementById('manual-apply-btn');
+  if(applyBtn){
+    const count=(zoneManualCellsZone===accumZoneFilter)?manualCellCount():0;
+    applyBtn.disabled=!manualCellEditsDirty;
+    applyBtn.classList.toggle('active',manualCellEditsDirty);
+    applyBtn.textContent=manualCellEditsDirty?`선택 적용 (${count})`:'선택 적용';
+  }
+  const mapWrap=document.getElementById('accum-map-wrap');
+  if(mapWrap) mapWrap.classList.toggle('cell-edit-mode',!!cellEditMode);
+
   const btn=document.getElementById('boundary-draw-btn');
   const clearBtn=document.getElementById('boundary-clear-btn');
   if(!btn) return;
@@ -198,9 +627,31 @@ function updateBoundaryUI(){
 //  다시 받아오지 않는다. 오프라인 등으로 못 받아오면 예전 캐시(있으면)
 //  또는 빈 목록(=건물 제외 없이 예전 방식)으로 조용히 넘어간다.
 // ══════════════════════════════════════════════════════════
-const ZONE_BUILDINGS_LS_KEY='route_viewer_zone_buildings_v1';
+// v5 — amenity=parking(주차장)을 parkingPolygons로 추가했다(단지 밖 독립
+// 주차장도 빼려고). 캐시 키를 매번 올리면, 마침 그때 Overpass가 죽어있으면
+// (실제로 이 작업 중에도 미러 3개가 한꺼번에 다운돼 있었다) 새 버전 캐시가
+// 텅 빈 채로 시작해서 오히려 제외가 하나도 안 되는 역효과가 난다 — v4
+// 캐시가 있으면(주차장 제외만 빠진 채) 최소한 그걸로 우선 보여주고, 성공
+// 하면 그때 v5로 갈아탄다.
+const ZONE_BUILDINGS_LS_KEY='route_viewer_zone_buildings_v5';
+const ZONE_BUILDINGS_LEGACY_LS_KEY='route_viewer_zone_buildings_v4';
+
+function readLegacyBuildingsFallback(zoneName,bboxKey){
+  try{
+    const legacy=JSON.parse(localStorage.getItem(ZONE_BUILDINGS_LEGACY_LS_KEY)||'{}');
+    const entry=legacy[zoneName];
+    if(entry&&entry.bboxKey===bboxKey&&entry.buildings){
+      console.warn('[경로뷰어] 최신 건물/주차장 데이터를 못 받아와서, 이전에 받아둔 데이터(주차장 제외는 없이)로 우선 보여줘요.');
+      return {parkingPolygons:[], ...entry.buildings};
+    }
+  }catch(_){/* 무시 — 폴백 실패는 EMPTY_BUILDINGS로 이어진다 */}
+  return null;
+}
+const ZONE_ROADS_LS_KEY='route_viewer_zone_roads_v1';
 let zoneBuildingsCache=null;
 let zoneBuildingsFetchPromise={};
+let zoneRoadsCache=null;
+let zoneRoadsFetchPromise={};
 
 function loadZoneBuildingsCache(){
   if(zoneBuildingsCache) return zoneBuildingsCache;
@@ -214,71 +665,258 @@ function saveZoneBuildingsCache(){
   catch(err){ console.warn('[경로뷰어] 건물 캐시 저장 실패:',err); }
 }
 
+function loadZoneRoadsCache(){
+  if(zoneRoadsCache) return zoneRoadsCache;
+  try{ zoneRoadsCache=JSON.parse(localStorage.getItem(ZONE_ROADS_LS_KEY)||'{}'); }
+  catch(_){ zoneRoadsCache={}; }
+  return zoneRoadsCache;
+}
+
+function saveZoneRoadsCache(){
+  try{ localStorage.setItem(ZONE_ROADS_LS_KEY,JSON.stringify(zoneRoadsCache)); }
+  catch(err){ console.warn('[route-viewer] road cache save failed:',err); }
+}
+
 function bboxKeyFor(poly){
   const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
   return [Math.min(...lats),Math.max(...lats),Math.min(...lngs),Math.max(...lngs)].map(n=>n.toFixed(5)).join(',');
 }
 
-async function fetchBuildingsForBbox(minLat,minLng,maxLat,maxLng){
-  const query=`[out:json][timeout:25];way["building"](${minLat},${minLng},${maxLat},${maxLng});out geom;`;
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),15000);
-  try{
-    const res=await fetch('https://overpass-api.de/api/interpreter',{
-      method:'POST',
-      headers:{'Content-Type':'text/plain'},
-      body:query,
-      signal:controller.signal,
-    });
-    if(!res.ok) throw new Error('overpass HTTP '+res.status);
-    const data=await res.json();
-    const polygons=[];
-    (data.elements||[]).forEach(el=>{
-      if(el.type==='way'&&Array.isArray(el.geometry)&&el.geometry.length>=3){
-        polygons.push(el.geometry.map(pt=>[pt.lat,pt.lon]));
-      }
-    });
-    return polygons;
-  }finally{
-    clearTimeout(timer);
+// overpass-api.de 가 죽어있거나(무료 커뮤니티 서버라 종종 있음) 이 네트워크에서
+// 막혀있으면 다음 미러로 넘어간다. 하나라도 성공하면 그 결과를 쓴다.
+const OVERPASS_MIRRORS=[
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+];
+
+async function runOverpassQuery(query){
+  let lastErr=null;
+  for(const url of OVERPASS_MIRRORS){
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),15000);
+    try{
+      const res=await fetch(url,{
+        method:'POST',
+        headers:{'Content-Type':'text/plain'},
+        body:query,
+        signal:controller.signal,
+      });
+      if(!res.ok) throw new Error('overpass HTTP '+res.status+' ('+url+')');
+      return await res.json();
+    }catch(err){
+      lastErr=err;
+      console.warn('[route-viewer] overpass mirror failed, trying next:',url,err);
+    }finally{
+      clearTimeout(timer);
+    }
   }
+  throw lastErr;
+}
+
+// 건물은 단순 way뿐 아니라, 아파트 단지처럼 안뜰이 있는 복잡한 모양은
+// OSM에 relation(멀티폴리곤)으로 올라오는 경우가 흔하다(강남/판교의 대단지가
+// 특히 그렇다). way만 받으면 그런 큰 단지들이 통째로 빠져서, 커버리지 갭
+// 계산에서 건물 내부가 계속 "미방문 칸"으로 잘못 남는다 — relation도 같이 받는다.
+//
+// 아파트 동은 building/apartmentPolygons로 따로 모은다 — 한국 OSM 매핑
+// 관례상 아파트 동은 building=apartments(또는 residential=apartments)로
+// 구분되고, 단독주택 등은 다른 값을 쓴다.
+function isApartmentBuildingTags(tags){
+  if(!tags) return false;
+  return tags.building==='apartments' || tags.residential==='apartments' || !!tags['building:flats'];
+}
+
+// landuse=residential "전체"는 절대 안 쓴다(일반 주거지역까지 통째로
+// 지워짐) — 하지만 landuse=residential + residential=apartments 조합은
+// 매퍼가 그 아파트 "단지 부지 하나"를 명시적으로 그려둔 것이라 신뢰할 수
+// 있다(실측: 신현대아파트 = way 436407134, 정확히 이 태그 조합, 18개
+// 꼭짓점의 실제 단지 경계). 이게 있으면 클러스터링/hull 추정 없이 그대로
+// 쓴다 — 사람이 그린 경계가 추정보다 항상 정확하다.
+function isExplicitApartmentComplexTags(tags){
+  return !!tags && tags.landuse==='residential' && tags.residential==='apartments';
+}
+
+// 주차장(amenity=parking) — 아파트 단지 밖에 있는 독립 주차장(상가 주차장 등)은
+// apartment/building 마스크로 안 잡히므로 따로 받는다. 단지 내부 주차장은
+// 보통 별도 amenity=parking 폴리곤 없이 그냥 단지 부지 안에 있어서 이미
+// apartment 마스크로 커버되지만, 밖에 있는 주차장은 이게 없으면 못 뺀다.
+function isParkingTags(tags){
+  return !!tags && tags.amenity==='parking';
+}
+
+async function fetchBuildingsForBbox(minLat,minLng,maxLat,maxLng){
+  const bboxArg=`(${minLat},${minLng},${maxLat},${maxLng})`;
+  const query=`[out:json][timeout:25];(`
+    +`way["building"]${bboxArg};relation["building"]${bboxArg};`
+    +`way["landuse"="residential"]["residential"="apartments"]${bboxArg};`
+    +`relation["landuse"="residential"]["residential"="apartments"]${bboxArg};`
+    +`way["amenity"="parking"]${bboxArg};relation["amenity"="parking"]${bboxArg};`
+    +`);out geom;`;
+  const data=await runOverpassQuery(query);
+  const buildingPolygons=[];
+  const apartmentPolygons=[];
+  const explicitComplexPolygons=[];
+  const parkingPolygons=[];
+  (data.elements||[]).forEach(el=>{
+    const target=isExplicitApartmentComplexTags(el.tags) ? explicitComplexPolygons
+      : isParkingTags(el.tags) ? parkingPolygons
+      : isApartmentBuildingTags(el.tags) ? apartmentPolygons
+      : buildingPolygons;
+    if(el.type==='way'&&Array.isArray(el.geometry)&&el.geometry.length>=3){
+      target.push(el.geometry.map(pt=>[pt.lat,pt.lon]));
+    }else if(el.type==='relation'&&Array.isArray(el.members)){
+      // outer 링마다 하나의 폴리곤으로 취급(안뜰 구멍은 무시 — 칸을 좀 더
+      // 넓게 빼는 쪽이, 큰 단지를 통째로 놓치는 것보다 낫다).
+      el.members.forEach(m=>{
+        if(m.role==='outer'&&Array.isArray(m.geometry)&&m.geometry.length>=3){
+          target.push(m.geometry.map(pt=>[pt.lat,pt.lon]));
+        }
+      });
+    }
+  });
+  return {buildingPolygons,apartmentPolygons,explicitComplexPolygons,parkingPolygons};
 }
 
 // zoneName의 건물 폴리곤 목록. 캐시가 있고 구역 경계가 그대로면 캐시를 쓰고,
 // 없거나 경계가 바뀌었으면 Overpass에서 새로 받아온다.
+async function fetchRoadsForBbox(minLat,minLng,maxLat,maxLng){
+  const driveable='motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link';
+  const query=`[out:json][timeout:25];way["highway"~"^(${driveable})$"](${minLat},${minLng},${maxLat},${maxLng});out geom;`;
+  const data=await runOverpassQuery(query);
+  const lines=[];
+  (data.elements||[]).forEach(el=>{
+    if(el.type==='way'&&Array.isArray(el.geometry)&&el.geometry.length>=2){
+      lines.push(el.geometry.map(pt=>[pt.lat,pt.lon]));
+    }
+  });
+  return lines;
+}
+
+const EMPTY_BUILDINGS={buildingPolygons:[],apartmentPolygons:[],explicitComplexPolygons:[],parkingPolygons:[]};
+
 async function getZoneBuildingPolygons(zoneName){
   const poly=ZONE_POLYGONS[zoneName];
-  if(!poly||poly.length<3) return [];
+  if(!poly||poly.length<3) return EMPTY_BUILDINGS;
   const cache=loadZoneBuildingsCache();
   const key=bboxKeyFor(poly);
   const cached=cache[zoneName];
-  if(cached&&cached.bboxKey===key) return cached.polygons;
+  if(cached&&cached.bboxKey===key) return cached.buildings;
   if(zoneBuildingsFetchPromise[zoneName]) return zoneBuildingsFetchPromise[zoneName];
   const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
   const minLat=Math.min(...lats), maxLat=Math.max(...lats);
   const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
-  const promise=fetchBuildingsForBbox(minLat,minLng,maxLat,maxLng).then(polygons=>{
-    cache[zoneName]={bboxKey:key,polygons,fetchedAt:Date.now()};
+  const promise=fetchBuildingsForBbox(minLat,minLng,maxLat,maxLng).then(buildings=>{
+    cache[zoneName]={bboxKey:key,buildings,fetchedAt:Date.now()};
     saveZoneBuildingsCache();
     delete zoneBuildingsFetchPromise[zoneName];
-    return polygons;
+    return buildings;
   }).catch(err=>{
     console.warn('[경로뷰어] '+zoneName+' 건물 데이터를 가져오지 못했어요(오프라인일 수 있음):',err);
     delete zoneBuildingsFetchPromise[zoneName];
-    return cached?cached.polygons:[];
+    return cached?.buildings || readLegacyBuildingsFallback(zoneName,key) || EMPTY_BUILDINGS;
   });
   zoneBuildingsFetchPromise[zoneName]=promise;
   return promise;
 }
 
-// 건물 폴리곤들이 덮는 격자 칸 key 집합. 건물 하나하나의 bbox 안 칸만 훑으므로
-// (칸 수 × 전체 건물 수)가 아니라 (건물마다 자기 bbox 칸 수)로 끝난다.
-function buildExcludedCellSet(buildingPolygons,latDeg,lngDeg){
+// ── 강남권 HD map(산자부 E2E 데이터협의체 표준노드링크) ──────────────────
+// [산자부E2E][데이터협의체]HDMap_구축지역(강남)_세부구역_260209 폴더의
+// shapefile(강남구/서초구 도로)을
+// tools/convert-hdmap-shapefile.ps1로 미리 WGS84 lat/lng로 변환해
+// src/data/hdmap_*_roads.js에 넣어뒀다. "강남" 운영 구역은 실제로 옆 서초
+// 경계까지 같이 그려 쓰므로, 강남 커버리지 계산에서는 강남+서초 HD map을
+// 한 묶음으로 합쳐서 도로로 인정한다 — OSM/Overpass는 이 구역에서 아예 안 쓴다.
+//
+// 이 .js는 index.html이 <script src="data/hdmap_*_roads.js">로
+// 로드해서 window.HDMAP_*_ROADS 전역에 데이터를 담아준다 — fetch()로
+// 로컬 JSON을 읽는 방식은 안 쓴다. src/index.html을 file://로 그냥
+// 더블클릭해서 열면 fetch()가 브라우저 CORS 정책에 막히지만(Failed to
+// fetch), <script> 태그는 file:// 에서도 그대로 로드되기 때문이다 — 이
+// 방식이면 file:// 직접 열기 / node server.js / Electron 세 가지 실행
+// 방식이 전부 코드 한 줄 안 바꾸고 동일하게 동작한다.
+const HDMAP_ZONE_GLOBALS={
+  '강남':['HDMAP_GANGNAM_ROADS','HDMAP_SEOCHO_ROADS'],
+  // 사용자가 별도 "서초" 구역을 직접 만들어 쓰는 경우만 지원한다. 기본 지역으로는 만들지 않는다.
+  '서초':['HDMAP_SEOCHO_ROADS'],
+};
+let hdmapRoadsCache={};
+
+function hdmapGlobalNamesFor(zoneName){
+  const globals=HDMAP_ZONE_GLOBALS[zoneName];
+  if(Array.isArray(globals)) return globals;
+  return globals?[globals]:[];
+}
+
+function hdmapSourceLabel(zoneName){
+  return hdmapGlobalNamesFor(zoneName).map(g=>'window.'+g).join(' + ');
+}
+
+function loadHdmapRoads(zoneName){
+  const globalNames=hdmapGlobalNamesFor(zoneName);
+  if(!globalNames.length) return [];
+  if(hdmapRoadsCache[zoneName]) return hdmapRoadsCache[zoneName];
+  const lines=[];
+  const missing=[];
+  globalNames.forEach(globalName=>{
+    const data=window[globalName];
+    if(!data){
+      missing.push(globalName);
+      return;
+    }
+    (data.lines||[]).map(l=>l.points)
+      .filter(pts=>Array.isArray(pts)&&pts.length>=2)
+      .forEach(pts=>lines.push(pts));
+  });
+  if(missing.length){
+    console.warn('[경로뷰어] '+zoneName+' HD map 데이터('+missing.join(', ')+')가 없어요 — index.html에서 data/hdmap_gangnam_roads.js / data/hdmap_seocho_roads.js가 제대로 로드됐는지 확인해주세요.');
+  }
+  console.log('[경로뷰어] '+zoneName+' HD map 도로 '+lines.length+'개 로드 완료 ('+hdmapSourceLabel(zoneName)+')');
+  hdmapRoadsCache[zoneName]=lines;
+  return lines;
+}
+
+async function getZoneRoadPolylines(zoneName){
+  if(hdmapGlobalNamesFor(zoneName).length) return loadHdmapRoads(zoneName);
+  const poly=ZONE_POLYGONS[zoneName];
+  if(!poly||poly.length<3) return [];
+  const cache=loadZoneRoadsCache();
+  const key=bboxKeyFor(poly);
+  const cached=cache[zoneName];
+  if(cached&&cached.bboxKey===key) return cached.lines;
+  if(zoneRoadsFetchPromise[zoneName]) return zoneRoadsFetchPromise[zoneName];
+  const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
+  const minLat=Math.min(...lats), maxLat=Math.max(...lats);
+  const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
+  const promise=fetchRoadsForBbox(minLat,minLng,maxLat,maxLng).then(lines=>{
+    cache[zoneName]={bboxKey:key,lines,fetchedAt:Date.now()};
+    saveZoneRoadsCache();
+    delete zoneRoadsFetchPromise[zoneName];
+    return lines;
+  }).catch(err=>{
+    console.warn('[route-viewer] road data fetch failed for '+zoneName+':',err);
+    delete zoneRoadsFetchPromise[zoneName];
+    return cached?cached.lines:[];
+  });
+  zoneRoadsFetchPromise[zoneName]=promise;
+  return promise;
+}
+
+// polygons 각각의 경계에서 bufferM(미터) 이내인 칸을 전부 뺀다 — 실제 polygon
+// buffer/union 없이, 폴리곤별로 자기 bbox(+buffer 여유)만 훑어서 칸 중심까지의
+// 거리를 재는 방식이라 O(폴리곤별 지역 칸 수)로 끝난다.
+// bufferM이 크면(아파트 단지) 옆 동 폴리곤의 buffer와 자연히 겹쳐서, 동 사이
+// 내부도로·주차장까지 하나로 묶여 빠진다 — 별도 클러스터링/유니온 계산 없이도
+// 같은 효과를 낸다.
+function buildExcludedCellSet(polygons,latDeg,lngDeg,refLat,bufferM){
   const excluded=new Set();
-  buildingPolygons.forEach(poly=>{
+  const {mLat,mLng}=mPerDegAt(refLat);
+  const marginLatDeg=bufferM/mLat, marginLngDeg=bufferM/mLng;
+  (polygons||[]).forEach(poly=>{
     const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
-    const minLat=Math.min(...lats), maxLat=Math.max(...lats);
-    const minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
+    const minLat=Math.min(...lats)-marginLatDeg, maxLat=Math.max(...lats)+marginLatDeg;
+    const minLng=Math.min(...lngs)-marginLngDeg, maxLng=Math.max(...lngs)+marginLngDeg;
     const laStart=Math.floor(minLat/latDeg), laEnd=Math.ceil(maxLat/latDeg);
     const loStart=Math.floor(minLng/lngDeg), loEnd=Math.ceil(maxLng/lngDeg);
     for(let la=laStart;la<=laEnd;la++){
@@ -286,7 +924,7 @@ function buildExcludedCellSet(buildingPolygons,latDeg,lngDeg){
         const key=la+'_'+lo;
         if(excluded.has(key)) continue;
         const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
-        if(pointInPolygon(cellLat,cellLng,poly)) excluded.add(key);
+        if(polygonDistanceM(cellLat,cellLng,poly,refLat)<=bufferM) excluded.add(key);
       }
     }
   });
@@ -307,38 +945,356 @@ function buildExcludedCellSet(buildingPolygons,latDeg,lngDeg){
 //
 // showCoverageDepth 가 켜져 있으면 방문 횟수 등급(0/1/2~4/5+)별로 칸을 칠하고
 // (요구사항 11), 꺼져 있으면 기존처럼 "미방문 칸만 빨갛게"(요구사항 9 이전 방식)를 유지한다.
+//
+// 예전엔 각 segment를 ~10m 간격으로 점을 찍어 "점이 지나간 칸"만 도로로 쳤다.
+// 두 도로가 대각선으로 만나는 안쪽 쐐기는 어느 쪽 점도 정확히 지나가지 않아서
+// 도로 칸으로 등록조차 안 됐다(대각선 교차부 삼각형 틈의 원인). 이제 칸 중심에서
+// segment까지의 실제 최단거리를 재서 ROAD_HALF_WIDTH_M 반경 안이면 도로로 친다 —
+// 두 segment가 실제로 만나거나 가까우면(끝점이 몇 m 어긋난 "사실상 같은 도로"
+// 포함) 그 사이 칸은 항상 둘 중 하나의 반경 안에 들어오므로 쐐기 틈이 생길 수
+// 없다. 관계없는 평행 도로는 2×ROAD_HALF_WIDTH_M보다 멀면 그대로 안 이어진다.
+const ROAD_HALF_WIDTH_M=11;
+
+function buildRoadCellSet(roadLines,latDeg,lngDeg,refLat){
+  const cells=new Set();
+  const {mLat,mLng}=mPerDegAt(refLat);
+  const marginLatDeg=ROAD_HALF_WIDTH_M/mLat, marginLngDeg=ROAD_HALF_WIDTH_M/mLng;
+  (roadLines||[]).forEach(line=>{
+    for(let i=1;i<line.length;i++){
+      const a=line[i-1], b=line[i];
+      const minLat=Math.min(a[0],b[0])-marginLatDeg, maxLat=Math.max(a[0],b[0])+marginLatDeg;
+      const minLng=Math.min(a[1],b[1])-marginLngDeg, maxLng=Math.max(a[1],b[1])+marginLngDeg;
+      const laStart=Math.floor(minLat/latDeg), laEnd=Math.ceil(maxLat/latDeg);
+      const loStart=Math.floor(minLng/lngDeg), loEnd=Math.ceil(maxLng/lngDeg);
+      for(let la=laStart;la<=laEnd;la++){
+        for(let lo=loStart;lo<=loEnd;lo++){
+          const key=la+'_'+lo;
+          if(cells.has(key)) continue;
+          const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
+          if(distPointToSegmentM(cellLat,cellLng,a[0],a[1],b[0],b[1],refLat)<=ROAD_HALF_WIDTH_M){
+            cells.add(key);
+          }
+        }
+      }
+    }
+  });
+  return cells;
+}
+
+function resetCoverageCellLayerCache(){
+  coverageCellLayers=new Map();
+}
+
+function addCoverageCellLayer(key,layer){
+  if(!key||!layer) return layer;
+  coverageCellLayers.set(key,{layer,visible:true});
+  return layer;
+}
+
+function setCoverageCellVisible(key,visible){
+  const entry=coverageCellLayers.get(key);
+  if(!entry||!coverageLayer) return;
+  if(visible&& !entry.visible){
+    entry.layer.addTo(coverageLayer);
+    entry.visible=true;
+  }else if(!visible&&entry.visible){
+    coverageLayer.removeLayer(entry.layer);
+    entry.visible=false;
+  }
+}
+
+function paintManualCellOverrides(manualCells,latDeg,lngDeg,insideTest){
+  const pendingOnly=!showExclusionDebug;
+  if(pendingOnly&&!manualCellEditsDirty) return;
+  if(!manualCellsLayer||!manualCells) return;
+  const draw=(points,style)=>{
+    const seen=new Set();
+    (points||[]).forEach(([lat,lng])=>{
+      const gy=Math.floor(lat/latDeg), gx=Math.floor(lng/lngDeg);
+      const key=gy+'_'+gx;
+      if(pendingOnly&&!manualCellPendingKeys.has(key)) return;
+      if(seen.has(key)) return;
+      seen.add(key);
+      const cellLat=(gy+0.5)*latDeg, cellLng=(gx+0.5)*lngDeg;
+      if(insideTest&&!insideTest(cellLat,cellLng)) return;
+      const bounds=[[gy*latDeg,gx*lngDeg],[(gy+1)*latDeg,(gx+1)*lngDeg]];
+      const layer=L.rectangle(bounds,{
+        ...style,
+        interactive:false,
+      }).addTo(manualCellsLayer);
+      layer.bringToFront();
+    });
+  };
+  if(showExclusionDebug){
+    draw(manualCells.excluded,{
+      color:'#dc2626',weight:2,dashArray:'4 3',
+      fillColor:'#0a0e16',fillOpacity:.78,
+    });
+    draw(manualCells.visited,{
+      color:'#5fd88a',weight:2,dashArray:'4 3',
+      fillColor:'#5fd88a',fillOpacity:.22,
+    });
+  }else{
+    draw(manualCells.excluded,{
+      color:'#dc2626',weight:2,dashArray:'5 3',
+      fillColor:'#dc2626',fillOpacity:.18,
+    });
+    draw(manualCells.visited,{
+      color:'#16a34a',weight:2,dashArray:'5 3',
+      fillColor:'#5fd88a',fillOpacity:.24,
+    });
+  }
+}
+
+// ── 인접 도로 자동 연결(Gap Healing) ─────────────────────────────────
+// OSM에서 같은 도로가 여러 way로 쪼개지면서 끝점이 실제로 몇 m~수십 m
+// 떨어져 있는 경우가 흔하다(편집 오차, 분리된 way 등). "OSM node가 실제로
+// 연결돼 있어야 한다"는 엄격한 topology 조건은 쓰지 않는다 — 대신 서로
+// 다른 두 도로의 끝점이 가깝고(거리) 방향이 합리적이면(둘 다 서로를 향해
+// 뻗어나가는 모양 — T자/직교로 우연히 가까운 경우는 걸러진다) 그 사이를
+// 잇는 가상의 segment(bridge)를 만든다. 이 bridge는 실제 도로 segment와
+// 똑같이 buildRoadCellSet에 넣어 라스터화하므로, 별도의 polygon union/버퍼
+// 로직이 필요 없다 — "도로 하나 더 있다고 치는" 것과 동일하게 처리된다.
+// 교차로/대각선 접합부(끝점이 사실상 같은 지점)는 이미 ROAD_HALF_WIDTH_M
+// 반경만으로 자연히 이어지므로 bridge가 필요 없다 — bridge는 그보다 먼
+// "끊긴 것처럼 보이지만 사실 같은 도로" 구간만 대상으로 한다.
+const ADJACENCY_FILL_ENABLED=true;
+const BRIDGE_GAP_MAX_M=ROAD_HALF_WIDTH_M*3; // 이보다 멀면 관계없는 도로로 보고 안 잇는다(≈33m)
+const BRIDGE_ANGLE_TOL_DEG=55; // 두 도로 끝의 "바깥쪽(끊긴 쪽)" 방향이 이 각도 이내로 서로를 향해야 연결
+
+// 끝점에서 도로가 끊긴 방향(그대로 연장하면 향할 방향)의 단위벡터 — lat/lng 차이 그대로 반환(호출부에서 미터로 변환)
+function lineEndpointTangentDeg(line,atStart){
+  const a=atStart?line[0]:line[line.length-1];
+  const b=atStart?line[1]:line[line.length-2];
+  return [a[0]-b[0],a[1]-b[1]];
+}
+
+// forbiddenPolygons(아파트 단지·주차장)를 지나가는 bridge는 만들지 않는다 —
+// "아파트/주차장 때문에 떨어져 있는 도로를 그 위로 잇지 말라"는 요구사항.
+// bridge 위 몇 지점(1/3, 1/2, 2/3)만 검사하는 근사다: bridge 자체가 짧고
+// (최대 33m) forbidden 영역은 보통 그보다 훨씬 커서 실용적으로 충분하다.
+function bridgeCrossesForbidden(aLat,aLng,bLat,bLng,forbiddenPolygons){
+  if(!forbiddenPolygons||!forbiddenPolygons.length) return false;
+  return [0.25,0.5,0.75].some(t=>{
+    const lat=aLat+(bLat-aLat)*t, lng=aLng+(bLng-aLng)*t;
+    return forbiddenPolygons.some(poly=>pointInPolygon(lat,lng,poly));
+  });
+}
+
+function findRoadBridges(roadLines,refLat,forbiddenPolygons){
+  if(!ADJACENCY_FILL_ENABLED||!roadLines||roadLines.length<2) return [];
+  const {mLat,mLng}=mPerDegAt(refLat);
+  const toM=(dLat,dLng)=>[dLng*mLng,dLat*mLat];
+  const norm=([x,y])=>{ const n=Math.hypot(x,y); return n>0?[x/n,y/n]:[0,0]; };
+
+  const endpoints=[];
+  roadLines.forEach((line,lineIdx)=>{
+    if(line.length<2) return;
+    [true,false].forEach(atStart=>{
+      const pt=atStart?line[0]:line[line.length-1];
+      endpoints.push({
+        lineIdx, lat:pt[0], lng:pt[1],
+        tangent:norm(toM(...lineEndpointTangentDeg(line,atStart))),
+      });
+    });
+  });
+
+  // 끝점을 공간 버킷에 넣어서, 후보를 근처 버킷만 비교한다(전체 O(n²) 방지)
+  const bucketLatDeg=BRIDGE_GAP_MAX_M/mLat, bucketLngDeg=BRIDGE_GAP_MAX_M/mLng;
+  const buckets=new Map();
+  const bucketKey=(lat,lng)=>Math.floor(lat/bucketLatDeg)+'_'+Math.floor(lng/bucketLngDeg);
+  endpoints.forEach((ep,idx)=>{
+    const key=bucketKey(ep.lat,ep.lng);
+    if(!buckets.has(key)) buckets.set(key,[]);
+    buckets.get(key).push(idx);
+  });
+
+  const bridges=[];
+  endpoints.forEach((epA,idxA)=>{
+    const bLat=Math.floor(epA.lat/bucketLatDeg), bLng=Math.floor(epA.lng/bucketLngDeg);
+    for(let dLa=-1;dLa<=1;dLa++){
+      for(let dLo=-1;dLo<=1;dLo++){
+        const cand=buckets.get((bLat+dLa)+'_'+(bLng+dLo));
+        if(!cand) continue;
+        for(const idxB of cand){
+          if(idxB<=idxA) continue; // 각 쌍을 한 번만 처리
+          const epB=endpoints[idxB];
+          if(epB.lineIdx===epA.lineIdx) continue; // 같은 도로 자기 자신은 제외
+          const [gx,gy]=toM(epB.lat-epA.lat,epB.lng-epA.lng);
+          const gapM=Math.hypot(gx,gy);
+          if(gapM>BRIDGE_GAP_MAX_M||gapM<=1e-6) continue;
+          const dirAtoB=norm([gx,gy]);
+          const angA=Math.acos(Math.max(-1,Math.min(1,epA.tangent[0]*dirAtoB[0]+epA.tangent[1]*dirAtoB[1])))*180/Math.PI;
+          const angB=Math.acos(Math.max(-1,Math.min(1,epB.tangent[0]*(-dirAtoB[0])+epB.tangent[1]*(-dirAtoB[1]))))*180/Math.PI;
+          if(angA<=BRIDGE_ANGLE_TOL_DEG&&angB<=BRIDGE_ANGLE_TOL_DEG
+              &&!bridgeCrossesForbidden(epA.lat,epA.lng,epB.lat,epB.lng,forbiddenPolygons)){
+            bridges.push([[epA.lat,epA.lng],[epB.lat,epB.lng]]);
+          }
+        }
+      }
+    }
+  });
+  return bridges;
+}
+
+// ══════════════════════════════════════════════════════════
+//  Coverage 판정 철학 — "확실한 정상 도로만 칠한다"(whitelist), 아무 데나
+//  칠하고 나쁜 곳을 나중에 지우는 게(blacklist) 아니다.
+//
+//  실제로는 두 whitelist의 AND다: (1) roadLines 자체가 이미 whitelist다
+//  — fetchRoadsForBbox가 처음부터 motorway~residential 등 차량 주행도로
+//  highway 태그만 받아온다(footway/cycleway/path/parking_aisle이 whitelist
+//  에 없으니 애초에 안 들어옴). (2) 그렇게 whitelist로 뽑은 도로 중에서도
+//  "차가 물리적으로 지나갈 수 있다"만으로는 안 되는 영역 — 아파트 단지,
+//  주차장, 건물 — 은 태그와 무관하게 통째로 제외한다(같은 highway=service
+//  라도 아파트 단지 안이면 무조건 제외, 밖이면 인정).
+//    valid_road_coverage = road_cells ∩ ¬(apartment_mask ∪ parking_mask ∪ building_mask)
+//  건물은 칸 경계 오차 정도만(2m) 버퍼. 아파트 단지는 명시적 경계(explicit,
+//  5m 여유) 또는 hull 추정(15m 여유) 전체에 여유를 줘서, 동 사이 간격이
+//  얼마든 상관없이 단지 안쪽이 통째로 빠진다. 주차장(amenity=parking)은
+//  경계가 보통 정확히 그려져 있어 여유를 작게(3m) 준다.
+//  road_cells는 딱 한 번만 만들고, 이 뒤로는(exclusion 단계에서도) 다시
+//  채우거나 넓히지 않는다 — exclusion은 오직 뺄셈만 한다.
+// ══════════════════════════════════════════════════════════
+const BUILDING_BUFFER_M=2;
+const PARKING_BUFFER_M=3;
+
 async function paintZoneGapGrid(insideTest,minLat,maxLat,minLng,maxLng,refLat,zoneName){
   const latDeg=GAP_CELL_SIZE_M/111320;
   const lngDeg=GAP_CELL_SIZE_M/(111320*Math.cos(refLat*Math.PI/180));
   const marginLat=latDeg*2, marginLng=lngDeg*2;
-  const [visitRows,buildingPolygons]=await Promise.all([
+  const [visitRows,buildings,roadLines,manualCells]=await Promise.all([
     RouteDB.getCellVisitCounts({
       minLat:minLat-marginLat, maxLat:maxLat+marginLat,
       minLng:minLng-marginLng, maxLng:maxLng+marginLng,
       refLat, lngDeg,
+      ...accumDateFilter(),
     },GAP_CELL_SIZE_M),
-    zoneName?getZoneBuildingPolygons(zoneName):Promise.resolve([]),
+    zoneName?getZoneBuildingPolygons(zoneName):Promise.resolve(EMPTY_BUILDINGS),
+    zoneName?getZoneRoadPolylines(zoneName):Promise.resolve([]),
+    zoneName?loadZoneManualCells(zoneName):Promise.resolve({excluded:[],visited:[]}),
   ]);
   const visitMap=new Map(visitRows.map(r=>[r.gy+'_'+r.gx,r.visits]));
-  const excludedCells=buildExcludedCellSet(buildingPolygons,latDeg,lngDeg);
+  const manualExcludedSet=manualCellKeySet(manualCells.excluded,latDeg,lngDeg);
+  const manualVisitedSet=manualCellKeySet(manualCells.visited,latDeg,lngDeg);
+  const complex=buildApartmentComplexPolygons(buildings.apartmentPolygons,buildings.explicitComplexPolygons,refLat);
+  const allComplexPolygons=complex.explicit.concat(complex.hullEstimated);
+  const buildingExcluded=buildExcludedCellSet(buildings.buildingPolygons,latDeg,lngDeg,refLat,BUILDING_BUFFER_M);
+  const apartmentExcluded=buildExcludedCellSet(complex.explicit,latDeg,lngDeg,refLat,APARTMENT_EXPLICIT_BUFFER_M);
+  buildExcludedCellSet(complex.hullEstimated,latDeg,lngDeg,refLat,APARTMENT_COMPLEX_BUFFER_M)
+    .forEach(k=>apartmentExcluded.add(k));
+  const parkingExcluded=buildExcludedCellSet(buildings.parkingPolygons,latDeg,lngDeg,refLat,PARKING_BUFFER_M);
+  // 아파트/주차장 위로는 bridge(자동 도로 연결)를 안 만든다 — 그 사이를
+  // 이어버리면 결국 아래 exclusion에서 다시 잘리긴 하지만, "왜 안 이어졌지"
+  // 디버그가 혼란스러워지고, 순수하게 낭비 계산이라 아예 후보에서 뺀다.
+  const forbiddenForBridging=allComplexPolygons.concat(buildings.parkingPolygons);
+  const bridges=findRoadBridges(roadLines,refLat,forbiddenForBridging);
+  // road_cells는 여기서 한 번만 만든다 — 이 뒤로는(아래 exclusion 단계에서도)
+  // 다시 채우거나(gap healing) 넓히지(buffer) 않는다. exclusion은 오직 뺄셈만 한다.
+  const roadCells=buildRoadCellSet(bridges.length?roadLines.concat(bridges):roadLines,latDeg,lngDeg,refLat);
+
+  if(showExclusionDebug){
+    const insideApartmentRoadCells=[...roadCells].filter(k=>apartmentExcluded.has(k));
+    const insideParkingRoadCells=[...roadCells].filter(k=>parkingExcluded.has(k));
+    console.log(`[ApartmentDebug] zone=${zoneName}`,{
+      road_source: hdmapGlobalNamesFor(zoneName).length?'HD map ('+hdmapSourceLabel(zoneName)+')':'OSM/Overpass',
+      road_lines: roadLines.length,
+      apartment_buildings: buildings.apartmentPolygons.length,
+      explicit_complex_polygon: complex.explicit.length>0,
+      explicit_complex_count: complex.explicit.length,
+      detected_cluster_count: complex.hullEstimated.length,
+      complex_polygon_area_m2: Math.round(allComplexPolygons.reduce((s,p)=>s+polygonAreaM2(p,refLat),0)),
+      parking_lots: buildings.parkingPolygons.length,
+      internal_roads_found: roadLines.filter(line=>line.some(([lat,lng])=>allComplexPolygons.some(poly=>pointInPolygon(lat,lng,poly)))).length,
+      coverage_before_exclusion_cells: roadCells.size,
+      coverage_inside_apartment_before_cells: insideApartmentRoadCells.length,
+      coverage_inside_parking_before_cells: insideParkingRoadCells.length,
+      // apartment/parking/building 마스크에 걸리면 아래 칠하기 루프에서
+      // 무조건 continue라 final coverage로는 절대 안 넘어간다 —
+      // 구조적으로 항상 0이어야 한다.
+      coverage_inside_apartment_after_cells: 0,
+      coverage_inside_parking_after_cells: 0,
+    });
+
+    // RED = 탐지된 단지 영역(실선=명시적 landuse 경계, 점선=hull 추정)
+    complex.explicit.forEach(poly=>{
+      L.polygon(poly,{color:'#ef4444',weight:2,fill:false,opacity:.95,interactive:false})
+        .bindTooltip('REJECTED reason=inside_apartment (명시적 landuse=residential+residential=apartments)',{sticky:true}).addTo(coverageLayer);
+    });
+    complex.hullEstimated.forEach(hull=>{
+      L.polygon(hull,{color:'#ef4444',weight:2,dashArray:'5 4',fill:false,opacity:.95,interactive:false})
+        .bindTooltip('REJECTED reason=inside_apartment (hull 추정 — 명시적 경계 태그 없음)',{sticky:true}).addTo(coverageLayer);
+    });
+    // BROWN = 주차장(amenity=parking) 영역
+    buildings.parkingPolygons.forEach(poly=>{
+      L.polygon(poly,{color:'#b45309',weight:2,fill:true,fillColor:'#b45309',fillOpacity:.15,opacity:.9,interactive:false})
+        .bindTooltip('REJECTED reason=parking (amenity=parking)',{sticky:true}).addTo(coverageLayer);
+    });
+    // BLUE = 아파트 동 개별 footprint
+    buildings.apartmentPolygons.forEach(poly=>{
+      L.polygon(poly,{color:'#3b82f6',weight:1,fill:false,opacity:.6,interactive:false}).addTo(coverageLayer);
+    });
+    // YELLOW = 단지 영역 안을 지나는 도로(내부도로/driveway/service 등, 태그 무관)
+    roadLines.forEach(line=>{
+      if(line.some(([lat,lng])=>allComplexPolygons.some(poly=>pointInPolygon(lat,lng,poly)))){
+        L.polyline(line,{color:'#eab308',weight:2,opacity:.85,interactive:false})
+          .bindTooltip('REJECTED reason=inside_apartment (내부도로/driveway/service — highway 태그와 무관)',{sticky:true}).addTo(coverageLayer);
+      }
+    });
+  }
+
+  // 디버그일 때만 "bridge 없이도 도로였을 칸"을 따로 구해서, bridge 덕분에
+  // 새로 채워진 칸을 구분해 보여준다(평소엔 이 추가 계산을 안 한다).
+  const rawRoadCells=showExclusionDebug?buildRoadCellSet(roadLines,latDeg,lngDeg,refLat):null;
 
   const latStart=Math.floor(minLat/latDeg), latEnd=Math.ceil(maxLat/latDeg);
   const lngStart=Math.floor(minLng/lngDeg), lngEnd=Math.ceil(maxLng/lngDeg);
   for(let la=latStart;la<=latEnd;la++){
     for(let lo=lngStart;lo<=lngEnd;lo++){
+      const key=la+'_'+lo;
       const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
       if(!insideTest(cellLat,cellLng)) continue;
-      if(excludedCells.has(la+'_'+lo)) continue;
-      const visits=visitMap.get(la+'_'+lo)||0;
+      if(!roadCells.has(key)) continue;
       const bounds=[[la*latDeg,lo*lngDeg],[(la+1)*latDeg,(lo+1)*lngDeg]];
-      if(showCoverageDepth){
+      const isManualExcluded=manualExcludedSet.has(key);
+      const isApartment=!isManualExcluded&&apartmentExcluded.has(key);
+      const isParking=!isManualExcluded&&!isApartment&&parkingExcluded.has(key);
+      const isBuilding=!isManualExcluded&&!isApartment&&!isParking&&buildingExcluded.has(key);
+      if(isManualExcluded||isApartment||isParking||isBuilding){
+        // 원래는 whitelist(도로 태그)를 통과했지만, 사용자가 직접 뺐거나
+        // 아파트/주차장/건물 forbidden mask에 걸려 최종적으로는 NO-COVERAGE인
+        // 칸 — 디버그 보기가 켜져 있을 때만 "왜 빠졌는지" 색으로 보여주고
+        // (Final Coverage에는 어느 경우든 포함되지 않는다), 평소엔 그냥 건너뛴다.
+        if(showExclusionDebug){
+          // RED(직접 제외)/BLACK(아파트)/BROWN(주차장)/GRAY(건물) = 빠진 칸
+          const color=isManualExcluded?'#dc2626':isApartment?'#111827':isParking?'#b45309':'#64748b';
+          const reason=isManualExcluded?'manual_exclude':isApartment?'inside_apartment':isParking?'parking':'inside_building';
+          L.rectangle(bounds,{stroke:false,fillColor:color,fillOpacity:.55,interactive:false})
+            .bindTooltip(`REJECTED reason=${reason}`,{sticky:true}).addTo(coverageLayer);
+        }
+        continue;
+      }
+      if(showExclusionDebug&&rawRoadCells&&!rawRoadCells.has(key)){
+        // GREEN = bridge가 없었으면 도로 칸이 아니었을, 자동으로 메워진 칸
+        L.rectangle(bounds,{stroke:false,fillColor:'#22c55e',fillOpacity:.5,interactive:false})
+          .bindTooltip('ACCEPTED — gap healing으로 자동 연결됨',{sticky:true}).addTo(coverageLayer);
+        continue;
+      }
+      const rawVisits=visitMap.get(key)||0;
+      const visits=manualVisitedSet.has(key)?Math.max(1,rawVisits):rawVisits;
+      if(showExclusionDebug){
+        // MAGENTA = whitelist 통과 + forbidden mask 없음 → 그대로 accepted
+        L.rectangle(bounds,{stroke:false,fillColor:'#ec4899',fillOpacity:.42,interactive:false})
+          .bindTooltip('ACCEPTED — 정상 주행도로',{sticky:true}).addTo(coverageLayer);
+      }else if(showCoverageDepth){
         const tier=tierForCountJS(depthTiers,visits);
-        L.rectangle(bounds,{stroke:false,fillColor:tier.color,fillOpacity:.32,interactive:false}).addTo(coverageLayer);
+        addCoverageCellLayer(key,L.rectangle(bounds,{stroke:false,fillColor:tier.color,fillOpacity:.88,interactive:false}).addTo(coverageLayer));
       }else if(visits===0){
-        L.rectangle(bounds,{stroke:false,fillColor:'#ff6b6b',fillOpacity:.24,interactive:false}).addTo(coverageLayer);
+        addCoverageCellLayer(key,L.rectangle(bounds,{stroke:false,fillColor:'#ff6b6b',fillOpacity:.82,interactive:false}).addTo(coverageLayer));
       }
     }
   }
+  paintManualCellOverrides(manualCells,latDeg,lngDeg,insideTest);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -386,12 +1342,25 @@ async function computeZoneCoverage(zoneName){
   const latDeg=GAP_CELL_SIZE_M/111320;
   const lngDeg=GAP_CELL_SIZE_M/(111320*Math.cos(refLat*Math.PI/180));
 
-  const [visitRows,buildingPolygons]=await Promise.all([
-    RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg},GAP_CELL_SIZE_M),
+  const [visitRows,buildings,roadLines,manualCells]=await Promise.all([
+    RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg,...accumDateFilter()},GAP_CELL_SIZE_M),
     getZoneBuildingPolygons(zoneName),
+    getZoneRoadPolylines(zoneName),
+    loadZoneManualCells(zoneName),
   ]);
   const visitMap=new Map(visitRows.map(r=>[r.gy+'_'+r.gx,r.visits]));
-  const excludedCells=buildExcludedCellSet(buildingPolygons,latDeg,lngDeg);
+  const manualExcludedSet=manualCellKeySet(manualCells.excluded,latDeg,lngDeg);
+  const manualVisitedSet=manualCellKeySet(manualCells.visited,latDeg,lngDeg);
+  const complex=buildApartmentComplexPolygons(buildings.apartmentPolygons,buildings.explicitComplexPolygons,refLat);
+  const allComplexPolygons=complex.explicit.concat(complex.hullEstimated);
+  const buildingExcluded=buildExcludedCellSet(buildings.buildingPolygons,latDeg,lngDeg,refLat,BUILDING_BUFFER_M);
+  const apartmentExcluded=buildExcludedCellSet(complex.explicit,latDeg,lngDeg,refLat,APARTMENT_EXPLICIT_BUFFER_M);
+  buildExcludedCellSet(complex.hullEstimated,latDeg,lngDeg,refLat,APARTMENT_COMPLEX_BUFFER_M)
+    .forEach(k=>apartmentExcluded.add(k));
+  const parkingExcluded=buildExcludedCellSet(buildings.parkingPolygons,latDeg,lngDeg,refLat,PARKING_BUFFER_M);
+  const forbiddenForBridging=allComplexPolygons.concat(buildings.parkingPolygons);
+  const bridges=findRoadBridges(roadLines,refLat,forbiddenForBridging);
+  const roadCells=buildRoadCellSet(bridges.length?roadLines.concat(bridges):roadLines,latDeg,lngDeg,refLat);
 
   const latStart=Math.floor(minLat/latDeg), latEnd=Math.ceil(maxLat/latDeg);
   const lngStart=Math.floor(minLng/lngDeg), lngEnd=Math.ceil(maxLng/lngDeg);
@@ -399,11 +1368,14 @@ async function computeZoneCoverage(zoneName){
   const tierCounts={};
   for(let la=latStart;la<=latEnd;la++){
     for(let lo=lngStart;lo<=lngEnd;lo++){
+      const key=la+'_'+lo;
       const cellLat=(la+0.5)*latDeg, cellLng=(lo+0.5)*lngDeg;
       if(!pointInPolygon(cellLat,cellLng,poly)) continue;
-      if(excludedCells.has(la+'_'+lo)) continue;
+      if(!roadCells.has(key)) continue;
+      if(manualExcludedSet.has(key)||buildingExcluded.has(key)||apartmentExcluded.has(key)||parkingExcluded.has(key)) continue;
       total++;
-      const visits=visitMap.get(la+'_'+lo)||0;
+      const rawVisits=visitMap.get(key)||0;
+      const visits=manualVisitedSet.has(key)?Math.max(1,rawVisits):rawVisits;
       const tier=tierForCountJS(depthTiers,visits);
       tierCounts[tier.label]=(tierCounts[tier.label]||0)+1;
     }
@@ -412,27 +1384,6 @@ async function computeZoneCoverage(zoneName){
   const unvisited=zeroTier?(tierCounts[zeroTier.label]||0):0;
   const visited=total-unvisited;
   return { zone:zoneName, total, visited, unvisited, coveragePct: total?(visited/total*100):0, tierCounts };
-}
-
-// 지역별 Coverage 요약 목록(요구사항 10) — 커버리지 갭 모드에서 전체 지역을 한눈에
-async function renderCoverageSummaryList(){
-  const el=document.getElementById('coverage-summary');
-  if(!el) return;
-  if(!showCoverageGaps||!ACTIVE_ZONE_NAMES.length){ el.style.display='none'; el.innerHTML=''; return; }
-  const rows=await Promise.all(ACTIVE_ZONE_NAMES.map(async z=>({zone:z,cov:await computeZoneCoverage(z)})));
-  el.style.display='flex';
-  el.innerHTML=rows.map(({zone,cov})=>{
-    const color=ZONE_COLORS[zone]||'#4fd8c7';
-    const text=cov?`${cov.coveragePct.toFixed(1)}%`:'경계 미설정';
-    return `<button type="button" class="cov-summary-row${accumZoneFilter===zone?' active':''}" data-zone="${escapeHtml(zone)}">
-        <span class="cov-summary-dot" style="background:${color}"></span>
-        <span class="cov-summary-zone">${escapeHtml(zone)}</span>
-        <span class="cov-summary-pct${cov?'':' muted'}">${text}</span>
-      </button>`;
-  }).join('');
-  el.querySelectorAll('.cov-summary-row').forEach(row=>{
-    row.addEventListener('click',()=>setAccumZone(row.dataset.zone));
-  });
 }
 
 // 선택된 지역 하나의 상세 Coverage % + Cell 수 + Depth 분포(요구사항 9, 11)
@@ -447,6 +1398,14 @@ async function renderCoverageDetailPanel(){
     return;
   }
   el.style.display='flex';
+  if(!cov.total){
+    el.style.display='flex';
+    const emptyMsg=hdmapGlobalNamesFor(accumZoneFilter).length
+      ? `${escapeHtml(accumZoneFilter)} 구역의 HD map 도로 데이터를 못 불러왔어요. index.html에 data/hdmap_gangnam_roads.js / data/hdmap_seocho_roads.js가 &lt;script&gt;로 로드돼 있는지, 콘솔(개발자 도구)에서 [경로뷰어] HD map 관련 로그를 확인해주세요.`
+      : `${escapeHtml(accumZoneFilter)} 구역 안의 주행 가능 도로 데이터를 아직 가져오지 못했어요. 인터넷 연결 후 다시 열면 API 키 없이 OSM 도로 데이터를 받아와 계산해요.`;
+    el.innerHTML=`<div class="cov-detail-empty">${emptyMsg}</div>`;
+    return;
+  }
   const pct=cov.coveragePct.toFixed(1);
   const color=ZONE_COLORS[accumZoneFilter]||'#4fd8c7';
   const tierRows=[...depthTiers].sort((a,b)=>a.threshold-b.threshold).map(t=>{
@@ -483,10 +1442,19 @@ function toggleCoverageDepth(){
   renderAccumView();
 }
 
+// 커버리지 갭 계산(도로/건물 데이터 fetch)이 얼마나 걸릴지 알 수 없어서,
+// 화면이 멈춘 것처럼 보이지 않게 양이 지나가는 로딩 표시를 띄운다.
+function showCoverageLoading(){
+  const el=document.getElementById('coverage-loading');
+  if(el) el.classList.add('show');
+}
+function hideCoverageLoading(){
+  const el=document.getElementById('coverage-loading');
+  if(el) el.classList.remove('show');
+}
+
 function hideCoveragePanels(){
-  const a=document.getElementById('coverage-summary');
   const b=document.getElementById('coverage-detail');
-  if(a){ a.style.display='none'; a.innerHTML=''; }
   if(b){ b.style.display='none'; b.innerHTML=''; }
 }
 
@@ -497,11 +1465,73 @@ let accumCells=[]; // renderAccumView가 만든 격자 셀 목록 — 원 그리
 
 // 현재 구역 필터를 DB 조회 조건으로
 function accumFilter(){
-  return accumZoneFilter==='all' ? {} : {zone:accumZoneFilter};
+  const filter=accumZoneFilter==='all' ? {} : {zone:accumZoneFilter};
+  if(accumDateFrom) filter.fromDate=accumDateFrom;
+  if(accumDateTo) filter.toDate=accumDateTo;
+  return filter;
+}
+
+function accumDateFilter(){
+  const filter={};
+  if(accumDateFrom) filter.fromDate=accumDateFrom;
+  if(accumDateTo) filter.toDate=accumDateTo;
+  return filter;
+}
+
+function normalizeAccumDate(value){
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value||'')) ? String(value) : '';
+}
+
+function updateAccumDateFilterUI(){
+  const fromEl=document.getElementById('accum-date-from');
+  const toEl=document.getElementById('accum-date-to');
+  if(fromEl&&fromEl.value!==accumDateFrom) fromEl.value=accumDateFrom;
+  if(toEl&&toEl.value!==accumDateTo) toEl.value=accumDateTo;
+  const label=document.getElementById('accum-date-label');
+  if(!label) return;
+  if(accumDateFrom&&accumDateTo) label.textContent=`${accumDateFrom} ~ ${accumDateTo}`;
+  else if(accumDateFrom) label.textContent=`${accumDateFrom} 이후`;
+  else if(accumDateTo) label.textContent=`${accumDateTo} 이전`;
+  else label.textContent='전체 기간';
+}
+
+function setAccumDateRange(from,to){
+  let nextFrom=normalizeAccumDate(from);
+  let nextTo=normalizeAccumDate(to);
+  if(nextFrom&&nextTo&&nextFrom>nextTo) [nextFrom,nextTo]=[nextTo,nextFrom];
+  accumDateFrom=nextFrom;
+  accumDateTo=nextTo;
+  updateAccumDateFilterUI();
+  renderAccumView();
+}
+
+function onAccumDateInputChange(){
+  setAccumDateRange(
+    document.getElementById('accum-date-from').value,
+    document.getElementById('accum-date-to').value
+  );
+}
+
+function clearAccumDateFilter(){
+  setAccumDateRange('','');
+}
+
+function setAccumLastMonth(){
+  const now=new Date();
+  const first=new Date(now.getFullYear(),now.getMonth()-1,1);
+  const last=new Date(now.getFullYear(),now.getMonth(),0);
+  setAccumDateRange(dstr(first),dstr(last));
 }
 
 function setAccumZone(zone){
+  if(manualCellEditsDirty&&zoneManualCellsZone===accumZoneFilter&&zone!==accumZoneFilter){
+    if(!confirm('아직 적용하지 않은 셀 선택이 있어요. 적용하지 않고 다른 구역으로 이동할까요?')) return;
+    manualCellEditsDirty=false;
+    manualCellPendingKeys.clear();
+  }
   if(boundaryDrawMode) cancelBoundaryDraw();
+  cellEditMode=null;
+  exitVertexEditMode();
   accumZoneFilter=zone;
   styleZoneButtons('zone-filter-group',zone);
   updateBoundaryUI();
@@ -514,11 +1544,10 @@ function setAccumZone(zone){
 function initAccumMap(){
   if(accumMap) return;
   accumMap=L.map('accum-map',{zoomSnap:0.5,zoomDelta:0.5,preferCanvas:true}).setView([37.498,127.032],11);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',{
-    subdomains:'abcd',maxZoom:20,attribution:'© OpenStreetMap © CARTO'
-  }).addTo(accumMap);
+  addNoKeyOsmTileLayer(accumMap);
   accumDensityLayer=L.layerGroup().addTo(accumMap);
   coverageLayer=L.layerGroup().addTo(accumMap);
+  manualCellsLayer=L.layerGroup().addTo(accumMap);
   vehicleStorageLayer=L.layerGroup().addTo(accumMap);
   addVehicleStorageMarker(accumMap,vehicleStorageLayer);
   wireHoverTooltip();
@@ -528,17 +1557,16 @@ function initAccumMap(){
 
 function toggleCoverageGaps(){
   showCoverageGaps=!showCoverageGaps;
-  if(!showCoverageGaps) showCoverageDepth=false;
+  if(!showCoverageGaps){ showCoverageDepth=false; boundaryEditOpen=false; cellEditMode=null; exitVertexEditMode(); }
   const btn=document.getElementById('coverage-toggle-btn');
   btn.classList.toggle('active',showCoverageGaps);
   btn.textContent=showCoverageGaps?'밀도 지도로 보기':'커버리지 갭 보기';
   document.getElementById('accum-hint').textContent=showCoverageGaps
-    ?'실선/점선 도형 = 직접 그린 구역 경계 · 빨간 칸 = 아직 한 번도 지나가지 않은 곳'
+    ?defaultCoverageHint()
     :'지도 위에 마우스를 가져다 대면 그 근처 기록이 바로 떠요';
-  document.getElementById('boundary-controls').style.display=showCoverageGaps?'flex':'none';
+  updateBoundaryUI();
   if(!showCoverageGaps&&boundaryDrawMode) cancelBoundaryDraw();
-  if(showCoverageGaps) updateBoundaryUI();
-  else hideCoveragePanels();
+  if(!showCoverageGaps) hideCoveragePanels();
   renderAccumView();
   if(showCoverageGaps&&accumZoneFilter!=='all'&&!ZONE_POLYGONS[accumZoneFilter]){
     startBoundaryDraw();
@@ -550,6 +1578,8 @@ function toggleCoverageGaps(){
 async function renderCoverageGapLayer(){
   if(!coverageLayer) return;
   coverageLayer.clearLayers();
+  if(manualCellsLayer) manualCellsLayer.clearLayers();
+  resetCoverageCellLayerCache();
   const zones=accumZoneFilter==='all' ? ACTIVE_ZONE_NAMES : [accumZoneFilter];
   const drawnZones=zones.filter(z=>ZONE_POLYGONS[z]&&ZONE_POLYGONS[z].length>=3);
 
@@ -557,8 +1587,8 @@ async function renderCoverageGapLayer(){
     const color=ZONE_COLORS[zone]||'#4fd8c7';
     const poly=ZONE_POLYGONS[zone];
     L.polygon(poly,{color,weight:2,dashArray:'6 5',fill:false,opacity:.9})
-      .bindTooltip(`${zone} 운영 구역(직접 그린 경계)`,{sticky:true})
-      .on('click',()=>setAccumZone(zone))
+      .bindTooltip(boundaryEditOpen?`${zone} 경계 클릭 — 꼭짓점 드래그로 모양 바꾸기`:`${zone} 운영 구역(직접 그린 경계)`,{sticky:true})
+      .on('click',()=>toggleVertexEditMode(zone))
       .addTo(coverageLayer);
     const lats=poly.map(p=>p[0]), lngs=poly.map(p=>p[1]);
     const minLat=Math.min(...lats), maxLat=Math.max(...lats);
@@ -573,8 +1603,9 @@ async function renderCoverageGapLayer(){
       ? '아직 그린 구역 경계가 없어요. 위에서 구역을 선택하고 "경계 그리기"로 먼저 만들어보세요.'
       : `아직 ${accumZoneFilter} 구역 경계가 없어요. 위 "경계 그리기" 버튼으로 지도를 클릭해서 그려보세요.`;
   }else{
-    hintEl.textContent='실선/점선 도형 = 직접 그린 구역 경계 · 빨간 칸 = 아직 한 번도 지나가지 않은 곳';
+    hintEl.textContent=defaultCoverageHint();
   }
+  updateCellEditHint();
 
   // 화면 맞춤
   if(accumZoneFilter!=='all'&&ZONE_POLYGONS[accumZoneFilter]){
@@ -598,8 +1629,13 @@ async function renderAccumView(){
   const statusEl=document.getElementById('accum-status');
   const statsEl=document.getElementById('accum-stats');
 
-  renderFilterButtons('zone-filter-buttons',ACTIVE_ZONE_NAMES.map(z=>({value:z,label:z})),'zone',setAccumZone);
+  if(accumZoneFilter==='all'||!ACTIVE_ZONE_NAMES.includes(accumZoneFilter)){
+    accumZoneFilter=ACTIVE_ZONE_NAMES[0]||'all';
+  }
+  renderFilterButtons('zone-filter-buttons',ACTIVE_ZONE_NAMES.map(z=>({value:z,label:z})),'zone',setAccumZone,false);
   styleZoneButtons('zone-filter-group',accumZoneFilter);
+  updateBoundaryUI();
+  updateAccumDateFilterUI();
 
   initAccumMap();
   setTimeout(()=>accumMap.invalidateSize(),60);
@@ -625,6 +1661,8 @@ async function renderAccumView(){
     accumMap.setView([VEHICLE_STORAGE_PLACE.lat,VEHICLE_STORAGE_PLACE.lng],15);
     if(accumDensityLayer) accumDensityLayer.clearLayers();
     if(coverageLayer) coverageLayer.clearLayers();
+    if(manualCellsLayer) manualCellsLayer.clearLayers();
+    resetCoverageCellLayerCache();
     accumCells=[];
     hideCoveragePanels();
     return;
@@ -648,14 +1686,23 @@ async function renderAccumView(){
 
   if(showCoverageGaps){
     coverageLayer.clearLayers();
-    await renderCoverageGapLayer();
-    if(token!==accumRenderToken) return;
-    await renderCoverageSummaryList();
-    await renderCoverageDetailPanel();
+    if(manualCellsLayer) manualCellsLayer.clearLayers();
+    resetCoverageCellLayerCache();
+    showCoverageLoading();
+    try{
+      await renderCoverageGapLayer();
+      if(token!==accumRenderToken) return;
+      await renderCoverageDetailPanel();
+    }finally{
+      if(token===accumRenderToken) hideCoverageLoading();
+    }
     return;
   }
 
+  hideCoverageLoading();
   if(coverageLayer) coverageLayer.clearLayers();
+  if(manualCellsLayer) manualCellsLayer.clearLayers();
+  resetCoverageCellLayerCache();
   hideCoveragePanels();
 
   const cells=await RouteDB.getDensityCells(accumFilter(),ACCUM_CELL);
@@ -668,7 +1715,7 @@ async function renderAccumView(){
       const t=Math.min(1,c.n/maxN);
       L.circleMarker([c.lat,c.lng],{
         radius:4+t*8, weight:0, fillColor:dotColor,
-        fillOpacity:0.15+t*0.65,
+        fillOpacity:0.6+t*0.4,
       }).addTo(accumDensityLayer);
       accumCells.push(c);
     });
@@ -691,9 +1738,25 @@ async function renderAccumView(){
 //    가장 가까운 원(셀)의 정보가 커서 옆에 바로 뜬다. 원을 그릴 때 쓴
 //    accumCells를 그대로 조회하므로 화면에 보이는 크기와 항상 일치한다. ──
 let hoverPending=false, hoverPos=null, hoverLatLng=null;
+let manualMapPointerDown=null, manualMapPointerDragged=false;
+const MANUAL_CELL_DRAG_THRESHOLD_PX=8;
 
 function wireHoverTooltip(){
   const mapEl=document.getElementById('accum-map');
+  mapEl.addEventListener('pointerdown',e=>{
+    manualMapPointerDown={x:e.clientX,y:e.clientY};
+    manualMapPointerDragged=false;
+  },true);
+  mapEl.addEventListener('pointermove',e=>{
+    if(!manualMapPointerDown) return;
+    if(Math.hypot(e.clientX-manualMapPointerDown.x,e.clientY-manualMapPointerDown.y)>MANUAL_CELL_DRAG_THRESHOLD_PX){
+      manualMapPointerDragged=true;
+    }
+  },true);
+  mapEl.addEventListener('pointercancel',()=>{
+    manualMapPointerDown=null;
+    manualMapPointerDragged=false;
+  },true);
   mapEl.addEventListener('mousemove',e=>{
     const rect=mapEl.getBoundingClientRect();
     hoverPos={x:e.clientX-rect.left,y:e.clientY-rect.top};
@@ -704,6 +1767,24 @@ function wireHoverTooltip(){
     }
   });
   mapEl.addEventListener('mouseleave',hideAccumTooltip);
+  mapEl.addEventListener('click',e=>{
+    if(!cellEditMode||!showCoverageGaps||boundaryDrawMode||!accumMap) return;
+    const wasDrag=manualMapPointerDragged || (manualMapPointerDown&&Math.hypot(e.clientX-manualMapPointerDown.x,e.clientY-manualMapPointerDown.y)>MANUAL_CELL_DRAG_THRESHOLD_PX);
+    manualMapPointerDown=null;
+    manualMapPointerDragged=false;
+    if(wasDrag){
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      return;
+    }
+    const rect=mapEl.getBoundingClientRect();
+    const ll=accumMap.containerPointToLatLng([e.clientX-rect.left,e.clientY-rect.top]);
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    toggleManualCellAt(ll.lat,ll.lng);
+  },true);
 }
 
 function hideAccumTooltip(){

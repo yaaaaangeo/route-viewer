@@ -1,7 +1,7 @@
 {
   "name": "route-viewer",
   "productName": "Route Viewer",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "nav-app 주행기록 리플레이 · 누적 지도 · 통계 데스크톱 앱",
   "main": "electron/main.js",
   "author": "route-viewer",
@@ -12,7 +12,7 @@
     "serve": "node server.js",
     "dist": "electron-builder --win nsis portable --publish never",
     "pack": "electron-builder --win --dir",
-    "test": "node tests/run-tests.js",
+    "test": "node tests/run-tests.js && node tests/coverage-grid-test.js && node tests/coverage-gap-healing-test.js && node tests/apartment-shinhyundai-test.js && node tests/apartment-eunma-test.js && node tests/hdmap-data-test.js",
     "test:e2e": "electron . --enable-logging"
   },
   "dependencies": {
@@ -42,18 +42,35 @@
       "node_modules/node-sqlite3-wasm/dist/*.wasm"
     ],
     "publish": [
-      { "provider": "generic", "url": "http://localhost:8080/updates", "channel": "latest" }
+      {
+        "provider": "generic",
+        "url": "http://localhost:8080/updates",
+        "channel": "latest"
+      }
     ],
     "win": {
+      "signAndEditExecutable": false,
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        }
       ],
       "icon": "build/icon.ico",
       "artifactName": "RouteViewer-${version}-${os}-${arch}.${ext}"
     },
     "portable": {
-      "artifactName": "RouteViewer-portable-${version}.exe"
+      "artifactName": "RouteViewer-portable-${version}-${arch}.exe"
     },
     "nsis": {
       "oneClick": false,
@@ -62,8 +79,14 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Route Viewer",
-      "installerLanguages": ["ko-KR", "en-US"],
+      "installerLanguages": [
+        "ko-KR",
+        "en-US"
+      ],
       "deleteAppDataOnUninstall": false
     }
+  },
+  "allowScripts": {
+    "electron@38.8.6": true
   }
 }

@@ -23,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Database } = require('node-sqlite3-wasm');
+const CoverageGrid = require('../src/js/coverage-grid.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -178,6 +179,16 @@ class RouteDatabase {
       conflicts_json: "TEXT NOT NULL DEFAULT '[]'",
     });
 
+    // 커버리지 갭에서 "이 칸은 원래 도로가 아니다(제외)" / "이 칸은 방문한
+    // 걸로 친다(수동 방문)"를 사용자가 직접 지정할 수 있게 하는 수동 오버라이드.
+    // {excluded:[[lat,lng],...], visited:[[lat,lng],...]} — 칸의 gy/gx가
+    // 아니라 위경도 점으로 저장한다. gy/gx는 GAP_CELL_SIZE_M과 구역의
+    // refLat(경계 bbox 중심)에 따라 달라지는데, 위경도 점으로 저장해두면
+    // 매번 그 시점의 격자 기준으로 다시 계산해서 항상 정확한 칸에 맞는다.
+    this._ensureColumns('zones', {
+      manual_cells: "TEXT NOT NULL DEFAULT '{}'",
+    });
+
     this._seedDefaults();
     this.setMeta('schema_version', String(SCHEMA_VERSION));
   }
@@ -230,6 +241,33 @@ class RouteDatabase {
         );
       });
       this.setMeta('zones_seeded', '1');
+    }
+
+    // 예전 빌드에서 서초를 별도 기본 구역으로 자동 추가했었다. 실제 운영
+    // 구역은 "강남" 경계 안에 서초 쪽 도로까지 함께 포함하는 형태라,
+    // 자동 생성된 빈 서초만 한 번 비활성화한다. 사용자가 직접 경계를 그려
+    // 쓰던 서초 구역은 그대로 둔다.
+    if (!this.getMeta('seocho_default_merged_into_gangnam')) {
+      const row = this.db.get(
+        `SELECT color, center_lat AS centerLat, center_lng AS centerLng, polygon, manual_cells AS manualCells
+           FROM zones WHERE name = ?`,
+        ['서초']
+      );
+      let polygon = [], manualCells = {};
+      try { polygon = JSON.parse((row && row.polygon) || '[]'); } catch (_) { polygon = []; }
+      try { manualCells = JSON.parse((row && row.manualCells) || '{}'); } catch (_) { manualCells = {}; }
+      const hasManualCells = !!(
+        (Array.isArray(manualCells.excluded) && manualCells.excluded.length) ||
+        (Array.isArray(manualCells.visited) && manualCells.visited.length)
+      );
+      const looksAutoSeeded = row && row.color === '#c084fc'
+        && Math.abs((row.centerLat || 0) - 37.4837) < 0.0001
+        && Math.abs((row.centerLng || 0) - 127.0324) < 0.0001
+        && Array.isArray(polygon) && polygon.length === 0 && !hasManualCells;
+      if (looksAutoSeeded) {
+        this.db.run('UPDATE zones SET active=0 WHERE name=?', ['서초']);
+      }
+      this.setMeta('seocho_default_merged_into_gangnam', '1');
     }
   }
 
@@ -468,6 +506,8 @@ class RouteDatabase {
     const params = [];
     if (filter.zone && filter.zone !== 'all') { where.push('zone = ?'); params.push(filter.zone); }
     if (filter.date) { where.push('date = ?'); params.push(filter.date); }
+    if (filter.fromDate) { where.push('date >= ?'); params.push(filter.fromDate); }
+    if (filter.toDate) { where.push('date <= ?'); params.push(filter.toDate); }
     if (filter.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + filter.vehicleLike + '%'); }
     return { clause: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
   }
@@ -751,6 +791,29 @@ class RouteDatabase {
     return this.getZonePolygons();
   }
 
+  // 커버리지 갭 수동 오버라이드 — "이 칸은 도로가 아니다(excluded)" /
+  // "이 칸은 방문한 걸로 친다(visited)". accum.js가 위경도 점 배열로
+  // 주고받고, 매 렌더링 시점의 격자 기준으로 gy/gx를 다시 계산한다.
+  getZoneManualCells(name) {
+    const row = this.db.get('SELECT manual_cells FROM zones WHERE name = ?', [name]);
+    if (!row) return { excluded: [], visited: [] };
+    try {
+      const data = JSON.parse(row.manual_cells || '{}');
+      return {
+        excluded: Array.isArray(data.excluded) ? data.excluded : [],
+        visited: Array.isArray(data.visited) ? data.visited : [],
+      };
+    } catch (_) { return { excluded: [], visited: [] }; }
+  }
+
+  saveZoneManualCells(name, data) {
+    const excluded = Array.isArray(data && data.excluded) ? data.excluded : [];
+    const visited = Array.isArray(data && data.visited) ? data.visited : [];
+    this.db.run('UPDATE zones SET manual_cells=? WHERE name=?',
+      [JSON.stringify({ excluded, visited }), name]);
+    return this.getZoneManualCells(name);
+  }
+
   // ══════════════════════════════════════════════════════
   //  설정 — Coverage Depth 등급 기준 등 (item 13, 21)
   // ══════════════════════════════════════════════════════
@@ -804,35 +867,65 @@ class RouteDatabase {
   //
   //  같은 (date, vehicle) 안에서 시간순으로 셀이 바뀔 때만 "새 방문"으로
   //  센다. GPS가 한 칸에서 100개 찍혀도 연속이면 방문 1회다.
-  //  LAG() 윈도우 함수로 SQL 한 번에 계산한다(레코드를 화면/JS로 끌어오지 않음).
+  //
+  //  GPS는 보통 ~10초 간격이라, 두 GPS 사이(예: 120m 이동)의 중간 칸들은
+  //  예전엔 아예 방문으로 안 잡혔다(시작/끝 칸만 SQL이 셈). 이제
+  //  CoverageGrid(coverage-grid.js, DB/화면 공용)가 두 점 사이 실제 이동
+  //  segment가 지나가는 모든 칸을 계산해서 채운다 — 그래서 SQL만으로는
+  //  안 되고, 정렬된 레코드를 가져와 (date,vehicle) 파티션별로 나눠
+  //  CoverageGrid에 넘긴다. 이동 판정(그 사이를 이을지)은 시간차·속도
+  //  조건을 만족할 때만 하고, 아니면(기록 유실/좌표 점프) 점 하나만 남긴다
+  //  — 자세한 규칙은 coverage-grid.js 주석 참고.
   // ══════════════════════════════════════════════════════
   getCellVisitCounts(box, cellSizeM) {
     const size = cellSizeM || (this.getSettings().coverageCellSizeM || 50);
     const latDeg = size / 111320;
-    const lngDeg = box && box.lngDeg ? box.lngDeg : size / (111320 * Math.cos(((box && box.refLat) || 37.5) * Math.PI / 180));
+    const refLat = (box && box.refLat) || 37.5;
+    const lngDeg = box && box.lngDeg ? box.lngDeg : size / (111320 * Math.cos(refLat * Math.PI / 180));
+
+    // segment 연결을 허용하는 최대 거리(최대속도×최대시간차)만큼 쿼리
+    // bbox를 넉넉히 넓힌다 — bbox 경계에서 살짝 벗어난 이웃 점이 잘려서
+    // "시간상 바로 다음 기록인데 마치 그 사이 뭔가 빠진 것처럼" 오판되는
+    // 일이 없도록 한다(그 이웃 점 자체가 결과 bbox 밖이라 화면엔 안 그려
+    // 지지만, 그 점까지의 segment 판정에는 필요하다).
+    const marginM = (CoverageGrid.MAX_INTERPOLATION_SPEED_KMH / 3.6) * CoverageGrid.MAX_INTERPOLATION_GAP_SEC;
+    const marginLatDeg = marginM / 111320;
+    const marginLngDeg = marginM / (111320 * Math.cos(refLat * Math.PI / 180));
+
     const where = [];
-    const params = [latDeg, lngDeg];
-    if (box && box.minLat != null) { where.push('latitude BETWEEN ? AND ?'); params.push(box.minLat, box.maxLat); }
-    if (box && box.minLng != null) { where.push('longitude BETWEEN ? AND ?'); params.push(box.minLng, box.maxLng); }
+    const params = [];
+    if (box && box.minLat != null) { where.push('latitude BETWEEN ? AND ?'); params.push(box.minLat - marginLatDeg, box.maxLat + marginLatDeg); }
+    if (box && box.minLng != null) { where.push('longitude BETWEEN ? AND ?'); params.push(box.minLng - marginLngDeg, box.maxLng + marginLngDeg); }
+    if (box && box.zone && box.zone !== 'all') { where.push('zone = ?'); params.push(box.zone); }
+    if (box && box.date) { where.push('date = ?'); params.push(box.date); }
+    if (box && box.fromDate) { where.push('date >= ?'); params.push(box.fromDate); }
+    if (box && box.toDate) { where.push('date <= ?'); params.push(box.toDate); }
+    if (box && box.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + box.vehicleLike + '%'); }
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
     const rows = this.db.all(
-      `WITH ordered AS (
-         SELECT CAST(floor(latitude / ?)  AS INTEGER) AS gy,
-                CAST(floor(longitude / ?) AS INTEGER) AS gx,
-                date, vehicle, timestamp, id
-           FROM driving_records ${whereSql}
-       ),
-       tagged AS (
-         SELECT gy, gx,
-           CASE WHEN gy = LAG(gy) OVER w AND gx = LAG(gx) OVER w THEN 0 ELSE 1 END AS is_new_visit
-         FROM ordered
-         WINDOW w AS (PARTITION BY date, vehicle ORDER BY timestamp, id)
-       )
-       SELECT gy, gx, SUM(is_new_visit) AS visits
-       FROM tagged GROUP BY gy, gx`,
+      `SELECT date, vehicle, timestamp, latitude, longitude
+         FROM driving_records ${whereSql}
+        ORDER BY date, vehicle, timestamp, id`,
       params
     );
-    return rows.map(r => ({ gy: r.gy, gx: r.gx, visits: r.visits }));
+
+    const partitions = new Map();
+    rows.forEach(r => {
+      const key = r.date + '|' + r.vehicle;
+      if (!partitions.has(key)) partitions.set(key, []);
+      partitions.get(key).push({ lat: r.latitude, lng: r.longitude, timestamp: r.timestamp });
+    });
+
+    const visitCounts = new Map();
+    partitions.forEach(points => {
+      CoverageGrid.accumulatePartitionVisits(points, latDeg, lngDeg, visitCounts);
+    });
+
+    return [...visitCounts.entries()].map(([k, v]) => {
+      const [gy, gx] = k.split('_').map(Number);
+      return { gy, gx, visits: v };
+    });
   }
 
   getBackupHistory() {

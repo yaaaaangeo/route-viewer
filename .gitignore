@@ -11,3 +11,12 @@ database/*.db-*
 route-viewer-shared-data.json
 
 node_modules/
+
+# 개인 주행 기록·백업 — 실제 GPS 이동 기록이 담겨 있어 git에 올리지 않는다
+주행기록/
+백업/
+
+# HD map 원본 데이터(산자부 E2E 데이터협의체) 중 전국 단위 원본은 용량이 커서
+# (100~330MB, GitHub 파일당 100MB 제한 초과) git에 올리지 않는다.
+# 앱은 tools/convert-hdmap-shapefile.js로 변환한 src/data/hdmap_*.js만 사용한다.
+\[산자부E2E\]\[데이터협의체\]HDMap_구축지역\(강남\)_세부구역_260209/전국_*

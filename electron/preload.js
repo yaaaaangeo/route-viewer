@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('routeAPI', {
   listZones: () => call('db:listZones'),
   saveZone: z => call('db:saveZone', z),
   setZoneActive: (name, active) => call('db:setZoneActive', name, active),
+  getZoneManualCells: name => call('db:getZoneManualCells', name),
+  saveZoneManualCells: (name, data) => call('db:saveZoneManualCells', name, data),
   getSettings: () => call('db:getSettings'),
   setSettings: partial => call('db:setSettings', partial),
   getCellVisitCounts: (box, cellSizeM) => call('db:getCellVisitCounts', box, cellSizeM),

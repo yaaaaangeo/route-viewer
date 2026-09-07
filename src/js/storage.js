@@ -120,6 +120,8 @@
       listZones: () => api.listZones(),
       saveZone: z => api.saveZone(z),
       setZoneActive: (name, active) => api.setZoneActive(name, active),
+      getZoneManualCells: name => api.getZoneManualCells(name),
+      saveZoneManualCells: (name, data) => api.saveZoneManualCells(name, data),
       getSettings: () => api.getSettings(),
       setSettings: partial => api.setSettings(partial),
       getCellVisitCounts: (box, cellSizeM) => api.getCellVisitCounts(box, cellSizeM),
@@ -287,6 +289,34 @@
         });
         await done(t);
         await metaSet('zones_seeded', true);
+      }
+
+      // 예전 빌드에서 서초를 별도 기본 구역으로 자동 추가했었다. 실제 운영
+      // 구역은 "강남" 경계 안에 서초 쪽 도로까지 함께 포함하는 형태라,
+      // 자동 생성된 빈 서초만 한 번 비활성화한다. 사용자가 직접 경계를 그려
+      // 쓰던 서초 구역은 그대로 둔다.
+      if (!(await metaGet('seocho_default_merged_into_gangnam', false))) {
+        const readTx = db.transaction(['zones'], 'readonly');
+        const existingReq = reqp(readTx.objectStore('zones').get('서초'));
+        const readDone = done(readTx);
+        const existing = await existingReq;
+        await readDone;
+        const polygon = existing && Array.isArray(existing.polygon) ? existing.polygon : [];
+        const manual = existing && existing.manualCells;
+        const hasManualCells = !!(manual && (
+          (Array.isArray(manual.excluded) && manual.excluded.length) ||
+          (Array.isArray(manual.visited) && manual.visited.length)
+        ));
+        const looksAutoSeeded = existing && existing.color === '#c084fc'
+          && Math.abs((existing.centerLat || 0) - 37.4837) < 0.0001
+          && Math.abs((existing.centerLng || 0) - 127.0324) < 0.0001
+          && polygon.length === 0 && !hasManualCells;
+        if (looksAutoSeeded) {
+          const t = db.transaction(['zones'], 'readwrite');
+          t.objectStore('zones').put({ ...existing, active: false });
+          await done(t);
+        }
+        await metaSet('seocho_default_merged_into_gangnam', true);
       }
     }
 
@@ -638,6 +668,38 @@
         return this.listZones();
       },
 
+      async getZoneManualCells(name) {
+        const db = await ready();
+        const t = db.transaction(['zones'], 'readonly');
+        const row = await reqp(t.objectStore('zones').get(name));
+        const cells = row && row.manualCells;
+        return {
+          excluded: Array.isArray(cells && cells.excluded) ? cells.excluded : [],
+          visited: Array.isArray(cells && cells.visited) ? cells.visited : [],
+        };
+      },
+
+      async saveZoneManualCells(name, data) {
+        const db = await ready();
+        const readTx = db.transaction(['zones'], 'readonly');
+        const existingReq = reqp(readTx.objectStore('zones').get(name));
+        const readDone = done(readTx);
+        const existing = await existingReq;
+        await readDone;
+        if (existing) {
+          const t = db.transaction(['zones'], 'readwrite');
+          t.objectStore('zones').put({
+            ...existing,
+            manualCells: {
+              excluded: Array.isArray(data && data.excluded) ? data.excluded : [],
+              visited: Array.isArray(data && data.visited) ? data.visited : [],
+            },
+          });
+          await done(t);
+        }
+        return this.getZoneManualCells(name);
+      },
+
       async getSettings() {
         const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: 50 };
         const saved = await metaGet('app_settings', {});
@@ -655,15 +717,26 @@
       },
 
       // Coverage Depth — 같은 (date,vehicle) 안에서 시간순으로 셀이 바뀔 때만 새 방문으로 센다.
-      // SQLite는 LAG() 윈도우 함수로 SQL에서 계산하지만, IndexedDB는 커서로 훑어 JS에서 같은 규칙을 적용한다.
+      // GPS가 ~10초 간격으로 찍혀도 두 점 사이 실제 이동 경로가 지나가는 모든
+      // 칸을 방문으로 잡는다(CoverageGrid, coverage-grid.js — desktop(SQLite,
+      // database.js)과 완전히 같은 로직을 쓴다). 이동 판정(그 사이를 이을지)은
+      // 시간차·속도 조건을 만족할 때만 하고, 아니면 점 하나만 남긴다.
       async getCellVisitCounts(box, cellSizeM) {
         const size = cellSizeM || (await this.getSettings()).coverageCellSizeM || 50;
         const latDeg = size / 111320;
-        const lngDeg = (box && box.lngDeg) || size / (111320 * Math.cos(((box && box.refLat) || 37.5) * Math.PI / 180));
+        const refLat = (box && box.refLat) || 37.5;
+        const lngDeg = (box && box.lngDeg) || size / (111320 * Math.cos(refLat * Math.PI / 180));
+
+        // segment 연결을 허용하는 최대 거리만큼 쿼리 bbox를 넉넉히 넓힌다 —
+        // database.js의 getCellVisitCounts와 같은 이유(주석 참고).
+        const marginM = (CoverageGrid.MAX_INTERPOLATION_SPEED_KMH / 3.6) * CoverageGrid.MAX_INTERPOLATION_GAP_SEC;
+        const marginLatDeg = marginM / 111320;
+        const marginLngDeg = marginM / (111320 * Math.cos(refLat * Math.PI / 180));
+
         const groups = new Map();
         await scan(null, r => {
-          if (box && box.minLat != null && (r.lat < box.minLat || r.lat > box.maxLat)) return;
-          if (box && box.minLng != null && (r.lng < box.minLng || r.lng > box.maxLng)) return;
+          if (box && box.minLat != null && (r.lat < box.minLat - marginLatDeg || r.lat > box.maxLat + marginLatDeg)) return;
+          if (box && box.minLng != null && (r.lng < box.minLng - marginLngDeg || r.lng > box.maxLng + marginLngDeg)) return;
           const key = (r.date || '') + '|' + (r.vehicle || '');
           if (!groups.has(key)) groups.set(key, []);
           groups.get(key).push({ lat: r.lat, lng: r.lng, timestamp: r.timestamp || '' });
@@ -671,12 +744,7 @@
         const visits = new Map();
         groups.forEach(list => {
           list.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-          let lastKey = null;
-          list.forEach(p => {
-            const gy = Math.floor(p.lat / latDeg), gx = Math.floor(p.lng / lngDeg);
-            const k = gy + '_' + gx;
-            if (k !== lastKey) { visits.set(k, (visits.get(k) || 0) + 1); lastKey = k; }
-          });
+          CoverageGrid.accumulatePartitionVisits(list, latDeg, lngDeg, visits);
         });
         return [...visits.entries()].map(([k, v]) => {
           const [gy, gx] = k.split('_').map(Number);
@@ -796,7 +864,7 @@
     'getTimeBucketDistribution', 'deleteDate', 'deleteAll', 'getZonePolygons',
     'saveZonePolygons', 'listImports', 'findImportByFileHash', 'getImportConflicts',
     'listVehicles', 'saveVehicle', 'setVehicleActive', 'listZones', 'saveZone',
-    'setZoneActive', 'getSettings', 'setSettings', 'getCellVisitCounts',
+    'setZoneActive', 'getZoneManualCells', 'saveZoneManualCells', 'getSettings', 'setSettings', 'getCellVisitCounts',
     'getBackupHistory', 'setBackupHistory', 'buildBackupPayload', 'restoreBackupPayload',
   ].forEach(name => {
     RouteDB[name] = function (...args) {

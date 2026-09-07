@@ -216,22 +216,7 @@
 /* ── 지역/차량 필터 버튼을 JS로 채우는 래퍼 — 부모 flex 레이아웃을 그대로 통과시킨다 ── */
 .zone-filter-buttons{display:contents;}
 
-/* ── Coverage % 요약(지역별 목록) · 상세(선택한 지역 하나) — 요구사항 9~11 ── */
-.coverage-summary{
-  display:none;flex-wrap:wrap;gap:8px;
-}
-.cov-summary-row{
-  display:flex;align-items:center;gap:8px;cursor:pointer;
-  background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 12px;
-  font-family:inherit;color:var(--text);
-}
-.cov-summary-row:hover{border-color:var(--text-faint);}
-.cov-summary-row.active{border-color:var(--teal);background:rgba(79,216,199,.06);}
-.cov-summary-dot{width:8px;height:8px;border-radius:50%;flex:none;}
-.cov-summary-zone{font-size:12px;font-weight:600;}
-.cov-summary-pct{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--teal);font-weight:700;}
-.cov-summary-pct.muted{color:var(--text-faint);font-weight:400;font-size:10.5px;}
-
+/* ── Coverage % 상세(선택한 지역 하나) — 요구사항 9,11 ── */
 .coverage-detail{
   display:none;flex-direction:column;gap:10px;
   border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px 16px;

@@ -16,8 +16,8 @@
   script-src 'self' 'unsafe-inline';
   style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
   font-src 'self' https://fonts.gstatic.com;
-  img-src 'self' data: blob: https://*.basemaps.cartocdn.com;
-  connect-src 'self' https://overpass-api.de;
+  img-src 'self' data: blob: https://*.basemaps.cartocdn.com https://*.tile.openstreetmap.org;
+  connect-src 'self' https://overpass-api.de https://overpass.kumi.systems https://overpass.openstreetmap.ru https://maps.mail.ru;
   object-src 'none';
   base-uri 'none';
   form-action 'none';
@@ -113,13 +113,27 @@
     <div id="zone-filter-group">
       <div id="zone-filter-buttons" class="zone-filter-buttons"></div>
       <span style="flex:1;"></span>
+      <button class="btn ghost" type="button" id="exclusion-debug-toggle-btn" onclick="toggleExclusionDebug()" style="display:none;" title="빨강=아파트 단지 경계(실선=명시적 landuse 태그, 점선=hull 추정) · 갈색=주차장(amenity=parking) · 파랑=아파트 동 · 노랑=단지 내부 도로 · 마젠타=정상 인정된(ACCEPTED) 도로 Coverage · 초록=자동 연결(gap healing)로 새로 채워진 칸 · 검정/갈색/회색=아파트·주차장·건물로 REJECTED된 칸(칸을 클릭하면 이유 표시). 콘솔에 [ApartmentDebug] 로그도 남음">디버그 보기</button>
       <button class="btn ghost" type="button" id="coverage-toggle-btn" onclick="toggleCoverageGaps()">커버리지 갭 보기</button>
+    </div>
+    <div id="accum-date-filter">
+      <label class="accum-date-field">시작일 <input type="date" id="accum-date-from" onchange="onAccumDateInputChange()"/></label>
+      <label class="accum-date-field">종료일 <input type="date" id="accum-date-to" onchange="onAccumDateInputChange()"/></label>
+      <button class="btn ghost" type="button" onclick="setAccumLastMonth()">지난달</button>
+      <button class="btn ghost" type="button" onclick="clearAccumDateFilter()">전체 기간</button>
+      <span id="accum-date-label" class="mono">전체 기간</span>
+      <span style="flex:1;"></span>
+      <button class="btn ghost" type="button" id="boundary-edit-toggle-btn" onclick="toggleBoundaryEdit()" style="display:none;" title="구역 경계 수정">⚙️</button>
     </div>
     <div id="accum-hint" class="mono">지도 위에 마우스를 가져다 대면 그 근처 기록이 바로 떠요</div>
     <div id="boundary-controls">
-      <span class="mono" style="font-size:10.5px;color:var(--text-faint);">구역 경계는 nav-app 섹터 그리기와 같은 방식으로, 지도를 직접 클릭해서 그려요</span>
       <button class="btn ghost" type="button" id="boundary-draw-btn" onclick="startBoundaryDraw()">구역을 먼저 선택하세요</button>
       <button class="btn ghost" type="button" id="boundary-clear-btn" onclick="clearZoneBoundary()" style="display:none;">경계 지우기</button>
+      <span style="flex:1 1 100%;height:0;"></span>
+      <button class="btn ghost" type="button" id="cell-exclude-btn" onclick="setCellEditMode('exclude')" title="지도에서 칸을 클릭하면 그 칸을 도로 아님(제외)으로 표시해요. 다시 클릭하면 취소">🗑️ 제외 셀 선택</button>
+      <button class="btn ghost" type="button" id="cell-visit-btn" onclick="setCellEditMode('visit')" title="지도에서 칸을 클릭하면 그 칸을 방문한 걸로 표시해요. 다시 클릭하면 취소">✅ 방문 셀 선택</button>
+      <button class="btn ghost" type="button" id="manual-apply-btn" onclick="applyManualCellEdits()" title="찍어둔 제외/방문 셀을 저장하고 커버리지를 다시 계산">선택 적용</button>
+      <button class="btn ghost" type="button" onclick="clearManualCells()" title="현재 구역에서 직접 선택한 제외/방문 칸을 전부 초기화">현재 구역 선택 초기화</button>
     </div>
     <!-- 지역별 Coverage 요약(요구사항 10) — 커버리지 갭 모드에서 전체 지역을 한눈에 -->
     <div id="coverage-summary" class="coverage-summary"></div>
@@ -128,6 +142,11 @@
     <div id="accum-map-wrap">
       <div id="accum-map"></div>
       <div id="accum-tooltip"></div>
+      <!-- 커버리지 갭 계산 중(도로/건물 데이터 fetch) 로딩 표시 — 이스터에그로 양이 지나감 -->
+      <div id="coverage-loading">
+        <div id="coverage-loading-track"><span id="coverage-loading-sheep">🐑</span></div>
+        <div id="coverage-loading-text">도로·건물 데이터를 불러오는 중이에요… 인터넷 상태에 따라 오래 걸릴 수 있어요</div>
+      </div>
       <!-- 섹터(구역 경계) 그리기 툴바 — nav-app의 sector-draw-bar와 같은 방식 -->
       <div id="boundary-draw-bar">
         <span id="boundary-pt-count">꼭짓점 0개</span>
@@ -288,7 +307,15 @@
 <script src="../vendor/xlsx/xlsx.full.min.js"></script>
 <script src="js/parser.js"></script>
 <script src="js/core.js"></script>
+<!-- 강남/서초 HD map 도로 데이터 — <script> 태그로 로드해서 각각
+     window.HDMAP_GANGNAM_ROADS / window.HDMAP_SEOCHO_ROADS에 담는다.
+     fetch()로 로컬 JSON을 읽으면 이 화면을 file://로 직접 열었을 때
+     브라우저 CORS 정책에 막히지만(Failed to fetch), <script> 태그는 file://
+     에서도 그대로 로드된다. tools/convert-hdmap-shapefile.js가 생성한다. -->
+<script src="data/hdmap_gangnam_roads.js"></script>
+<script src="data/hdmap_seocho_roads.js"></script>
 <script src="js/quality.js"></script>
+<script src="js/coverage-grid.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/auth.js"></script>

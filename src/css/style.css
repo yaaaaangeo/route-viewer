@@ -160,12 +160,41 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
 
 /* 구역 필터 버튼 */
 #zone-filter-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+#accum-date-filter{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+}
+.accum-date-field{
+  display:flex;align-items:center;gap:7px;
+  font-size:11px;font-weight:700;color:var(--text-dim);
+}
+.accum-date-field input{
+  height:32px;border:1px solid var(--line);border-radius:6px;
+  background:#090d14;color:var(--text);padding:0 8px;font-family:'JetBrains Mono',monospace;font-size:11px;
+  color-scheme:dark;
+}
+#accum-date-label{font-size:10.5px;color:var(--text-faint);margin-left:2px;}
 #accum-hint{font-size:10.5px;color:var(--text-faint);}
 #coverage-toggle-btn.active{color:var(--bg);background:#ff6b6b;border-color:#ff6b6b;}
+#boundary-edit-toggle-btn.active{color:var(--bg);background:var(--teal);border-color:var(--teal);}
+#exclusion-debug-toggle-btn.active{color:#fff;background:#a855f7;border-color:#a855f7;}
+#cell-exclude-btn.active{color:#fff;background:#dc2626;border-color:#dc2626;}
+#cell-visit-btn.active{color:var(--bg);background:#5fd88a;border-color:#5fd88a;}
+#manual-apply-btn.active{color:var(--bg);background:var(--amber);border-color:var(--amber);}
+#accum-map-wrap.cell-edit-mode #accum-map{cursor:crosshair;}
+#accum-map-wrap.cell-edit-mode .leaflet-container{cursor:crosshair;}
 #boundary-controls{
   display:none;align-items:center;flex-wrap:wrap;gap:10px;
   background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 14px;
 }
+/* 구역 경계 꼭짓점 드래그 핸들(accum.js renderVertexEditHandles) */
+.vertex-handle{
+  width:16px;height:16px;border-radius:50%;
+  background:#f59e0b;border:2px solid #fff;
+  box-shadow:0 1px 5px rgba(0,0,0,.5);
+  cursor:grab;
+}
+.vertex-handle:active{cursor:grabbing;}
 /* 구역 경계(섹터) 그리기 툴바 — nav-app #sector-draw-bar와 같은 스타일 */
 #boundary-draw-bar{
   display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:1200;
@@ -179,6 +208,26 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
   border-radius:6px;padding:6px 11px;font-size:11.5px;cursor:pointer;font-family:inherit;
 }
 #boundary-draw-bar button.primary{background:#f59e0b;border-color:#f59e0b;color:#1a1206;font-weight:700;}
+
+/* 커버리지 갭 계산 중 로딩 표시 — 도로/건물 데이터를 Overpass에서 받는 동안
+   화면이 멈춘 것처럼 보이지 않게, 얼마나 걸릴지 몰라도 "일하고 있다"는 걸
+   양이 지나가는 걸로 알려준다(이스터에그). */
+#coverage-loading{
+  display:none;position:absolute;left:0;right:0;bottom:0;z-index:1100;
+  flex-direction:column;gap:3px;padding:8px 0 10px;
+  background:linear-gradient(0deg,rgba(10,14,22,.92),rgba(10,14,22,.6) 75%,transparent);
+}
+#coverage-loading.show{display:flex;}
+#coverage-loading-track{position:relative;height:22px;overflow:hidden;}
+#coverage-loading-sheep{
+  position:absolute;top:0;left:-10%;font-size:18px;transform:scaleX(-1);
+  animation:sheep-walk 8s linear infinite;
+}
+#coverage-loading-text{text-align:center;font-size:10.5px;color:var(--text-faint);}
+@keyframes sheep-walk{
+  from{left:-10%;}
+  to{left:104%;}
+}
 .zone-btn{
   border:1px solid var(--line);background:var(--panel);color:var(--text-dim);
   border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;
@@ -301,6 +350,10 @@ main{flex:1;display:flex;flex-direction:column;padding:20px;gap:14px;max-width:1
   height:min(58vh,560px);position:relative;background:var(--panel-2);
 }
 #map{width:100%;height:100%;}
+/* 타일을 회색으로 톤다운 — OSM 기본 타일이 원색이라 경로/밀도/커버리지 오버레이가
+   묻혀 보였다. 채도를 낮추고 살짝 밝혀서 오버레이 색이 도드라지게 한다. */
+#map .leaflet-tile-pane,
+#accum-map .leaflet-tile-pane{filter:grayscale(85%) brightness(1.06) contrast(.92);}
 .leaflet-popup-content-wrapper{background:#151c29;color:var(--text);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.5);}
 .leaflet-popup-content{font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.6;}
 .leaflet-popup-tip{background:#151c29;}

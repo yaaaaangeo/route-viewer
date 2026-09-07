@@ -2,6 +2,51 @@
 //  replay — 리플레이 콘솔 · 테이프 스크러버
 // ══════════════════════════════════════════════════════════
 // ── 콘솔(로드 후 화면) 구성 ────────────────────────────
+const REPLAY_MAX_DIRECT_SEGMENT_M=70;
+
+function replayPointTimestamp(p){
+  return p.timestamp || (p.date&&p.time ? `${p.date}T${p.time}` : null);
+}
+
+function replaySegmentStatus(a,b){
+  const distM=haversine(a.lat,a.lng,b.lat,b.lng);
+  const t1=replayPointTimestamp(a), t2=replayPointTimestamp(b);
+  const dtSec=(window.CoverageGrid&&t1&&t2) ? CoverageGrid.timeDiffSec(t1,t2) : null;
+  const maxGapSec=(window.CoverageGrid&&CoverageGrid.MAX_INTERPOLATION_GAP_SEC)||30;
+  const maxSpeedKmh=(window.CoverageGrid&&CoverageGrid.MAX_INTERPOLATION_SPEED_KMH)||150;
+  const speedKmh=(dtSec&&dtSec>0) ? (distM/dtSec)*3.6 : Infinity;
+  return {
+    distM,
+    connected:distM<=REPLAY_MAX_DIRECT_SEGMENT_M&&dtSec!=null&&dtSec>0&&dtSec<=maxGapSec&&speedKmh<=maxSpeedKmh,
+  };
+}
+
+function buildReplayRouteSegments(dayPoints){
+  const segments=[];
+  if(!dayPoints||dayPoints.length<2) return segments;
+  let current=[dayPoints[0]];
+  for(let i=1;i<dayPoints.length;i++){
+    const prev=dayPoints[i-1], cur=dayPoints[i];
+    if(replaySegmentStatus(prev,cur).connected){
+      current.push(cur);
+    }else{
+      if(current.length>=2) segments.push(current);
+      current=[cur];
+    }
+  }
+  if(current.length>=2) segments.push(current);
+  return segments;
+}
+
+function replayConnectedDistanceM(dayPoints){
+  let distM=0;
+  for(let i=1;i<dayPoints.length;i++){
+    const status=replaySegmentStatus(dayPoints[i-1],dayPoints[i]);
+    if(status.connected) distM+=status.distM;
+  }
+  return distM;
+}
+
 function renderConsole(){
   document.getElementById('dropzone').style.display='none';
   document.getElementById('calendar-view').style.display='none';
@@ -11,7 +56,9 @@ function renderConsole(){
 
   routeLayer.clearLayers();
   const latlngs=points.map(p=>[p.lat,p.lng]);
-  L.polyline(latlngs,{color:'#4fd8c7',weight:4,opacity:.85}).addTo(routeLayer);
+  buildReplayRouteSegments(points).forEach(segment=>{
+    L.polyline(segment.map(p=>[p.lat,p.lng]),{color:'#4fd8c7',weight:4,opacity:.85}).addTo(routeLayer);
+  });
   addVehicleStorageMarker(map,routeLayer);
 
   const start=points[0], end=points[points.length-1];
@@ -43,8 +90,7 @@ function renderConsole(){
   });
 
   // 통계
-  let distM=0;
-  for(let i=1;i<points.length;i++) distM+=haversine(points[i-1].lat,points[i-1].lng,points[i].lat,points[i].lng);
+  const distM=replayConnectedDistanceM(points);
   document.getElementById('stat-date').textContent=start.date||'—';
   document.getElementById('stat-range').innerHTML=(start.time&&end.time)?`${start.time}<small> → </small>${end.time}`:'—';
   document.getElementById('stat-points').textContent=points.length+'개';

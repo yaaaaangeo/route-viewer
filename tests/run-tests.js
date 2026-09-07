@@ -193,6 +193,18 @@ function main() {
     `${cells[0].lat.toFixed(5)}, n=${cells[0].n}`);
   check('누적지도: 격자별 지나간 날짜 수', cells.some(c => c.dateCount >= 1));
   check('누적지도: 격자별 구역/차량 집계', cells.some(c => Object.keys(c.zones).length > 0));
+  const aug12Overview = db.getOverview({ fromDate: '2026-08-12', toDate: '2026-08-12' });
+  check('date-range: overview limits to selected day',
+    aug12Overview.days === 1 && aug12Overview.points === 16,
+    `${aug12Overview.days}d ${aug12Overview.points}pts`);
+  const aug12Cells = db.getDensityCells({ fromDate: '2026-08-12', toDate: '2026-08-12' }, 0.0007);
+  check('date-range: density cells only use selected day',
+    aug12Cells.length > 0 && aug12Cells.every(c => c.dateCount === 1),
+    `${aug12Cells.length}cells`);
+  const aug12Bounds = db.getBounds({ fromDate: '2026-08-12', toDate: '2026-08-12' });
+  check('date-range: bounds are available for selected day',
+    aug12Bounds && aug12Bounds.count === 16,
+    aug12Bounds ? `${aug12Bounds.count}pts` : 'null');
 
   const bounds = db.getBounds({ zone: '강남' });
   check('누적지도: 화면 맞춤용 bounds', bounds && bounds.minLat < bounds.maxLat,
@@ -330,6 +342,8 @@ function main() {
   const hitCell = visits.find(v => v.visits > 0);
   check('20개 연속 GPS가 찍힌 셀의 방문 횟수는 1', hitCell && hitCell.visits === 1,
     JSON.stringify(visits.filter(v => v.visits > 0)));
+  check('date-range: coverage visits can be filtered out',
+    dbF.getCellVisitCounts({ ...box, fromDate: '2026-08-21', toDate: '2026-08-21' }, 50).length === 0);
 
   // 같은 셀을 벗어났다가 다시 들어오면 방문이 늘어나야 한다
   const returnPts = [
@@ -372,7 +386,33 @@ function main() {
     dbH.getRecordsByDate('2026-08-21').length === 1);
 
   const seededZones = dbH.listZones().map(z => z.name);
-  check('기존 강남/판교/시흥이 그대로 유지(migration)', seededZones.join(',') === '강남,판교,시흥');
+  check('기존 강남/판교/시흥 기본 구역 유지(서초는 강남 커버리지 HD map에 병합)',
+    seededZones.join(',') === '강남,판교,시흥', seededZones.join(','));
+
+  const oldSeochoPath = freshDbPath();
+  const dbOldSeocho = new RouteDatabase(oldSeochoPath);
+  dbOldSeocho.saveZone({ name: '서초', color: '#c084fc', centerLat: 37.4837, centerLng: 127.0324, active: true });
+  dbOldSeocho.setMeta('seocho_default_merged_into_gangnam', '');
+  dbOldSeocho.close();
+  const dbMigratedSeocho = new RouteDatabase(oldSeochoPath);
+  const autoSeocho = dbMigratedSeocho.listZones().find(z => z.name === '서초');
+  check('이전 빌드가 만든 빈 서초 기본 구역은 자동 비활성화됨',
+    autoSeocho && autoSeocho.active === false);
+  dbMigratedSeocho.close();
+
+  const customSeochoPath = freshDbPath();
+  const dbCustomSeocho = new RouteDatabase(customSeochoPath);
+  dbCustomSeocho.saveZone({
+    name: '서초', color: '#c084fc', centerLat: 37.4837, centerLng: 127.0324, active: true,
+    polygon: [[37.48, 127.01], [37.49, 127.01], [37.49, 127.03], [37.48, 127.03]],
+  });
+  dbCustomSeocho.setMeta('seocho_default_merged_into_gangnam', '');
+  dbCustomSeocho.close();
+  const dbCustomMigratedSeocho = new RouteDatabase(customSeochoPath);
+  const customSeocho = dbCustomMigratedSeocho.listZones().find(z => z.name === '서초');
+  check('사용자가 직접 경계를 그린 서초 구역은 비활성화하지 않음',
+    customSeocho && customSeocho.active === true && customSeocho.polygon.length === 4);
+  dbCustomMigratedSeocho.close();
 
   const newZone = dbH.saveZone({ name: '성남', color: '#abcdef', centerLat: 37.42, centerLng: 127.13 });
   check('새 지역이 코드 수정 없이 추가됨', newZone.name === '성남');
@@ -385,6 +425,16 @@ function main() {
   dbH.setZoneActive('성남', false);
   check('지역 비활성화 가능(과거 기록엔 영향 없음)',
     dbH.listZones().find(z => z.name === '성남').active === false);
+
+  const emptyManual = dbH.getZoneManualCells('강남');
+  check('수동 셀 오버라이드 기본값은 빈 배열', Array.isArray(emptyManual.excluded) && Array.isArray(emptyManual.visited)
+    && emptyManual.excluded.length === 0 && emptyManual.visited.length === 0);
+  dbH.saveZoneManualCells('강남', { excluded: [[37.50, 127.03]], visited: [[37.51, 127.04], [37.52, 127.05]] });
+  const savedManual = dbH.getZoneManualCells('강남');
+  check('수동 제외 셀이 저장/조회된다', savedManual.excluded.length === 1
+    && savedManual.excluded[0][0] === 37.50 && savedManual.excluded[0][1] === 127.03);
+  check('수동 방문 셀이 저장/조회된다', savedManual.visited.length === 2);
+  check('다른 구역(판교)의 수동 셀은 영향받지 않음', dbH.getZoneManualCells('판교').excluded.length === 0);
   dbH.close();
 
   // ── 삭제는 명시적으로만 ─────────────────────────────
