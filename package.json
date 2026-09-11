@@ -13,7 +13,8 @@
     "dist": "electron-builder --win nsis portable --publish never",
     "pack": "electron-builder --win --dir",
     "test": "node tests/run-tests.js && node tests/coverage-grid-test.js && node tests/coverage-gap-healing-test.js && node tests/apartment-shinhyundai-test.js && node tests/apartment-eunma-test.js && node tests/hdmap-data-test.js && node tests/manual-cells-storage-test.js && node tests/coverage-manual-cells-test.js && node tests/accum-date-filter-test.js && node tests/map-capture-test.js",
-    "test:e2e": "electron . --enable-logging"
+    "test:e2e": "electron . --enable-logging",
+    "test:browser-capture": "electron tests/browser-capture-e2e.js"
   },
   "dependencies": {
     "node-sqlite3-wasm": "^0.8.45",

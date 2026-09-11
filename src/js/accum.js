@@ -1985,12 +1985,14 @@ function setAccumLastMonth(){
 }
 
 // ══════════════════════════════════════════════════════════
-//  📷 현재 지도 캡처 (데스크톱 앱 전용)
+//  📷 현재 지도 캡처
 //
-//  Electron 메인 프로세스가 webContents.capturePage(지도 영역)로 화면에 실제 그려진
-//  픽셀을 찍는다 — 외부 지도 타일(CORS)·Leaflet Canvas Layer도 그대로 들어간다.
-//  화면(renderer)은 지도 영역 좌표와 기본 파일명만 넘기고, 저장 위치 선택·파일 쓰기는
-//  메인 프로세스가 한다(preload의 captureMap 하나만 노출). 브라우저 모드는 지원하지 않는다.
+//  · 데스크톱 앱: Electron 메인 프로세스가 webContents.capturePage(지도 영역)로 화면에
+//    실제 그려진 픽셀을 찍는다. 화면(renderer)은 지도 영역 좌표와 기본 파일명만 넘기고,
+//    저장 위치 선택·파일 쓰기는 메인 프로세스가 한다(preload의 captureMap 하나만 노출).
+//  · 브라우저 모드: 지도 DOM의 배경 타일 <img>(CORS로 받음)와 Leaflet Canvas Layer
+//    (preferCanvas라 칸·원·경계선이 모두 여기 있다)를 쌓임 순서대로 캔버스에 합성해 PNG로
+//    만든다. 저장은 파일 저장 창(showSaveFilePicker)을 지원하면 그걸로, 아니면 다운로드로.
 //
 //  캡처에는 "적용 완료된" 현재 지도만 들어간다. 적용 전 선택(pending) 미리보기, 확대/축소
 //  버튼, 로딩 표시, 호버 툴팁, 꼭짓점 핸들은 잠깐 숨기고 finally에서 반드시 되돌린다.
@@ -2001,8 +2003,18 @@ let mapCaptureInFlight=false;
 const MAP_CAPTURE_HIDE_SELECTOR='#accum-map .leaflet-control-zoom, #accum-tooltip, #coverage-loading, #accum-map .vertex-handle';
 const MAP_CAPTURE_TILE_WAIT_MS=8000;
 
+// 'desktop' = Electron capturePage(IPC) · 'browser' = 화면에서 캔버스 합성 · null = 이 환경은 불가
+function mapCaptureMode(){
+  if(window.routeAPI&&window.routeAPI.isDesktop&&typeof window.routeAPI.captureMap==='function') return 'desktop';
+  try{
+    const c=document.createElement('canvas');
+    if(c&&typeof c.getContext==='function'&&typeof c.toBlob==='function') return 'browser';
+  }catch(_){ /* 캔버스를 만들 수 없는 환경 */ }
+  return null;
+}
+
 function mapCaptureSupported(){
-  return !!(window.routeAPI&&window.routeAPI.isDesktop&&typeof window.routeAPI.captureMap==='function');
+  return !!mapCaptureMode();
 }
 
 // 최신 상태로 다 그려져 있어서 지금 찍어도 되는지
@@ -2019,7 +2031,7 @@ function updateCaptureButton(){
   const ready=isAccumMapSettled();
   btn.disabled=!supported||!ready||mapCaptureInFlight;
   btn.textContent=mapCaptureInFlight?'📷 캡처 중…':'📷 현재 지도 캡처';
-  btn.title=!supported?'지도 캡처는 데스크톱 앱에서만 지원해요(브라우저 모드에서는 지원하지 않아요)'
+  btn.title=!supported?'이 환경에서는 지도 캡처를 지원하지 않아요(캔버스 PNG 저장 불가)'
     :mapCaptureInFlight?'캡처하는 중이에요'
     :!ready?'지도 계산이 끝나면 캡처할 수 있어요'
     :'지금 보이는 누적 지도를 PNG로 저장';
@@ -2097,11 +2109,158 @@ function mapRectClipped(rect){
   return rect.x<0||rect.y<0||rect.x+rect.width>vw+1||rect.y+rect.height>vh+1;
 }
 
+// ── 브라우저 모드 캡처(캔버스 합성) ─────────────────────────────────
+// 지도 DOM에서 그릴 것을 화면 쌓임 순서대로 모은다(좌표는 지도 왼쪽 위 기준 CSS px).
+//  1) 배경 타일: 줌 단계별 타일 묶음(.leaflet-tile-container)을 z-index 오름차순으로. Leaflet은 줌을
+//     바꾼 뒤에도 이전 단계 타일을 잠시 남겨 두는데(확대된 채 z-index가 더 낮음), 문서 순서대로 그리면
+//     그 흐릿하게 확대된 타일이 지금 타일 위에 겹친다. 타일마다의 페이드인 투명도는 쓰지 않고(로딩이
+//     끝난 타일만 그림) 타일 묶음·지도 창의 투명도만 쓴다.
+//  2) Leaflet Canvas Layer(<canvas>) — 칸·원·경계선, 문서 순서대로 타일 위에.
+// 호버 툴팁·확대/축소 버튼·꼭짓점 핸들 같은 DOM 요소는 애초에 그리지 않는다.
+function collectMapDrawItems(mapEl){
+  const base=mapEl.getBoundingClientRect();
+  const right=base.left+base.width, bottom=base.top+base.height;
+  const items=[];
+  const visible=el=>{ const s=getComputedStyle(el); return s.visibility!=='hidden'&&s.display!=='none'; };
+  const push=(el,opacity,filter)=>{
+    const r=el.getBoundingClientRect();
+    if(!(r.width>0&&r.height>0)) return;
+    if(r.left+r.width<=base.left||r.top+r.height<=base.top||r.left>=right||r.top>=bottom) return; // 지도 밖
+    items.push({el,x:r.left-base.left,y:r.top-base.top,width:r.width,height:r.height,opacity,filter:filter||'none'});
+  };
+  const containers=[...mapEl.querySelectorAll('.leaflet-tile-container')]
+    .map((el,i)=>({el,i,z:parseInt(el.style&&el.style.zIndex,10)||0}))
+    .sort((a,b)=>a.z-b.z||a.i-b.i);
+  containers.forEach(({el:container})=>{
+    if(!visible(container)) return;
+    const opacity=effectiveOpacity(container,mapEl);
+    // 화면의 배경 지도는 CSS filter(흑백·밝기, style.css의 .leaflet-tile-pane)가 걸려 있다 —
+    // 캔버스에도 같은 filter를 걸어 화면과 같은 색으로 그린다
+    const pane=typeof container.closest==='function'?container.closest('.leaflet-tile-pane'):null;
+    const filter=pane?getComputedStyle(pane).filter:'none';
+    container.querySelectorAll('img.leaflet-tile').forEach(img=>{
+      if(!(img.complete&&img.naturalWidth>0)||!visible(img)) return; // 아직 못 받은 타일
+      push(img,opacity,filter);
+    });
+  });
+  mapEl.querySelectorAll('.leaflet-pane canvas').forEach(el=>{
+    if(visible(el)) push(el,effectiveOpacity(el,mapEl));
+  });
+  return {width:base.width,height:base.height,items};
+}
+
+function effectiveOpacity(el,stopEl){
+  let opacity=1;
+  for(let node=el;node&&node!==stopEl;node=node.parentElement){
+    const v=parseFloat(getComputedStyle(node).opacity);
+    if(Number.isFinite(v)) opacity*=v;
+  }
+  return opacity;
+}
+
+// 지도 저작권 표시(OSM attribution)는 DOM이라 캔버스에 글자로 다시 쓴다
+function drawMapAttribution(ctx,mapEl,width,height){
+  const el=mapEl.querySelector('.leaflet-control-attribution');
+  const text=el?String(el.textContent||'').replace(/\s+/g,' ').trim():'';
+  if(!text) return;
+  ctx.font='11px sans-serif';
+  const w=ctx.measureText(text).width+10, h=16;
+  ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.fillRect(width-w,height-h,w,h);
+  ctx.fillStyle='#333';
+  ctx.textBaseline='middle';
+  ctx.fillText(text,width-w+5,height-h/2);
+}
+
+function renderAccumMapToCanvas(){
+  const mapEl=document.getElementById('accum-map');
+  const {width,height,items}=collectMapDrawItems(mapEl);
+  const scale=Math.max(1,Number(window.devicePixelRatio)||1); // 화면 배율만큼 선명하게
+  const canvas=document.createElement('canvas');
+  canvas.width=Math.round(width*scale);
+  canvas.height=Math.round(height*scale);
+  const ctx=canvas.getContext('2d');
+  ctx.scale(scale,scale);
+  const bg=getComputedStyle(mapEl).backgroundColor;
+  ctx.fillStyle=bg&&!/rgba\(0, 0, 0, 0\)|transparent/.test(bg)?bg:'#dddddd';
+  ctx.fillRect(0,0,width,height);
+  items.forEach(it=>{
+    ctx.globalAlpha=it.opacity;
+    ctx.filter=it.filter||'none'; // ctx.filter를 모르는 브라우저(Safari)는 원본 색으로 그려진다
+    ctx.drawImage(it.el,it.x,it.y,it.width,it.height);
+  });
+  ctx.globalAlpha=1;
+  ctx.filter='none';
+  drawMapAttribution(ctx,mapEl,width,height);
+  return {
+    canvas,
+    tiles:items.filter(it=>it.el.tagName==='IMG').length,
+    layers:items.filter(it=>it.el.tagName==='CANVAS').length,
+  };
+}
+
+function canvasToPngBlob(canvas){
+  return new Promise((resolve,reject)=>{
+    try{
+      canvas.toBlob(blob=>(blob?resolve(blob):reject(new Error('지도를 PNG로 바꾸지 못했어요.'))),'image/png');
+    }catch(err){
+      // CORS 허용 없이 받은 이미지가 섞이면 캔버스가 오염돼 내보낼 수 없다(SecurityError)
+      reject(err&&err.name==='SecurityError'
+        ?new Error('배경 지도 타일 서버가 CORS를 허용하지 않아 이미지를 만들 수 없어요.')
+        :err);
+    }
+  });
+}
+
+function downloadBlob(blob,fileName){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=fileName;
+  a.style.display='none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),10000);
+}
+
+// 저장 — 파일 저장 창(showSaveFilePicker)을 지원하면 위치·이름을 고르게 하고, 없거나 띄울 수
+// 없으면(사용자 동작이 만료된 경우 등) 브라우저 다운로드로 저장한다. 저장 창에서 취소하면 canceled.
+async function saveBrowserPng(blob,fileName){
+  if(typeof window.showSaveFilePicker==='function'){
+    let handle=null;
+    try{
+      handle=await window.showSaveFilePicker({
+        suggestedName:fileName,
+        types:[{description:'PNG 이미지',accept:{'image/png':['.png']}}],
+      });
+    }catch(err){
+      if(err&&err.name==='AbortError') return {canceled:true};
+      if(!(err&&(err.name==='SecurityError'||err.name==='NotAllowedError'))) throw err;
+    }
+    if(handle){
+      const writable=await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return {canceled:false,filePath:handle.name||fileName,bytes:blob.size,savedVia:'picker'};
+    }
+  }
+  downloadBlob(blob,fileName);
+  return {canceled:false,filePath:fileName,bytes:blob.size,savedVia:'download'};
+}
+
+async function captureAccumMapInBrowser(fileName){
+  const {canvas,tiles,layers}=renderAccumMapToCanvas();
+  const blob=await canvasToPngBlob(canvas);
+  const saved=await saveBrowserPng(blob,fileName);
+  return {...saved,width:canvas.width,height:canvas.height,tiles,layers};
+}
+
 // 반환: {status:'saved'|'canceled'|'error'|'not-ready'|'unsupported'|'busy', ...}
 async function captureAccumMap(){
   if(mapCaptureInFlight) return {status:'busy'};
   if(!mapCaptureSupported()){
-    showError('지도 캡처는 데스크톱 앱에서만 지원해요. 브라우저 모드에서는 운영체제 화면 캡처 기능을 사용해 주세요.');
+    showError('이 브라우저는 지도 캡처(캔버스 PNG 저장)를 지원하지 않아요. 운영체제 화면 캡처 기능을 사용해 주세요.');
     return {status:'unsupported'};
   }
   if(!isAccumMapSettled()){
@@ -2118,21 +2277,28 @@ async function captureAccumMap(){
       if(typeof showToast==='function') showToast('캡처를 준비하는 동안 지도가 다시 계산되기 시작했어요. 다 그려진 뒤에 다시 눌러 주세요.');
       return {status:'not-ready'};
     }
-    restores=hideUiForMapCapture();
-    restores.push(...scrollMapIntoViewForCapture());
+    const mode=mapCaptureMode();
+    restores=hideUiForMapCapture(); // pending 미리보기를 빼고 Canvas Layer를 다시 그린다
+    if(mode==='desktop') restores.push(...scrollMapIntoViewForCapture()); // capturePage는 창에 보이는 픽셀만 찍는다
     await nextPaint();
     const fileName=buildMapCaptureFileName();
-    const rect=mapCaptureRect();
-    const clipped=mapRectClipped(rect);
-    const res=await window.routeAPI.captureMap(rect,fileName);
+    let res, clipped=false;
+    if(mode==='desktop'){
+      const rect=mapCaptureRect();
+      clipped=mapRectClipped(rect);
+      res=await window.routeAPI.captureMap(rect,fileName);
+    }else{
+      res=await captureAccumMapInBrowser(fileName);
+    }
     if(!res||res.canceled){
       if(typeof showToast==='function') showToast('지도 캡처 저장을 취소했어요.');
-      return {status:'canceled',fileName};
+      return {status:'canceled',mode,fileName};
     }
+    const whereNote=res.savedVia==='download'?' (브라우저 다운로드 폴더)':'';
     const tileNote=idle.tilesLoaded?'':' (일부 배경 지도 타일이 아직 로딩 중이었어요)';
     const clipNote=clipped?' (지도가 창보다 커서 보이는 부분만 저장했어요)':'';
-    if(typeof showToast==='function') showToast(`지도 캡처를 저장했어요: ${res.filePath}${tileNote}${clipNote}`);
-    return {status:'saved',fileName,tilesLoaded:idle.tilesLoaded,clipped,...res};
+    if(typeof showToast==='function') showToast(`지도 캡처를 저장했어요: ${res.filePath}${whereNote}${tileNote}${clipNote}`);
+    return {status:'saved',mode,fileName,tilesLoaded:idle.tilesLoaded,clipped,...res};
   }catch(err){
     console.warn('[경로뷰어] 지도 캡처 실패:',err);
     showError('지도를 캡처하지 못했어요. ('+err.message+')');
@@ -2164,7 +2330,8 @@ function setAccumZone(zone){
 function initAccumMap(){
   if(accumMap) return;
   accumMap=L.map('accum-map',{zoomSnap:0.5,zoomDelta:0.5,preferCanvas:true}).setView([37.498,127.032],11);
-  accumTileLayer=addNoKeyOsmTileLayer(accumMap)||null;
+  // crossOrigin: 브라우저 모드 지도 캡처가 타일을 캔버스에 합성할 수 있게 CORS로 받는다
+  accumTileLayer=addNoKeyOsmTileLayer(accumMap,{crossOrigin:'anonymous'})||null;
   accumDensityLayer=L.layerGroup().addTo(accumMap);
   coverageLayer=L.layerGroup().addTo(accumMap);
   manualCellsLayer=L.layerGroup().addTo(accumMap);

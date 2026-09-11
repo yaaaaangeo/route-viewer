@@ -164,13 +164,122 @@ async function flowTests() {
     h.eval(`coverageCellLayers.get('${target.key}').visible`) === false);
   h.eval('clearPendingManualCellSelection()');
 
-  section('B. 브라우저 모드');
+  section('C. 브라우저 모드 — 캔버스 합성 캡처');
   delete h.api.captureMap;
   h.eval('updateCaptureButton()');
-  check('captureMap API가 없으면(브라우저 모드) 버튼 비활성 + 안내', btn().disabled === true && btn().title.includes('데스크톱'), btn().title);
+  check('IPC(captureMap)도 캔버스도 없는 환경이면 버튼 비활성 + 미지원 안내',
+    h.eval('mapCaptureMode()') === null && btn().disabled === true && /지원하지 않아요/.test(btn().title), btn().title);
   const errBefore = h.stats.errors.length;
   const unsupported = await capture();
   check('… 눌러도 미지원 안내만 한다', unsupported.status === 'unsupported' && h.stats.errors.length === errBefore + 1);
+
+  // 가짜 브라우저 환경: canvas/toBlob, 지도 DOM(배경 타일 <img>, Leaflet Canvas Layer), 다운로드 링크
+  const drawn = [];
+  const anchors = [];
+  let taint = false;
+  let blobInfo = null;
+  const fakeCtx = {
+    scale() {}, fillRect() {}, fillText() {},
+    measureText: t => ({ width: String(t).length * 6 }),
+    drawImage: (el, x, y, w, hh) => drawn.push({ id: el.id, x, y, w, h: hh, alpha: fakeCtx.globalAlpha, filter: fakeCtx.filter }),
+  };
+  const origCreate = h.document.createElement;
+  h.document.createElement = tag => {
+    if (tag === 'canvas') {
+      return {
+        width: 0, height: 0,
+        getContext: () => fakeCtx,
+        toBlob(cb, type) {
+          if (taint) { const e = new Error('tainted'); e.name = 'SecurityError'; throw e; }
+          blobInfo = { width: this.width, height: this.height, type, previewLayers: h.eval('manualCellsLayer.getLayers().length') };
+          cb({ size: 2048, type });
+        },
+      };
+    }
+    if (tag === 'a') { const a = { style: {}, click() { anchors.push({ href: a.href, download: a.download }); } }; return a; }
+    return origCreate(tag);
+  };
+  h.document.body = { appendChild() {}, removeChild() {} };
+  h.ctx.URL = { createObjectURL: () => 'blob:route-viewer/1', revokeObjectURL() {} };
+  h.ctx.devicePixelRatio = 2;
+  h.ctx.getComputedStyle = el => el._style || { visibility: 'visible', display: 'block', opacity: '1', backgroundColor: 'rgb(221, 221, 221)' };
+  const domEl = (id, tagName, left, top, width, height, extra) => ({
+    id, tagName, complete: true, naturalWidth: 256,
+    getBoundingClientRect: () => ({ left, top, width, height }), ...extra,
+  });
+  const mapEl = h.el('accum-map');
+  // 줌 단계별 타일 묶음 — 지금 단계(z-index 19)가 문서에서는 먼저, 이전 단계(17, 확대된 채 남은 타일)가 뒤에 있다
+  const TILE_FILTER = 'grayscale(0.85) brightness(1.06) contrast(0.92)';
+  const tilePane = { _style: { visibility: 'visible', display: 'block', opacity: '1', filter: TILE_FILTER } };
+  const tileContainer = (z, imgs) => ({ style: { zIndex: String(z) }, querySelectorAll: () => imgs, closest: sel => (sel === '.leaflet-tile-pane' ? tilePane : null) });
+  const currentLevel = tileContainer(19, [
+    domEl('tile-a', 'IMG', -56, -100, 256, 256),
+    domEl('tile-b', 'IMG', 200, -100, 256, 256),
+    domEl('tile-fading', 'IMG', 200, 156, 256, 256, { _style: { visibility: 'visible', display: 'block', opacity: '0.3' } }),
+    domEl('tile-loading', 'IMG', 456, -100, 256, 256, { complete: false, naturalWidth: 0 }),
+    domEl('tile-hidden', 'IMG', 456, 156, 256, 256, { _style: { visibility: 'hidden', display: 'block', opacity: '1' } }),
+    domEl('tile-outside', 'IMG', 900, 0, 256, 256),
+  ]);
+  const oldLevel = tileContainer(17, [domEl('old-level-tile', 'IMG', -300, -300, 1024, 1024)]);
+  mapEl.querySelectorAll = sel => (String(sel).includes('tile-container') ? [currentLevel, oldLevel]
+    : String(sel).includes('canvas') ? [domEl('vector-canvas', 'CANVAS', -80, -60, 960, 720)] : []);
+  mapEl.querySelector = sel => (String(sel).includes('attribution') ? { textContent: '© OpenStreetMap contributors' } : null);
+  h.eval('updateCaptureButton()');
+  check('캔버스 PNG를 만들 수 있는 브라우저면 캡처 버튼 활성(브라우저 모드)',
+    h.eval('mapCaptureMode()') === 'browser' && btn().disabled === false, btn().title);
+
+  const capturesBefore = captures.length;
+  const brSaved = await capture();
+  check('브라우저 모드 캡처 → PNG를 다운로드로 저장(파일명 규칙 동일)',
+    brSaved.status === 'saved' && brSaved.mode === 'browser' && brSaved.savedVia === 'download' &&
+    anchors.length === 1 && anchors[0].download === brSaved.fileName && anchors[0].href.startsWith('blob:') &&
+    /^RouteViewer_판교_전체기간_Coverage_\d{8}_\d{6}\.png$/.test(brSaved.fileName) && blobInfo.type === 'image/png', JSON.stringify(brSaved));
+  check('… 데스크톱 IPC(captureMap)는 부르지 않는다', captures.length === capturesBefore);
+  check('이전 줌 단계 타일 → 지금 단계 타일 → Canvas Layer 순서로(z-index 기준), 지도 왼쪽 위 기준 위치·크기로 그린다',
+    drawn.map(d => d.id).join() === 'old-level-tile,tile-a,tile-b,tile-fading,vector-canvas' &&
+    drawn[1].x === -56 && drawn[1].y === -100 && drawn[4].x === -80 && drawn[4].w === 960 && drawn[4].h === 720, JSON.stringify(drawn));
+  check('타일 페이드인 투명도는 쓰지 않는다(흐릿하게 겹치지 않게 — 묶음 투명도 1로 그림)',
+    drawn.find(d => d.id === 'tile-fading').alpha === 1);
+  check('배경 타일에는 화면과 같은 CSS filter(흑백·밝기)를 걸고, Canvas Layer에는 걸지 않는다',
+    drawn.filter(d => d.id !== 'vector-canvas').every(d => d.filter === TILE_FILTER) &&
+    drawn.find(d => d.id === 'vector-canvas').filter === 'none', JSON.stringify(drawn.map(d => [d.id, d.filter])));
+  check('아직 못 받은 타일·숨긴 요소·지도 밖 요소는 그리지 않는다', !drawn.some(d => /loading|hidden|outside/.test(d.id)));
+  check('화면 배율(devicePixelRatio 2)만큼 선명한 크기(800x600 → 1600x1200)', blobInfo.width === 1600 && blobInfo.height === 1200, JSON.stringify(blobInfo));
+
+  h.eval("cellEditMode='visit'");
+  await h.eval(`toggleManualCellAt(${p.lat},${p.lng})`);
+  drawn.length = 0;
+  const brPending = await capture();
+  check('브라우저 모드도 적용 전 선택(pending) 미리보기를 빼고 합성한 뒤 되돌린다',
+    brPending.status === 'saved' && blobInfo.previewLayers === 0 && h.eval('manualCellsLayer.getLayers().length') === 1);
+  h.eval('clearPendingManualCellSelection()');
+
+  const pickerCalls = [];
+  h.ctx.showSaveFilePicker = async opts => {
+    pickerCalls.push(opts);
+    return { name: 'my-map.png', createWritable: async () => ({ write: async b => { pickerCalls.push({ wrote: b.size }); }, close: async () => {} }) };
+  };
+  const viaPicker = await capture();
+  check('파일 저장 창(showSaveFilePicker)을 지원하면 위치·이름을 골라 저장',
+    viaPicker.status === 'saved' && viaPicker.savedVia === 'picker' && viaPicker.filePath === 'my-map.png' &&
+    pickerCalls[0].suggestedName === viaPicker.fileName && pickerCalls[1].wrote === 2048, JSON.stringify(viaPicker));
+  const errNow = h.stats.errors.length;
+  h.ctx.showSaveFilePicker = async () => { const e = new Error('abort'); e.name = 'AbortError'; throw e; };
+  const pickCancel = await capture();
+  check('저장 창에서 취소 → canceled(오류로 표시 안 함)', pickCancel.status === 'canceled' && h.stats.errors.length === errNow);
+  h.ctx.showSaveFilePicker = async () => { const e = new Error('no user activation'); e.name = 'NotAllowedError'; throw e; };
+  const anchorsBefore = anchors.length;
+  const fallback = await capture();
+  check('저장 창을 띄울 수 없으면(사용자 동작 만료 등) 다운로드로 대신 저장',
+    fallback.status === 'saved' && fallback.savedVia === 'download' && anchors.length === anchorsBefore + 1);
+  delete h.ctx.showSaveFilePicker;
+  taint = true;
+  const tainted = await capture();
+  check('타일 CORS가 막혀 캔버스가 오염되면 원인(CORS)을 알려준다',
+    tainted.status === 'error' && /CORS/.test(h.stats.errors[h.stats.errors.length - 1]), h.stats.errors[h.stats.errors.length - 1]);
+  taint = false;
+  check('… 실패 후에도 UI 복원 + 버튼 다시 사용 가능', btn().disabled === false && h.eval('mapCaptureInFlight') === false);
+  h.document.createElement = origCreate;
   h.api.captureMap = captureImpl;
 }
 

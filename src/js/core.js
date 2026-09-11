@@ -37,11 +37,15 @@ const VEHICLE_STORAGE_PLACE={
   lng:127.03873445954,
 };
 
-function addNoKeyOsmTileLayer(targetMap){
+// extraOptions: 누적 지도는 {crossOrigin:'anonymous'}를 넘긴다 — OSM 타일 서버가
+// Access-Control-Allow-Origin:* 를 보내므로, CORS로 받은 타일은 브라우저 모드 지도 캡처
+// (캔버스 합성)에 그려도 캔버스가 오염되지 않는다.
+function addNoKeyOsmTileLayer(targetMap,extraOptions){
   return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
     subdomains:'abc',
     maxZoom:19,
     attribution:'© OpenStreetMap contributors',
+    ...(extraOptions||{}),
   }).addTo(targetMap);
 }
 

@@ -16,7 +16,7 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
 - **Import History** — 파일별 원본/추가/중복/충돌 건수, 대표 차량·거리, 불러온 사람, 충돌 상세.
 - **달력 · 일자 요약** — 운행 시간·구역·차량·주행 거리·기록 수·주행 시간·GPS 공백/점프.
 - **누적 지도** — 전체 또는 선택한 날짜 범위 기록의 밀도 지도 + 구역별 **Coverage Map**,
-  현재 지도 **PNG 캡처**(데스크톱 앱).
+  현재 지도 **PNG 캡처**(데스크톱 앱·브라우저 모드).
 - **통계** — 지역별/차량별 분포.
 - **설정** — 차량/지역 추가·비활성화(삭제 아님), Coverage Depth 등급 기준.
 - **데이터 관리** — 날짜별/전체 삭제(삭제는 여기서만), 서버 동기화 설정.
@@ -48,13 +48,28 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
   ③ 시작일만 걸면 `날짜미상` 기록이 섞였습니다. ④ 브라우저(IndexedDB) 모드는 3.1.2 초기까지 날짜 조건을 무시했습니다
   (커밋 3ce67f5에서 수정).
 
-## 📷 현재 지도 캡처 (데스크톱 앱)
+## 📷 현재 지도 캡처
 
-- 누적 지도 상단 **📷 현재 지도 캡처** → 저장 대화상자에서 위치·이름을 정하면 PNG로 저장됩니다(기본 위치: 사진 폴더).
-- **방식**: 화면이 지도 DOM의 화면 좌표와 기본 파일명을 IPC(`routeAPI.captureMap`)로 넘기면 메인 프로세스가
+- 누적 지도 상단 **📷 현재 지도 캡처**를 누르면 지금 보이는 지도가 PNG로 저장됩니다.
+
+| | 데스크톱 앱 (Electron) | 브라우저 모드 (`node server.js` → `/src/index.html`) |
+|---|---|---|
+| 방식 | 메인 프로세스가 `webContents.capturePage(지도 영역)` | 화면에서 배경 타일 `<img>` + Leaflet Canvas Layer를 캔버스에 합성 → `toBlob` |
+| 저장 | 저장 대화상자(기본 위치: 사진 폴더) | 파일 저장 창(`showSaveFilePicker`, Chrome/Edge)으로 위치·이름 선택 — 지원하지 않거나 띄울 수 없으면 브라우저 다운로드 폴더 |
+| 창보다 큰 지도 | 보이는 부분만(안내) | 지도 전체 |
+
+- **데스크톱 방식**: 화면이 지도 DOM의 화면 좌표와 기본 파일명을 IPC(`routeAPI.captureMap`)로 넘기면 메인 프로세스가
   `webContents.capturePage(지도 영역)` → PNG 변환 → 저장 대화상자 → 파일 쓰기를 합니다. 화면에 실제로 그려진 픽셀을
-  찍으므로 외부 지도 타일의 CORS 제한이나 Leaflet Canvas Layer가 빠지는 문제가 없습니다(`html2canvas` 방식은 쓰지
-  않음). 화면 코드는 파일 경로를 직접 다루지 않고, preload에는 `captureMap` 하나만 추가됐습니다.
+  찍으므로 CORS나 Canvas Layer 누락 문제가 없습니다. 화면 코드는 파일 경로를 직접 다루지 않고, preload에는
+  `captureMap` 하나만 추가됐습니다.
+- **브라우저 방식**: `html2canvas` 같은 DOM 복제 대신 Leaflet이 이미 그려 둔 것만 합친다 —
+  ① 줌 단계별 타일 묶음을 z-index 순서로(이전 줌 단계의 확대된 타일이 위에 겹치지 않게), 화면과 같은 CSS filter
+  (`.leaflet-tile-pane`의 흑백·밝기)를 걸어서 ② 그 위에 Leaflet Canvas Layer(`preferCanvas` — 칸·원·경계선 전부)
+  ③ 지도 저작권 표시를 글자로. 화면 배율(`devicePixelRatio`)만큼 선명하게 만듭니다.
+  - 배경 타일(`tile.openstreetmap.org`)은 `Access-Control-Allow-Origin: *`를 보내므로 누적 지도 타일을
+    `crossOrigin:'anonymous'`로 받아 캔버스가 오염되지 않습니다. 타일 서버를 CORS를 허용하지 않는 곳으로 바꾸면
+    "CORS를 허용하지 않아 이미지를 만들 수 없어요" 오류가 납니다.
+  - `ctx.filter`를 지원하지 않는 브라우저(Safari)에서는 배경 지도가 흑백 필터 없이 원본 색으로 저장됩니다.
 - **포함**: 지금 중심·줌·범위, 선택 구역, 날짜 범위, 밀도 지도 또는 Coverage Map(방문/미방문 칸, 적용 완료된 수동
   방문·미방문·제외 상태), 구역 경계, 배경 지도 타일, 지도 저작권 표시.
 - **제외**(캡처하는 동안만 숨기고 끝나면 `finally`에서 되돌림): 적용 전 선택(pending) 미리보기, 확대/축소 버튼,
@@ -67,7 +82,7 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
   `invalidateSize()`를 하고 줌/이동 애니메이션과 배경 타일 로딩이 끝나기를 최대 8초 기다립니다(그래도 로딩 중이면
   저장 후 안내). 지도가 스크롤 아래에 걸쳐 있으면 잠시 화면 안으로 스크롤했다가 되돌립니다(창보다 큰 지도는 보이는
   부분만 저장하고 안내). 중복 클릭은 무시하고, 저장 취소는 오류로 표시하지 않으며, 저장 실패는 오류 메시지로 알립니다.
-- **브라우저 모드**(`node server.js`)는 지원하지 않습니다 — 버튼이 비활성이고 누르면 안내만 합니다.
+- 캔버스 PNG를 만들 수 없는 아주 오래된 브라우저에서만 버튼이 비활성이고 안내만 합니다.
 - 인터넷이 끊겨 배경 타일을 못 받으면 캡처에도 타일이 비어 있습니다(지도에 보이는 그대로 저장).
 
 ---
@@ -189,7 +204,8 @@ npm start          # 데스크톱 앱 개발 실행 (SQLite)
 npm test           # 단위/통합 테스트 (아래 표의 npm test 항목 전부)
 npm run pack       # release/win-unpacked 만 생성
 npm run dist       # release/ 에 설치 파일 + 포터블 생성
-node server.js     # 브라우저 모드(IndexedDB) + 서버 동기화 서버, http://localhost:8080
+node server.js     # 브라우저 모드(IndexedDB) + 서버 동기화 서버 → http://localhost:8080/src/index.html
+npm run test:browser-capture   # 브라우저 모드 지도 캡처 E2E (Electron 창을 브라우저로 사용, 인터넷 필요)
 ```
 
 ### 테스트
@@ -205,12 +221,13 @@ node server.js     # 브라우저 모드(IndexedDB) + 서버 동기화 서버, h
 | `tests/manual-cells-storage-test.js` | 수동 셀 저장 형식·구버전 호환·백업/복원·20m 기준·날짜 필터 — **SQLite ↔ IndexedDB 동등성** | 30 |
 | `tests/coverage-manual-cells-test.js` | 현재 선택/확정 분리·선택 초기화·선택 적용·저장 실패·미방문·Coverage 캐시/무효화·늦은 비동기 결과 | 82 |
 | `tests/accum-date-filter-test.js` | 날짜 범위별 밀도 지도·통계·Coverage 방문/%/Depth, 날짜 캐시 키·Geometry 재사용·debounce·늦은 결과 차단, SQLite↔IndexedDB 동등성 | 50 |
-| `tests/map-capture-test.js` | 캡처 파일명·영역 계산, 버튼 활성 조건·IPC 요청·취소/실패·중복 클릭·pending 제외·UI 복원·날짜 변경 직후 | 37 |
+| `tests/map-capture-test.js` | 캡처 파일명·영역 계산, 버튼 활성 조건·IPC 요청·취소/실패·중복 클릭·pending 제외·UI 복원·날짜 변경 직후, 브라우저 모드 합성(타일 z-index 순서·페이드 투명도·CSS filter·다운로드/저장 창·CORS 오류) | 51 |
+| `npm run test:browser-capture` → `tests/browser-capture-e2e.js` | 실제 브라우저 모드(`server.js` + IndexedDB, preload 없는 창)에서 캡처 → 다운로드된 PNG 크기·타일·흑백 필터·밀도 원·빨간 칸 픽셀 검사 (인터넷 필요) | 13 |
 | `node tests/server-sync-test.js` | `server.js` 공유 저장 병합(수동 셀 병합 포함) — 포트 8099로 서버를 띄움 | 25 |
-| E2E (`tests/e2e-driver.js`) | 실제 Electron 창을 띄워 화면 조작 — 날짜 키보드 입력, 실제 `capturePage` PNG 저장(Coverage·Density, 픽셀 검사) 포함 | 129 |
+| E2E (`tests/e2e-driver.js`) | 실제 Electron 창을 띄워 화면 조작 — 날짜 키보드 입력, 실제 `capturePage` PNG 저장(Coverage·Density, 픽셀 검사) 포함 | 130 |
 
-`npm test` 합계 378개(10개 파일). 최근 E2E 실행 결과는 129개 중 128개 통과 — 실패 1건은 아래 알려진 이슈의
-"지역별 Coverage 요약 패널"이며, Overpass 경고가 콘솔 에러로 집계돼 종료 코드는 1입니다. `tests/manual-cells-storage-test.js`는 브라우저 IndexedDB 백엔드를
+`npm test` 합계 392개(10개 파일). 최근 실행: 브라우저 모드 캡처 E2E 13/13 통과, 데스크톱 E2E 130개 중 129개 통과 —
+실패 1건은 아래 알려진 이슈의 "지역별 Coverage 요약 패널"이며, Overpass 경고가 콘솔 에러로 집계돼 종료 코드는 1입니다. `tests/manual-cells-storage-test.js`는 브라우저 IndexedDB 백엔드를
 `tests/helpers/fake-indexeddb.js`(테스트 전용 최소 구현)로 Node에서 실행하고,
 `tests/coverage-manual-cells-test.js`는 실제 `accum.js`/`storage.js`를 vm으로 로드해 SQLite로 돌립니다
 (지도·DOM만 가짜, `tests/helpers/accum-harness.js`).
@@ -255,7 +272,8 @@ route-viewer/
 
 - **`release/win-unpacked`의 패키지 앱은 3.1.1**이라 날짜 필터·지도 캡처가 들어 있지 않습니다(그 `app.asar`에는
   날짜 입력칸과 `fromDate` 조건이 없음). 3.1.2 설치 파일은 이번에 빌드하지 않았습니다 — `npm run dist`가 필요합니다.
-- 지도 캡처는 데스크톱 앱에서만 됩니다. 창보다 큰 지도는 보이는 부분만 저장됩니다.
+- 데스크톱 앱의 지도 캡처는 창보다 큰 지도면 보이는 부분만 저장됩니다(브라우저 모드는 지도 전체).
+  브라우저 모드 캡처는 배경 타일 서버의 CORS 허용(현재 OSM은 허용)에 기대고, Safari에서는 타일 흑백 필터가 빠집니다.
 - **지역별 Coverage 요약 패널이 비어 있습니다.** `index.html`에 `#coverage-summary` 자리가 있고 E2E도 이 요약을
   확인하지만, 현재 코드에는 이 영역을 채우는 함수가 없습니다(선택한 한 구역의 상세 패널 `#coverage-detail`만 동작).
   그래서 E2E의 "요약에 강남 Coverage %가 표시된다" 1건은 이번 변경 전 코드에서도 실패합니다.
