@@ -72,6 +72,11 @@ async function runServerSync(silent){
   try{
     await saveSyncConfigFromForm();
     const res=await window.routeAPI.syncRun();
+    // 동기화는 RouteDB를 거치지 않고(메인 프로세스가 직접 병합) 기록·구역 경계·
+    // 수동 셀까지 바꿀 수 있다 — 누적 지도 Coverage 캐시를 무효화하고 구역을 다시 읽는다.
+    RouteDB.notifyChange('sync',[]);
+    await loadZonePolygonsFromDb();
+    await refreshZoneCache();
     await refreshDateIndex();
     updateSyncLastText(res.syncedAt);
 

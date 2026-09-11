@@ -67,6 +67,18 @@ async function js(win, code) {
   return win.webContents.executeJavaScript(code, true);
 }
 
+// Coverage 계산이 끝나 누적 지도가 다 그려질 때까지 기다린다 — 건물 데이터를 인터넷
+// (Overpass)에서 받는 동안은 미러 타임아웃(각 15초) 때문에 수십 초 걸릴 수 있어서,
+// 고정 sleep 대신 실제 완료를 기다린다.
+async function waitCoverageIdle(win, timeoutMs = 90000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (await js(win, `coverageInFlight.size===0&&coverageCacheKey===accumViewKey()`)) return true;
+    await sleep(150);
+  }
+  return false;
+}
+
 // 화면의 handleFiles() 를 실제 File 객체로 호출한다 (드래그앤드롭과 같은 경로)
 async function importViaUI(win, filename) {
   const buf = fs.readFileSync(path.join(XLSX_DIR, filename));
@@ -268,7 +280,8 @@ async function main(win, dbFilePath) {
   })()`);
   await sleep(250);
   await js(win, `toggleCoverageGaps()`);
-  await sleep(1200);
+  await sleep(200);
+  await waitCoverageIdle(win);
   const gapRects = await js(win, `coverageLayer.getLayers().length`);
   check('커버리지 갭이 그려진다', gapRects > 1, `${gapRects}개 도형`);
   check('안내 문구가 갭 모드로 바뀐다',
@@ -284,7 +297,8 @@ async function main(win, dbFilePath) {
   // ── Coverage % · Coverage Depth (요구사항 9~12) ─────
   section('신규 — Coverage % · Coverage Depth');
   await js(win, `setAccumZone('강남'); toggleCoverageGaps()`);
-  await sleep(900);
+  await sleep(200);
+  await waitCoverageIdle(win);
   check('지역별 Coverage 요약이 보인다(요구사항 10)',
     (await js(win, `getComputedStyle(document.getElementById('coverage-summary')).display`)) !== 'none');
   const covSummaryText = await js(win, `document.getElementById('coverage-summary').innerText`);
@@ -297,7 +311,8 @@ async function main(win, dbFilePath) {
     ['전체 Cell', '방문 Cell', '미방문 Cell'].every(k => covDetailText1.includes(k)));
 
   await js(win, `toggleCoverageDepth()`);
-  await sleep(900);
+  await sleep(200);
+  await waitCoverageIdle(win);
   const covDetailText2 = await js(win, `document.getElementById('coverage-detail').innerText`);
   check('Coverage Depth 등급별 분포가 보인다(요구사항 11)',
     ['미수집', '부족', '보통', '충분'].every(k => covDetailText2.includes(k)), covDetailText2.replace(/\s+/g, ' '));
@@ -321,6 +336,46 @@ async function main(win, dbFilePath) {
   check('방문 횟수 합계가 GPS 포인트 수보다 훨씬 작다(연속 방문이 묶인 증거, 요구사항 12)',
     visitSoundness.totalVisits > 0 && visitSoundness.totalVisits < visitSoundness.totalPoints,
     `visits=${visitSoundness.totalVisits} points=${visitSoundness.totalPoints}`);
+
+  // ── Coverage 캐시 · 수동 셀(미방문 / 현재 선택 초기화 / 선택 적용) ──
+  section('신규 — Coverage 캐시 · 미방문 셀 · 현재 선택 초기화');
+  await waitCoverageIdle(win);
+  const degraded = await js(win, `isZoneMapDataDegraded('강남')`);
+  const calcBefore = await js(win, `coverageStats.calculations`);
+  await js(win, `switchTab('stats')`);
+  await sleep(300);
+  await js(win, `switchTab('accum')`);
+  await sleep(400);
+  if (degraded) {
+    console.log('  (건물 데이터를 못 받아 대체값으로 계산 중이라 탭 복귀 재사용 검사는 건너뜀 — 설계상 다시 시도함)');
+  } else {
+    check('탭을 갔다 와도 Coverage를 다시 계산하지 않는다(캐시 재사용)',
+      (await js(win, `coverageStats.calculations`)) === calcBefore, `계산 ${calcBefore} → ${await js(win, `coverageStats.calculations`)}`);
+  }
+  check('"🔴 미방문 셀 선택" 버튼이 있다', await js(win, `!!document.getElementById('cell-unvisit-btn')`));
+  const pickCell = await js(win, `(async()=>{
+    const r=await calculateCoverage('강남');
+    const c=r&&r.cells.find(c=>c.state==='valid'&&c.rawVisits>0)||r&&r.cells.find(c=>c.state==='valid');
+    return c?{lat:(c.la+0.5)*r.grid.latDeg,lng:(c.lo+0.5)*r.grid.lngDeg}:null;
+  })()`);
+  check('Coverage 계산 결과에 유효 도로 칸이 있다', !!pickCell);
+  if (pickCell) {
+    const manualBefore = await js(win, `(async()=>JSON.stringify(await RouteDB.getZoneManualCells('강남')))()`);
+    await js(win, `setCellEditMode('unvisit')`);
+    await js(win, `toggleManualCellAt(${pickCell.lat},${pickCell.lng})`);
+    check('칸을 찍으면 "선택 적용 (1)"', (await js(win, `document.getElementById('manual-apply-btn').textContent`)) === '선택 적용 (1)');
+    await js(win, `clearPendingManualCellSelection()`);
+    check('"현재 구역 선택 초기화"는 이번 선택만 지우고 저장된 수동 셀은 그대로',
+      (await js(win, `pendingManualEdits.size`)) === 0 &&
+      (await js(win, `(async()=>JSON.stringify(await RouteDB.getZoneManualCells('강남')))()`)) === manualBefore);
+    await js(win, `toggleManualCellAt(${pickCell.lat},${pickCell.lng})`);
+    await js(win, `applyManualCellEdits()`);
+    await sleep(300);
+    const afterApply = await js(win, `(async()=>await RouteDB.getZoneManualCells('강남'))()`);
+    check('선택 적용 → 미방문 셀이 SQLite에 저장된다(unvisited 1칸)', afterApply.unvisited.length === 1, JSON.stringify(afterApply));
+    await js(win, `(async()=>{ await RouteDB.saveZoneManualCells('강남',{excluded:[],visited:[],unvisited:[]}); return true; })()`); // 이후 검증에 영향 없게 원복
+    await sleep(200);
+  }
 
   await js(win, `toggleCoverageGaps(); setAccumZone('all')`); // 커버리지/구역 필터 상태 원복
   await sleep(300);

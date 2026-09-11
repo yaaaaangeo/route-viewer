@@ -221,6 +221,7 @@ async function runBackupRestore(parsed,mode,filename){
   );
 
   await loadZonePolygonsFromDb();
+  await refreshZoneCache(); // 백업에 들어있던 지역 설정(색·활성 여부)도 화면에 반영
   await refreshDateIndex();
   const stats=await RouteDB.stats();
 

@@ -3,6 +3,7 @@ const fs = require('fs/promises');
 const path = require('path');
 
 const { RouteDatabase, dedupeHistory } = require('./electron/database.js');
+const CoverageGrid = require('./src/js/coverage-grid.js');
 
 const ROOT = __dirname;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -79,6 +80,8 @@ function validateBackup(payload) {
 // 이름(name) 기준으로 병합하는 설정 목록(vehicles/zones) — 나중 값이 우선이되,
 // 지역(zones)은 기존에 그려둔 경계가 있는데 새로 온 값엔 경계가 없으면
 // 기존 경계를 지킨다(뒤처진 기기가 동기화한다고 남의 경계를 지우면 안 되므로).
+// 수동 셀(manualCells: 제외/방문/미방문)도 같은 원칙 — 새로 온 값이 없으면(구버전
+// 기기) 기존 것을 지키고, 둘 다 있으면 칸 단위로 병합(같은 칸은 새로 온 상태 우선).
 function mergeConfigList(existing, incoming) {
   const map = new Map();
   (existing || []).forEach(item => { if (item && item.name) map.set(item.name, item); });
@@ -87,7 +90,15 @@ function mergeConfigList(existing, incoming) {
     const prev = map.get(item.name);
     const prevHasPolygon = prev && Array.isArray(prev.polygon) && prev.polygon.length >= 3;
     const incomingHasPolygon = Array.isArray(item.polygon) && item.polygon.length >= 3;
-    map.set(item.name, (prevHasPolygon && !incomingHasPolygon) ? { ...item, polygon: prev.polygon } : item);
+    const next = (prevHasPolygon && !incomingHasPolygon) ? { ...item, polygon: prev.polygon } : { ...item };
+    if (prev && prev.manualCells) {
+      next.manualCells = item.manualCells
+        ? CoverageGrid.mergeManualCellsByPoint(prev.manualCells, item.manualCells)
+        : CoverageGrid.normalizeManualCells(prev.manualCells);
+    } else if (item.manualCells) {
+      next.manualCells = CoverageGrid.normalizeManualCells(item.manualCells);
+    }
+    map.set(item.name, next);
   });
   return [...map.values()];
 }

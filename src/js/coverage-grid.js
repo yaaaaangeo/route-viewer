@@ -152,13 +152,71 @@
     return visitCounts;
   }
 
+  // ── 수동 셀 오버라이드 저장 형식 ─────────────────────────────
+  // {excluded:[[lat,lng],...], visited:[...], unvisited:[...]} — SQLite(zones.manual_cells)
+  // /IndexedDB(zones.manualCells)/백업/서버 동기화가 모두 이 형식을 쓴다.
+  // unvisited는 v3.1.3에 추가됐다. 예전 데이터에는 이 필드가 없으므로 읽을 때
+  // 항상 빈 배열로 채운다(DB 마이그레이션 없이 호환).
+  const MANUAL_CELL_LISTS = ['excluded', 'unvisited', 'visited']; // 한 칸이 여러 상태면 앞쪽이 우선
+
+  function isLatLngPair(p) {
+    return Array.isArray(p) && p.length >= 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1]));
+  }
+
+  function normalizeManualCells(data) {
+    const out = {};
+    MANUAL_CELL_LISTS.forEach(name => {
+      const list = data && Array.isArray(data[name]) ? data[name] : [];
+      out[name] = list.filter(isLatLngPair).map(p => [Number(p[0]), Number(p[1])]);
+    });
+    return { excluded: out.excluded, visited: out.visited, unvisited: out.unvisited };
+  }
+
+  function manualCellPointKey(p) {
+    return Number(p[0]).toFixed(7) + ',' + Number(p[1]).toFixed(7);
+  }
+
+  // 백업 복원/서버 동기화용 병합 — 같은 칸 중심점(좌표 7자리)이면 incoming 상태가
+  // 이기고, base에만 있는 칸은 그대로 남는다. 한 점은 결과에서 한 목록에만 들어간다.
+  // (칸 격자 키는 구역 경계에 따라 달라지므로 여기선 저장된 중심점 좌표로만 맞춘다 —
+  //  격자 기준 최종 정리는 화면(accum.js)이 현재 격자로 다시 한다)
+  function mergeManualCellsByPoint(base, incoming) {
+    const states = new Map();
+    const absorb = data => {
+      const n = normalizeManualCells(data);
+      // 우선순위가 낮은 목록부터 넣어서, 같은 입력 안에서 겹치면 높은 쪽이 남게 한다
+      [...MANUAL_CELL_LISTS].reverse().forEach(name => {
+        n[name].forEach(p => states.set(manualCellPointKey(p), { name, p }));
+      });
+    };
+    absorb(base);
+    absorb(incoming);
+    const out = { excluded: [], visited: [], unvisited: [] };
+    states.forEach(({ name, p }) => out[name].push(p));
+    return out;
+  }
+
+  function hasManualCells(data) {
+    const n = normalizeManualCells(data);
+    return MANUAL_CELL_LISTS.some(name => n[name].length > 0);
+  }
+
+  // Coverage 격자 한 칸 크기(m) — 화면(accum.js)·SQLite·IndexedDB의 단일 기준.
+  // 50m였다가 건물/아파트를 더 정확히 빼려고 20m로 줄였다. 사용자 설정값이 아니다.
+  const DEFAULT_CELL_SIZE_M = 20;
+
   return {
     MAX_INTERPOLATION_GAP_SEC,
     MAX_INTERPOLATION_SPEED_KMH,
+    DEFAULT_CELL_SIZE_M,
+    MANUAL_CELL_LISTS,
     haversineM,
     timeDiffSec,
     cellOf,
     traverseCells,
     accumulatePartitionVisits,
+    normalizeManualCells,
+    mergeManualCellsByPoint,
+    hasManualCells,
   };
 }));

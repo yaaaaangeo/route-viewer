@@ -45,7 +45,9 @@ function switchTab(tab){
     updateCalStatus();
   }else if(tab==='accum'){
     document.getElementById('accum-view').style.display='flex';
-    renderAccumView();
+    // 탭을 왔다 갔다 한 것만으로는 Coverage를 다시 계산하지 않는다 —
+    // 바뀐 게 없으면 기존 지도/Layer를 그대로 두고 크기만 다시 잰다(accum.js)
+    enterAccumView();
   }else if(tab==='stats'){
     document.getElementById('stats-view').style.display='flex';
     renderStatsView();

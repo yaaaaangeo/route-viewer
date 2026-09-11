@@ -209,9 +209,13 @@
       });
     }
 
+    // database.js _filterSql 과 같은 조건 — 예전엔 fromDate/toDate 를 빠뜨려서 브라우저 모드에서는
+    // 누적 지도 날짜 필터가 통계/밀도/Coverage 어디에도 적용되지 않았다.
     function matches(v, filter) {
       if (!filter) return true;
       if (filter.date && v.date !== filter.date) return false;
+      if (filter.fromDate && !(v.date >= filter.fromDate)) return false;
+      if (filter.toDate && !(v.date <= filter.toDate)) return false;
       if (filter.zone && filter.zone !== 'all' && v.zone !== filter.zone) return false;
       if (filter.vehicleLike && String(v.vehicle || '').indexOf(filter.vehicleLike) < 0) return false;
       return true;
@@ -304,11 +308,7 @@
         const existing = await existingReq;
         await readDone;
         const polygon = existing && Array.isArray(existing.polygon) ? existing.polygon : [];
-        const manual = existing && existing.manualCells;
-        const hasManualCells = !!(manual && (
-          (Array.isArray(manual.excluded) && manual.excluded.length) ||
-          (Array.isArray(manual.visited) && manual.visited.length)
-        ));
+        const hasManualCells = !!(existing && global.CoverageGrid.hasManualCells(existing.manualCells));
         const looksAutoSeeded = existing && existing.color === '#c084fc'
           && Math.abs((existing.centerLat || 0) - 37.4837) < 0.0001
           && Math.abs((existing.centerLng || 0) - 127.0324) < 0.0001
@@ -631,7 +631,12 @@
         const t = db.transaction(['zones'], 'readonly');
         const rows = await reqp(t.objectStore('zones').getAll());
         return rows.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
-          .map(r => ({ ...r, polygon: Array.isArray(r.polygon) ? r.polygon : [], active: r.active !== false }));
+          .map(r => ({
+            ...r,
+            polygon: Array.isArray(r.polygon) ? r.polygon : [],
+            active: r.active !== false,
+            manualCells: global.CoverageGrid.normalizeManualCells(r.manualCells),
+          }));
       },
 
       async saveZone(z) {
@@ -670,15 +675,13 @@
         return this.listZones();
       },
 
+      // 반환 형식은 SQLite 와 같다: {excluded, visited, unvisited} — 예전 행에 unvisited가
+      // 없어도 빈 배열로 채운다.
       async getZoneManualCells(name) {
         const db = await ready();
         const t = db.transaction(['zones'], 'readonly');
         const row = await reqp(t.objectStore('zones').get(name));
-        const cells = row && row.manualCells;
-        return {
-          excluded: Array.isArray(cells && cells.excluded) ? cells.excluded : [],
-          visited: Array.isArray(cells && cells.visited) ? cells.visited : [],
-        };
+        return global.CoverageGrid.normalizeManualCells(row && row.manualCells);
       },
 
       async saveZoneManualCells(name, data) {
@@ -692,30 +695,30 @@
           const t = db.transaction(['zones'], 'readwrite');
           t.objectStore('zones').put({
             ...existing,
-            manualCells: {
-              excluded: Array.isArray(data && data.excluded) ? data.excluded : [],
-              visited: Array.isArray(data && data.visited) ? data.visited : [],
-            },
+            manualCells: global.CoverageGrid.normalizeManualCells(data),
           });
           await done(t);
         }
         return this.getZoneManualCells(name);
       },
 
+      // coverageCellSizeM 은 고정값(CoverageGrid.DEFAULT_CELL_SIZE_M) — database.js 와 같은 규칙
       async getSettings() {
-        const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: 50 };
-        const saved = await metaGet('app_settings', {});
+        const cellSize = global.CoverageGrid.DEFAULT_CELL_SIZE_M;
+        const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: cellSize };
+        const saved = (await metaGet('app_settings', {})) || {};
         return {
           ...defaults, ...saved,
+          coverageCellSizeM: cellSize,
           coverageDepthTiers: (Array.isArray(saved.coverageDepthTiers) && saved.coverageDepthTiers.length)
             ? saved.coverageDepthTiers : defaults.coverageDepthTiers,
         };
       },
 
       async setSettings(partial) {
-        const merged = { ...(await this.getSettings()), ...(partial || {}) };
+        const { coverageCellSizeM, ...merged } = { ...(await this.getSettings()), ...(partial || {}) };
         await metaSet('app_settings', merged);
-        return merged;
+        return this.getSettings();
       },
 
       // Coverage Depth — 같은 (date,vehicle) 안에서 시간순으로 셀이 바뀔 때만 새 방문으로 센다.
@@ -724,7 +727,7 @@
       // database.js)과 완전히 같은 로직을 쓴다). 이동 판정(그 사이를 이을지)은
       // 시간차·속도 조건을 만족할 때만 하고, 아니면 점 하나만 남긴다.
       async getCellVisitCounts(box, cellSizeM) {
-        const size = cellSizeM || (await this.getSettings()).coverageCellSizeM || 50;
+        const size = cellSizeM || global.CoverageGrid.DEFAULT_CELL_SIZE_M;
         const latDeg = size / 111320;
         const refLat = (box && box.refLat) || 37.5;
         const lngDeg = (box && box.lngDeg) || size / (111320 * Math.cos(refLat * Math.PI / 180));
@@ -739,6 +742,7 @@
         await scan(null, r => {
           if (box && box.minLat != null && (r.lat < box.minLat - marginLatDeg || r.lat > box.maxLat + marginLatDeg)) return;
           if (box && box.minLng != null && (r.lng < box.minLng - marginLngDeg || r.lng > box.maxLng + marginLngDeg)) return;
+          if (box && !matches(r, box)) return; // 날짜 범위/구역/차량 — database.js getCellVisitCounts 와 같은 조건
           const key = (r.date || '') + '|' + (r.vehicle || '');
           if (!groups.has(key)) groups.set(key, []);
           groups.get(key).push({ lat: r.lat, lng: r.lng, timestamp: r.timestamp || '' });
@@ -823,6 +827,12 @@
         }
         if (Array.isArray(payload.zones)) {
           for (const z of payload.zones) if (z && z.name) await this.saveZone(z);
+          // 수동 셀은 칸 단위 병합 — database.js restoreBackupPayload 와 같은 규칙
+          for (const z of payload.zones) {
+            if (!z || !z.name || !z.manualCells || !global.CoverageGrid.hasManualCells(z.manualCells)) continue;
+            const merged = global.CoverageGrid.mergeManualCellsByPoint(await this.getZoneManualCells(z.name), z.manualCells);
+            await this.saveZoneManualCells(z.name, merged);
+          }
         }
         if (payload.settings && typeof payload.settings === 'object') {
           await this.setSettings(payload.settings);
@@ -857,7 +867,27 @@
 
     get kind() { return this.backend ? this.backend.kind : 'none'; },
     get isDesktop() { return !!(global.routeAPI && global.routeAPI.isDesktop); },
+
+    // 데이터가 바뀌는 호출이 성공하면 알려준다 — 누적 지도(accum.js)가 이걸 듣고
+    // Coverage 캐시를 무효화한다. 호출한 쪽(import/삭제/복원/설정 화면)이 일일이
+    // 누적 지도를 챙기지 않아도 되게 하려는 것이다.
+    onChange(fn) {
+      changeListeners.push(fn);
+      return () => { const i = changeListeners.indexOf(fn); if (i >= 0) changeListeners.splice(i, 1); };
+    },
+    // RouteDB 를 거치지 않는 변경(서버 동기화 = routeAPI.syncRun)은 호출부가 직접 알린다
+    notifyChange(method, args) {
+      changeListeners.slice().forEach(fn => {
+        try { fn({ method, args: args || [] }); } catch (err) { console.warn('[경로뷰어] 변경 알림 처리 실패:', err); }
+      });
+    },
   };
+
+  const changeListeners = [];
+  const MUTATING_METHODS = new Set([
+    'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveZone', 'setZoneActive',
+    'saveZoneManualCells', 'setSettings', 'restoreBackupPayload',
+  ]);
 
   // 백엔드 메서드를 RouteDB 로 그대로 흘려보낸다
   [
@@ -871,7 +901,11 @@
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');
-      return this.backend[name](...args);
+      if (!MUTATING_METHODS.has(name)) return this.backend[name](...args);
+      return Promise.resolve(this.backend[name](...args)).then(res => {
+        RouteDB.notifyChange(name, args);
+        return res;
+      });
     };
   });
 

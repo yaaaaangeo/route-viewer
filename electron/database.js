@@ -180,8 +180,10 @@ class RouteDatabase {
     });
 
     // 커버리지 갭에서 "이 칸은 원래 도로가 아니다(제외)" / "이 칸은 방문한
-    // 걸로 친다(수동 방문)"를 사용자가 직접 지정할 수 있게 하는 수동 오버라이드.
-    // {excluded:[[lat,lng],...], visited:[[lat,lng],...]} — 칸의 gy/gx가
+    // 걸로 친다(수동 방문)" / "GPS가 지나갔어도 미방문으로 친다(수동 미방문)"를
+    // 사용자가 직접 지정할 수 있게 하는 수동 오버라이드.
+    // {excluded:[[lat,lng],...], visited:[...], unvisited:[...]} — unvisited는 나중에
+    // 추가돼서 예전 행에는 없다(읽을 때 빈 배열로 채움, 별도 마이그레이션 없음). 칸의 gy/gx가
     // 아니라 위경도 점으로 저장한다. gy/gx는 GAP_CELL_SIZE_M과 구역의
     // refLat(경계 bbox 중심)에 따라 달라지는데, 위경도 점으로 저장해두면
     // 매번 그 시점의 격자 기준으로 다시 계산해서 항상 정확한 칸에 맞는다.
@@ -258,10 +260,7 @@ class RouteDatabase {
       let polygon = [], manualCells = {};
       try { polygon = JSON.parse((row && row.polygon) || '[]'); } catch (_) { polygon = []; }
       try { manualCells = JSON.parse((row && row.manualCells) || '{}'); } catch (_) { manualCells = {}; }
-      const hasManualCells = !!(
-        (Array.isArray(manualCells.excluded) && manualCells.excluded.length) ||
-        (Array.isArray(manualCells.visited) && manualCells.visited.length)
-      );
+      const hasManualCells = CoverageGrid.hasManualCells(manualCells);
       const looksAutoSeeded = row && row.color === '#c084fc'
         && Math.abs((row.centerLat || 0) - 37.4837) < 0.0001
         && Math.abs((row.centerLng || 0) - 127.0324) < 0.0001
@@ -724,15 +723,17 @@ class RouteDatabase {
   listZones() {
     return this.db.all(
       `SELECT id, name, color, center_lat AS centerLat, center_lng AS centerLng,
-              polygon, active, sort_order AS sortOrder, created_at AS createdAt
+              polygon, active, sort_order AS sortOrder, created_at AS createdAt,
+              manual_cells AS manualCellsJson
          FROM zones ORDER BY sort_order, id`
-    ).map(r => {
+    ).map(({ manualCellsJson, ...r }) => {
       let polygon = [];
       try {
         const p = JSON.parse(r.polygon || '[]');
         if (Array.isArray(p)) polygon = p;
       } catch (_) { /* 저장값이 깨졌으면 빈 경계로 취급 */ }
-      return { ...r, polygon, active: !!r.active };
+      // 백업/동기화 payload(zones[])에 수동 셀도 함께 실리도록 같이 돌려준다
+      return { ...r, polygon, active: !!r.active, manualCells: parseManualCells(manualCellsJson) };
     });
   }
 
@@ -794,38 +795,34 @@ class RouteDatabase {
   }
 
   // 커버리지 갭 수동 오버라이드 — "이 칸은 도로가 아니다(excluded)" /
-  // "이 칸은 방문한 걸로 친다(visited)". accum.js가 위경도 점 배열로
-  // 주고받고, 매 렌더링 시점의 격자 기준으로 gy/gx를 다시 계산한다.
+  // "이 칸은 방문한 걸로 친다(visited)" / "미방문으로 친다(unvisited)".
+  // accum.js가 위경도 점 배열로 주고받고, 매 렌더링 시점의 격자 기준으로
+  // gy/gx를 다시 계산한다. 반환 형식은 항상 세 배열을 모두 가진다.
   getZoneManualCells(name) {
     const row = this.db.get('SELECT manual_cells FROM zones WHERE name = ?', [name]);
-    if (!row) return { excluded: [], visited: [] };
-    try {
-      const data = JSON.parse(row.manual_cells || '{}');
-      return {
-        excluded: Array.isArray(data.excluded) ? data.excluded : [],
-        visited: Array.isArray(data.visited) ? data.visited : [],
-      };
-    } catch (_) { return { excluded: [], visited: [] }; }
+    return parseManualCells(row && row.manual_cells);
   }
 
   saveZoneManualCells(name, data) {
-    const excluded = Array.isArray(data && data.excluded) ? data.excluded : [];
-    const visited = Array.isArray(data && data.visited) ? data.visited : [];
-    this.db.run('UPDATE zones SET manual_cells=? WHERE name=?',
-      [JSON.stringify({ excluded, visited }), name]);
+    const cells = CoverageGrid.normalizeManualCells(data);
+    this.db.run('UPDATE zones SET manual_cells=? WHERE name=?', [JSON.stringify(cells), name]);
     return this.getZoneManualCells(name);
   }
 
   // ══════════════════════════════════════════════════════
   //  설정 — Coverage Depth 등급 기준 등 (item 13, 21)
   // ══════════════════════════════════════════════════════
+  // coverageCellSizeM 은 사용자 설정이 아니라 고정값(CoverageGrid.DEFAULT_CELL_SIZE_M)
+  // 이다. 예전 버전이 app_settings 에 50을 같이 저장해둔 경우가 있어서, 읽을 때
+  // 항상 고정값으로 덮고 저장할 때는 빼고 저장한다.
   getSettings() {
-    const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: 50 };
+    const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: CoverageGrid.DEFAULT_CELL_SIZE_M };
     try {
       const saved = JSON.parse(this.getMeta('app_settings', '{}')) || {};
       return {
         ...defaults,
         ...saved,
+        coverageCellSizeM: CoverageGrid.DEFAULT_CELL_SIZE_M,
         coverageDepthTiers: (Array.isArray(saved.coverageDepthTiers) && saved.coverageDepthTiers.length)
           ? saved.coverageDepthTiers : defaults.coverageDepthTiers,
       };
@@ -833,9 +830,9 @@ class RouteDatabase {
   }
 
   setSettings(partial) {
-    const merged = { ...this.getSettings(), ...(partial || {}) };
+    const { coverageCellSizeM, ...merged } = { ...this.getSettings(), ...(partial || {}) };
     this.setMeta('app_settings', JSON.stringify(merged));
-    return merged;
+    return this.getSettings();
   }
 
   listImports(limit = 200) {
@@ -880,7 +877,7 @@ class RouteDatabase {
   //  — 자세한 규칙은 coverage-grid.js 주석 참고.
   // ══════════════════════════════════════════════════════
   getCellVisitCounts(box, cellSizeM) {
-    const size = cellSizeM || (this.getSettings().coverageCellSizeM || 50);
+    const size = cellSizeM || CoverageGrid.DEFAULT_CELL_SIZE_M;
     const latDeg = size / 111320;
     const refLat = (box && box.refLat) || 37.5;
     const lngDeg = box && box.lngDeg ? box.lngDeg : size / (111320 * Math.cos(refLat * Math.PI / 180));
@@ -1028,6 +1025,14 @@ class RouteDatabase {
     }
     if (Array.isArray(payload.zones)) {
       payload.zones.forEach(z => { if (z && z.name) this.saveZone(z); });
+      // 수동 셀(제외/방문/미방문)은 mode 와 무관하게 칸 단위로 병합한다 — 백업에 있는
+      // 칸은 백업 상태로, 백업에 없는 지금 칸은 그대로 둔다. manualCells 필드가 없는
+      // 옛 백업이면 아무것도 바꾸지 않는다.
+      payload.zones.forEach(z => {
+        if (!z || !z.name || !z.manualCells || !CoverageGrid.hasManualCells(z.manualCells)) return;
+        const merged = CoverageGrid.mergeManualCellsByPoint(this.getZoneManualCells(z.name), z.manualCells);
+        this.saveZoneManualCells(z.name, merged);
+      });
     }
     if (payload.settings && typeof payload.settings === 'object') {
       this.setSettings(payload.settings);
@@ -1040,6 +1045,10 @@ class RouteDatabase {
     }
     return { ...result, mode };
   }
+}
+
+function parseManualCells(json) {
+  try { return CoverageGrid.normalizeManualCells(JSON.parse(json || '{}')); } catch (_) { return CoverageGrid.normalizeManualCells(null); }
 }
 
 // ── 하루치 요약 + 품질 검사 (기존 analyzeDayQuality 와 같은 규칙) ──

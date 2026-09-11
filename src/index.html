@@ -132,8 +132,9 @@
       <span style="flex:1 1 100%;height:0;"></span>
       <button class="btn ghost" type="button" id="cell-exclude-btn" onclick="setCellEditMode('exclude')" title="지도에서 칸을 클릭하면 그 칸을 도로 아님(제외)으로 표시해요. 다시 클릭하면 취소">🗑️ 제외 셀 선택</button>
       <button class="btn ghost" type="button" id="cell-visit-btn" onclick="setCellEditMode('visit')" title="지도에서 칸을 클릭하면 그 칸을 방문한 걸로 표시해요. 다시 클릭하면 취소">✅ 방문 셀 선택</button>
-      <button class="btn ghost" type="button" id="manual-apply-btn" onclick="applyManualCellEdits()" title="찍어둔 제외/방문 셀을 저장하고 커버리지를 다시 계산">선택 적용</button>
-      <button class="btn ghost" type="button" onclick="clearManualCells()" title="현재 구역에서 직접 선택한 제외/방문 칸을 전부 초기화">현재 구역 선택 초기화</button>
+      <button class="btn ghost" type="button" id="cell-unvisit-btn" onclick="setCellEditMode('unvisit')" title="지도에서 칸을 클릭하면 그 칸을 미방문으로 표시해요. 실제 GPS 기록은 지우지 않고 Coverage에서만 0회로 셉니다. 다시 클릭하면 취소">🔴 미방문 셀 선택</button>
+      <button class="btn ghost" type="button" id="manual-apply-btn" onclick="applyManualCellEdits()" title="이번에 찍은 셀만 저장하고 이 구역 커버리지를 다시 계산" disabled>선택 적용</button>
+      <button class="btn ghost" type="button" id="manual-clear-selection-btn" onclick="clearPendingManualCellSelection()" title="아직 적용하지 않은 이번 선택만 지워요. 이미 적용한 제외/방문/미방문 칸은 그대로 남고, 저장도 재계산도 하지 않아요" disabled>현재 구역 선택 초기화</button>
     </div>
     <!-- 지역별 Coverage 요약(요구사항 10) — 커버리지 갭 모드에서 전체 지역을 한눈에 -->
     <div id="coverage-summary" class="coverage-summary"></div>

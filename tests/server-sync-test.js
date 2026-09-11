@@ -13,6 +13,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+const { RouteDatabase } = require('../electron/database.js');
+
 const ROOT = path.join(__dirname, '..');
 const PORT = 8099;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -157,6 +159,35 @@ async function main() {
     const seongnam = g5.zones.find(z => z.name === '성남');
     check('경계 없는(구버전) 동기화가 기존에 그려둔 경계를 지우지 않는다',
       seongnam && seongnam.polygon && seongnam.polygon.length === 3, JSON.stringify(seongnam));
+
+    // 5c) 수동 셀(manualCells: 제외/방문/미방문)도 동기화에서 보존·병합되는지
+    const put = p => fetch(BASE + '/api/route-data', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) });
+    const getJson = async () => (await fetch(BASE + '/api/route-data')).json();
+    const cellE = [37.40, 127.10], cellV = [37.41, 127.11], cellU = [37.42, 127.12];
+    await put(backupPayload({}, { zones: [{ name: '판교', color: '#ffd93d', active: true, polygon: [], manualCells: { excluded: [cellE], visited: [cellV], unvisited: [cellU] } }] }));
+    let pangyo = (await getJson()).zones.find(z => z.name === '판교');
+    check('수동 셀(unvisited 포함)이 서버 병합 결과에 저장된다',
+      pangyo && JSON.stringify(pangyo.manualCells) === JSON.stringify({ excluded: [cellE], visited: [cellV], unvisited: [cellU] }),
+      JSON.stringify(pangyo && pangyo.manualCells));
+    await put(backupPayload({}, { zones: [{ name: '판교', color: '#ffd93d', active: true, polygon: [] }] })); // 구버전 기기
+    pangyo = (await getJson()).zones.find(z => z.name === '판교');
+    check('manualCells가 없는 구버전 기기의 동기화가 기존 수동 셀을 지우지 않는다',
+      pangyo && pangyo.manualCells && pangyo.manualCells.unvisited.length === 1 && pangyo.manualCells.excluded.length === 1);
+    await put(backupPayload({}, { zones: [{ name: '판교', color: '#ffd93d', active: true, polygon: [], manualCells: { excluded: [], visited: [], unvisited: [cellV] } }] }));
+    const synced = await getJson();
+    pangyo = synced.zones.find(z => z.name === '판교');
+    const asKeys = list => list.map(String).sort().join(' ');
+    check('새로 온 수동 셀은 칸 단위 병합 — 같은 칸(V)은 새 상태(미방문)로, 나머지(E, U)는 유지',
+      asKeys(pangyo.manualCells.excluded) === asKeys([cellE]) && pangyo.manualCells.visited.length === 0 &&
+      asKeys(pangyo.manualCells.unvisited) === asKeys([cellU, cellV]), JSON.stringify(pangyo.manualCells));
+    // 서버 → 다른 기기 SQLite (electron/main.js sync:run 이 쓰는 restoreBackupPayload 경로 그대로)
+    const otherDevice = new RouteDatabase(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rv-sync-')), 'route-viewer.db'));
+    otherDevice.restoreBackupPayload(synced, 'merge');
+    const pulled = otherDevice.getZoneManualCells('판교');
+    check('서버에서 받아온 수동 셀(미방문 포함)이 다른 기기 SQLite에 그대로 들어간다',
+      asKeys(pulled.excluded) === asKeys([cellE]) && asKeys(pulled.unvisited) === asKeys([cellU, cellV]) && pulled.visited.length === 0,
+      JSON.stringify(pulled));
+    otherDevice.close();
 
     // 6) 저장 암호 없이 진행했으니 401은 별도 서버 인스턴스로 확인 (생략 — 기존 로직 그대로 재사용)
 
