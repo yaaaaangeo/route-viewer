@@ -244,10 +244,12 @@ class RouteDatabase {
     }
 
     // 예전 빌드에서 서초를 별도 기본 구역으로 자동 추가했었다. 실제 운영
-    // 구역은 "강남" 경계 안에 서초 쪽 도로까지 함께 포함하는 형태라,
-    // 자동 생성된 빈 서초만 한 번 비활성화한다. 사용자가 직접 경계를 그려
-    // 쓰던 서초 구역은 그대로 둔다.
-    if (!this.getMeta('seocho_default_merged_into_gangnam')) {
+    // 구역은 "강남" 경계 안에 서초 쪽 도로까지 함께 포함하는 형태라 필요
+    // 없다. 처음엔 비활성화만 했었는데(seocho_default_merged_into_gangnam),
+    // 그래도 "지역 관리"에 죽은 항목으로 계속 보여서 아예 지운다. 사용자가
+    // 직접 경계를 그려 쓰던 서초 구역(색/좌표가 다르거나 경계·수동 셀이
+    // 있는 경우)은 건드리지 않는다.
+    if (!this.getMeta('seocho_default_removed')) {
       const row = this.db.get(
         `SELECT color, center_lat AS centerLat, center_lng AS centerLng, polygon, manual_cells AS manualCells
            FROM zones WHERE name = ?`,
@@ -265,9 +267,9 @@ class RouteDatabase {
         && Math.abs((row.centerLng || 0) - 127.0324) < 0.0001
         && Array.isArray(polygon) && polygon.length === 0 && !hasManualCells;
       if (looksAutoSeeded) {
-        this.db.run('UPDATE zones SET active=0 WHERE name=?', ['서초']);
+        this.db.run('DELETE FROM zones WHERE name=?', ['서초']);
       }
-      this.setMeta('seocho_default_merged_into_gangnam', '1');
+      this.setMeta('seocho_default_removed', '1');
     }
   }
 

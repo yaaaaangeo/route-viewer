@@ -392,13 +392,27 @@ function main() {
   const oldSeochoPath = freshDbPath();
   const dbOldSeocho = new RouteDatabase(oldSeochoPath);
   dbOldSeocho.saveZone({ name: '서초', color: '#c084fc', centerLat: 37.4837, centerLng: 127.0324, active: true });
-  dbOldSeocho.setMeta('seocho_default_merged_into_gangnam', '');
+  dbOldSeocho.setMeta('seocho_default_removed', '');
   dbOldSeocho.close();
   const dbMigratedSeocho = new RouteDatabase(oldSeochoPath);
   const autoSeocho = dbMigratedSeocho.listZones().find(z => z.name === '서초');
-  check('이전 빌드가 만든 빈 서초 기본 구역은 자동 비활성화됨',
-    autoSeocho && autoSeocho.active === false);
+  check('이전 빌드가 만든 빈 서초 기본 구역은 자동으로 완전히 삭제됨(지역 관리에서 안 보임)',
+    autoSeocho === undefined);
   dbMigratedSeocho.close();
+
+  // 예전에 이미 "비활성화"까지만 하던 구버전을 거쳐온 DB(마이그레이션 플래그는
+  // 남아있지만 서초는 여전히 active:false로 남아있는 경우)도 새 플래그로 재실행돼
+  // 완전히 삭제되는지 확인한다.
+  const staleDeactivatedPath = freshDbPath();
+  const dbStaleDeactivated = new RouteDatabase(staleDeactivatedPath);
+  dbStaleDeactivated.saveZone({ name: '서초', color: '#c084fc', centerLat: 37.4837, centerLng: 127.0324, active: false });
+  dbStaleDeactivated.setMeta('seocho_default_merged_into_gangnam', '1');
+  dbStaleDeactivated.setMeta('seocho_default_removed', '');
+  dbStaleDeactivated.close();
+  const dbReMigrated = new RouteDatabase(staleDeactivatedPath);
+  check('구버전에서 이미 비활성화만 됐던 서초도 다음 실행에서 완전히 삭제됨',
+    dbReMigrated.listZones().find(z => z.name === '서초') === undefined);
+  dbReMigrated.close();
 
   const customSeochoPath = freshDbPath();
   const dbCustomSeocho = new RouteDatabase(customSeochoPath);
@@ -406,11 +420,11 @@ function main() {
     name: '서초', color: '#c084fc', centerLat: 37.4837, centerLng: 127.0324, active: true,
     polygon: [[37.48, 127.01], [37.49, 127.01], [37.49, 127.03], [37.48, 127.03]],
   });
-  dbCustomSeocho.setMeta('seocho_default_merged_into_gangnam', '');
+  dbCustomSeocho.setMeta('seocho_default_removed', '');
   dbCustomSeocho.close();
   const dbCustomMigratedSeocho = new RouteDatabase(customSeochoPath);
   const customSeocho = dbCustomMigratedSeocho.listZones().find(z => z.name === '서초');
-  check('사용자가 직접 경계를 그린 서초 구역은 비활성화하지 않음',
+  check('사용자가 직접 경계를 그린 서초 구역은 지우지 않음',
     customSeocho && customSeocho.active === true && customSeocho.polygon.length === 4);
   dbCustomMigratedSeocho.close();
 
