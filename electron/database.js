@@ -27,6 +27,11 @@ const CoverageGrid = require('../src/js/coverage-grid.js');
 
 const SCHEMA_VERSION = 2;
 
+// 날짜 범위(fromDate/toDate) 조건은 'YYYY-MM-DD' 형식 날짜에만 건다 — '날짜미상'은
+// 문자열 비교로 모든 날짜보다 커서, 예전엔 "시작일만" 필터에 끼어들었다.
+// (src/js/storage.js 의 IndexedDB matches() 와 같은 규칙)
+const DATE_ONLY_SQL = "date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'";
+
 // 30초 주기로 찍혀야 할 기록에서 이상을 찾는 기준 (기존 route-viewer와 동일)
 const GAP_THRESHOLD_SEC = 90;
 const TELEPORT_SPEED_KMH = 150;
@@ -507,6 +512,7 @@ class RouteDatabase {
     const params = [];
     if (filter.zone && filter.zone !== 'all') { where.push('zone = ?'); params.push(filter.zone); }
     if (filter.date) { where.push('date = ?'); params.push(filter.date); }
+    if (filter.fromDate || filter.toDate) where.push(DATE_ONLY_SQL);
     if (filter.fromDate) { where.push('date >= ?'); params.push(filter.fromDate); }
     if (filter.toDate) { where.push('date <= ?'); params.push(filter.toDate); }
     if (filter.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + filter.vehicleLike + '%'); }
@@ -897,6 +903,7 @@ class RouteDatabase {
     if (box && box.minLng != null) { where.push('longitude BETWEEN ? AND ?'); params.push(box.minLng - marginLngDeg, box.maxLng + marginLngDeg); }
     if (box && box.zone && box.zone !== 'all') { where.push('zone = ?'); params.push(box.zone); }
     if (box && box.date) { where.push('date = ?'); params.push(box.date); }
+    if (box && (box.fromDate || box.toDate)) where.push(DATE_ONLY_SQL);
     if (box && box.fromDate) { where.push('date >= ?'); params.push(box.fromDate); }
     if (box && box.toDate) { where.push('date <= ?'); params.push(box.toDate); }
     if (box && box.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + box.vehicleLike + '%'); }

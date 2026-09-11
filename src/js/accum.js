@@ -45,6 +45,7 @@ function styleZoneButtons(containerId,zone){
 const HOVER_MAX_DIST_M=90; // 커서가 셀 중심에서 이만큼(m) 이내일 때만 그 점의 정보를 보여줌
 
 let accumMap=null, accumDensityLayer=null, coverageLayer=null, manualCellsLayer=null, vehicleStorageLayer=null;
+let accumTileLayer=null; // 배경 지도 타일 — 캡처 전에 타일 로딩이 끝났는지(isLoading) 확인용
 let showCoverageGaps=false;
 // 커버리지 격자 한 칸 크기(m) — 화면·SQLite·IndexedDB 공통 단일 기준(coverage-grid.js의
 // DEFAULT_CELL_SIZE_M = 20, 건물을 더 정확히 빼려고 50m에서 줄였다). 사용자 설정값이 아니다.
@@ -675,6 +676,7 @@ function clearZoneBoundary(){
 }
 
 function updateBoundaryUI(){
+  updateCaptureButton();
   const editBtn=document.getElementById('boundary-edit-toggle-btn');
   if(editBtn){
     editBtn.style.display=showCoverageGaps?'inline-flex':'none';
@@ -1131,6 +1133,7 @@ const PENDING_PREVIEW_STYLE={
   none:{color:'#94a3b8',weight:2,dashArray:'2 4',fillColor:'#94a3b8',fillOpacity:.15},
 };
 let pendingPreviewHiddenKeys=new Set();
+let mapCaptureHidingPending=false; // 지도 캡처 중에는 적용 전 선택(pending) 미리보기를 빼고 그린다
 
 function cellBounds(gy,gx,latDeg,lngDeg){
   return [[gy*latDeg,gx*lngDeg],[(gy+1)*latDeg,(gx+1)*lngDeg]];
@@ -1158,6 +1161,7 @@ function renderPendingManualPreview(){
   manualCellsLayer.clearLayers();
   if(!showCoverageGaps) return;
   if(showExclusionDebug) coverageZonesInView().forEach(paintCommittedManualOverlay);
+  if(mapCaptureHidingPending) return; // 캡처에는 적용 완료된 상태만 — pending 칸 밑의 원래 칸도 위에서 되살렸다
   if(!pendingManualEditCount()) return;
   const grid=zoneGrid(accumZoneFilter);
   if(!grid) return;
@@ -1294,18 +1298,18 @@ const PARKING_BUFFER_M=3;
 //   state: valid | manual_exclude | apartment | parking | building
 //   visits: valid 칸의 최종 방문 횟수(수동 미방문/방문 반영, effectiveCellVisits)
 // ══════════════════════════════════════════════════════════
-async function computeZoneCoverageCells(zoneName){
+// ── 날짜와 무관한 정적 Geometry ─────────────────────────────────────
+// 구역 polygon 안의 주행 도로 칸(gap healing 포함)과 그 칸의 아파트/주차장/건물 제외
+// 사유. 날짜·GPS 기록·수동 셀과 무관해서 날짜를 바꿔도 그대로 재사용한다
+// (getZoneCoverageGeometry 캐시). 가장 비싼 계산이 여기에 몰려 있다.
+async function buildZoneCoverageGeometry(zoneName){
   const grid=zoneGrid(zoneName);
   if(!grid) return null; // 경계 미설정
-  const {poly,minLat,maxLat,minLng,maxLng,refLat,latDeg,lngDeg,cellSizeM}=grid;
-  const [visitRows,buildings,roadLines,manualCells]=await Promise.all([
-    RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg,...accumDateFilter()},cellSizeM),
+  const {poly,minLat,maxLat,minLng,maxLng,refLat,latDeg,lngDeg}=grid;
+  const [buildings,roadLines]=await Promise.all([
     getZoneBuildingPolygons(zoneName),
     getZoneRoadPolylines(zoneName),
-    loadCommittedManualCells(zoneName),
   ]);
-  const visitMap=new Map(visitRows.map(r=>[r.gy+'_'+r.gx,r.visits]));
-  const manualStates=manualStateMap(manualCells,latDeg,lngDeg);
   const complex=buildApartmentComplexPolygons(buildings.apartmentPolygons,buildings.explicitComplexPolygons,refLat);
   const allComplexPolygons=complex.explicit.concat(complex.hullEstimated);
   const buildingExcluded=buildExcludedCellSet(buildings.buildingPolygons,latDeg,lngDeg,refLat,BUILDING_BUFFER_M);
@@ -1322,6 +1326,7 @@ async function computeZoneCoverageCells(zoneName){
   // 다시 채우거나(gap healing) 넓히지(buffer) 않는다. exclusion은 오직 뺄셈만 한다.
   const roadCells=buildRoadCellSet(bridges.length?roadLines.concat(bridges):roadLines,latDeg,lngDeg,refLat);
 
+  // 구역 경계 안의 도로 칸 + 정적 제외 사유(mask: apartment | parking | building | null)
   const cells=[];
   const latStart=Math.floor(minLat/latDeg), latEnd=Math.ceil(maxLat/latDeg);
   const lngStart=Math.floor(minLng/lngDeg), lngEnd=Math.ceil(maxLng/lngDeg);
@@ -1330,35 +1335,92 @@ async function computeZoneCoverageCells(zoneName){
       const key=la+'_'+lo;
       if(!roadCells.has(key)) continue;
       if(!pointInPolygon((la+0.5)*latDeg,(lo+0.5)*lngDeg,poly)) continue;
-      const manualState=manualStates.get(key)||null;
-      // 사용자가 직접 뺀 칸이 최우선, 그다음 아파트/주차장/건물 forbidden mask
-      const state=manualState==='exclude'?'manual_exclude'
-        :apartmentExcluded.has(key)?'apartment'
+      const mask=apartmentExcluded.has(key)?'apartment'
         :parkingExcluded.has(key)?'parking'
         :buildingExcluded.has(key)?'building'
-        :'valid';
-      const rawVisits=visitMap.get(key)||0;
-      cells.push({key,la,lo,state,manualState,rawVisits,visits:state==='valid'?effectiveCellVisits(rawVisits,manualState):0});
+        :null;
+      cells.push({key,la,lo,mask});
     }
   }
   return {
     zone:zoneName,
     grid,
     cells,
-    // 지도 데이터(건물/도로)를 못 받아서 예전 캐시·빈 목록으로 대신 계산했거나 수동 셀을
-    // 못 읽었으면 임시 결과다 — 다음에 누적 지도에 들어올 때 버리고 다시 계산한다.
-    cacheable:!isZoneMapDataDegraded(zoneName)&&committedManualCellsByZone.has(zoneName),
+    // 건물/도로 데이터를 못 받아 예전 캐시·빈 목록으로 대신 만든 임시 Geometry인지
+    degraded:isZoneMapDataDegraded(zoneName),
     debug:{roadLines,buildings,complex,allComplexPolygons,roadCells,apartmentExcluded,parkingExcluded},
   };
 }
 
-// 디버그 보기에서만 필요한 "bridge 없이도 도로였을 칸" — 결과마다 한 번만 계산해 둔다.
-function coverageDebugRawRoadCells(result){
-  if(!result.rawRoadCells){
-    const {latDeg,lngDeg,refLat}=result.grid;
-    result.rawRoadCells=buildRoadCellSet(result.debug.roadLines,latDeg,lngDeg,refLat);
+// 정적 Geometry 캐시 — 키(coverageGeometryKey): 구역·경계 polygon 해시·Cell 크기·경계/지도
+// 데이터 revision. 날짜·GPS 기록·수동 셀이 바뀌어도 그대로 쓴다.
+async function getZoneCoverageGeometry(zoneName){
+  const key=coverageGeometryKey(zoneName);
+  const hit=coverageGeometryCache.get(key);
+  if(hit){
+    coverageStats.geometryHits++;
+    coverageGeometryCache.delete(key); coverageGeometryCache.set(key,hit); // LRU
+    return hit.geometry;
   }
-  return result.rawRoadCells;
+  if(coverageGeometryInFlight.has(key)) return coverageGeometryInFlight.get(key);
+  const promise=(async()=>{
+    coverageStats.geometryBuilds++;
+    const geometry=await buildZoneCoverageGeometry(zoneName);
+    if(geometry&&coverageGeometryKey(zoneName)===key){
+      coverageGeometryCache.set(key,{zone:zoneName,geometry});
+      while(coverageGeometryCache.size>COVERAGE_GEOMETRY_CACHE_MAX) coverageGeometryCache.delete(coverageGeometryCache.keys().next().value);
+    }
+    return geometry;
+  })();
+  coverageGeometryInFlight.set(key,promise);
+  try{ return await promise; }
+  finally{ if(coverageGeometryInFlight.get(key)===promise) coverageGeometryInFlight.delete(key); }
+}
+
+// ── 날짜에 따라 달라지는 동적 부분 ─────────────────────────────────
+// 정적 Geometry(캐시) 위에 선택 기간의 방문 집계(getCellVisitCounts — fromDate/toDate
+// 조건 포함)와 수동 셀 상태를 얹어 칸마다 최종 판정·방문 횟수를 낸다.
+async function computeZoneCoverageCells(zoneName){
+  const grid=zoneGrid(zoneName);
+  if(!grid) return null; // 경계 미설정
+  const {minLat,maxLat,minLng,maxLng,refLat,latDeg,lngDeg,cellSizeM}=grid;
+  const dateFilter=accumDateFilter();
+  const [geometry,visitRows,manualCells]=await Promise.all([
+    getZoneCoverageGeometry(zoneName),
+    RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg,...dateFilter},cellSizeM),
+    loadCommittedManualCells(zoneName),
+  ]);
+  if(!geometry) return null;
+  const visitMap=new Map(visitRows.map(r=>[r.gy+'_'+r.gx,r.visits]));
+  const manualStates=manualStateMap(manualCells,latDeg,lngDeg);
+  const cells=geometry.cells.map(({key,la,lo,mask})=>{
+    const manualState=manualStates.get(key)||null;
+    // 사용자가 직접 뺀 칸이 최우선, 그다음 아파트/주차장/건물 forbidden mask
+    const state=manualState==='exclude'?'manual_exclude':(mask||'valid');
+    const rawVisits=visitMap.get(key)||0;
+    return {key,la,lo,state,manualState,rawVisits,visits:state==='valid'?effectiveCellVisits(rawVisits,manualState):0};
+  });
+  return {
+    zone:zoneName,
+    grid:geometry.grid,
+    cells,
+    dateFrom:dateFilter.fromDate||'',
+    dateTo:dateFilter.toDate||'',
+    // 지도 데이터(건물/도로)를 못 받아 대체값으로 만든 Geometry였거나 수동 셀을 못 읽었으면
+    // 임시 결과다 — 다음에 누적 지도에 들어올 때 버리고 다시 계산한다.
+    cacheable:!geometry.degraded&&committedManualCellsByZone.has(zoneName),
+    debug:geometry.debug,
+  };
+}
+
+// 디버그 보기에서만 필요한 "bridge 없이도 도로였을 칸" — 정적 Geometry마다 한 번만 계산해 둔다.
+function coverageDebugRawRoadCells(result){
+  const debug=result.debug;
+  if(!debug.rawRoadCells){
+    const {latDeg,lngDeg,refLat}=result.grid;
+    debug.rawRoadCells=buildRoadCellSet(debug.roadLines,latDeg,lngDeg,refLat);
+  }
+  return debug.rawRoadCells;
 }
 
 function paintCoverageDebugOverlays(result){
@@ -1565,10 +1627,16 @@ let coverageCacheKey=null;      // 지금 지도에 그려진 화면의 키(accu
 const coverageCache=new Map();  // coverageCalcKey → {zone, result}  (LRU)
 const coverageInFlight=new Map(); // coverageCalcKey → 진행 중 계산 Promise (같은 계산을 두 번 안 돌림)
 const COVERAGE_CACHE_MAX=8;
+// 정적 Geometry(도로 칸·건물/아파트/주차장 제외·gap healing)는 날짜와 무관해서 따로 캐시한다 —
+// 날짜를 바꾸면 위의 동적 결과만 새로 계산하고 Geometry는 재사용한다.
+const coverageGeometryCache=new Map();     // coverageGeometryKey → {zone, geometry}  (LRU)
+const coverageGeometryInFlight=new Map();
+const COVERAGE_GEOMETRY_CACHE_MAX=6;
+const coverageGeometryRevisions={};        // 구역 → 경계/지도 데이터 revision
 let coverageDataRevision=0;
 let coverageSettingsRevision=0;
 const coverageZoneRevisions={};
-const coverageStats={calculations:0,cacheHits:0,renders:0,reuses:0};
+const coverageStats={calculations:0,cacheHits:0,renders:0,reuses:0,geometryBuilds:0,geometryHits:0};
 let lastCoverageInvalidation=null;
 
 function coverageCellSizeM(){ return GAP_CELL_SIZE_M; }
@@ -1588,17 +1656,29 @@ function depthTierSignature(){
   return JSON.stringify((depthTiers||[]).map(t=>[t.threshold,t.label,t.color]));
 }
 
+// 동적(날짜별) Coverage 결과 키 — 정규화된 날짜 범위가 들어 있어서 "전체 기간"과
+// "2026-09-01 ~ 2026-09-05"는 서로 다른 캐시다.
 function coverageCalcKey(zoneName){
-  return JSON.stringify([
-    zoneName,
-    polygonRevision(ZONE_POLYGONS[zoneName]),
-    accumDateFrom,
-    accumDateTo,
-    coverageCellSizeM(),
-    coverageDataRevision,
-    coverageZoneRevisions[zoneName]||0,
+  return JSON.stringify({
+    zone:zoneName,
+    dateFrom:normalizeAccumDate(accumDateFrom),
+    dateTo:normalizeAccumDate(accumDateTo),
+    polygonRevision:polygonRevision(ZONE_POLYGONS[zoneName]),
+    dataRevision:coverageDataRevision,
+    manualOverrideRevision:coverageZoneRevisions[zoneName]||0,
+    cellSizeM:coverageCellSizeM(),
     coverageSettingsRevision,
-  ]);
+  });
+}
+
+// 정적 Geometry 키 — 날짜·GPS 기록·수동 셀과 무관하다
+function coverageGeometryKey(zoneName){
+  return JSON.stringify({
+    zone:zoneName,
+    polygonRevision:polygonRevision(ZONE_POLYGONS[zoneName]),
+    geometryRevision:coverageGeometryRevisions[zoneName]||0,
+    cellSizeM:coverageCellSizeM(),
+  });
 }
 
 function coverageZonesInView(){
@@ -1623,6 +1703,14 @@ function invalidateCoverage(reason,zone){
   for(const [key,entry] of coverageCache){
     if(!zone||entry.zone===zone) coverageCache.delete(key);
   }
+  // 경계 모양·지도 판정 데이터가 바뀐 경우에만 정적 Geometry도 버린다 — import/삭제/복원/
+  // 동기화/수동 셀/날짜 변경은 방문 집계만 바뀌므로 Geometry는 그대로 재사용한다.
+  if(zone&&(reason==='boundary'||reason==='map-data')){
+    coverageGeometryRevisions[zone]=(coverageGeometryRevisions[zone]||0)+1;
+    for(const [key,entry] of coverageGeometryCache){
+      if(entry.zone===zone) coverageGeometryCache.delete(key);
+    }
+  }
   coverageDirty=true;
 }
 
@@ -1630,6 +1718,9 @@ function invalidateCoverage(reason,zone){
 function dropProvisionalCoverage(){
   for(const [key,entry] of coverageCache){
     if(entry.result&&!entry.result.cacheable) coverageCache.delete(key);
+  }
+  for(const [key,entry] of coverageGeometryCache){
+    if(entry.geometry&&entry.geometry.degraded) coverageGeometryCache.delete(key);
   }
 }
 
@@ -1772,49 +1863,285 @@ function accumDateFilter(){
   return filter;
 }
 
+// ══════════════════════════════════════════════════════════
+//  누적 지도 날짜 필터
+//   날짜칸 change / "날짜 적용" 버튼 / Enter → applyAccumDateInputs → setAccumDateRange
+//   → accumDateFrom/To → accumFilter()(밀도 지도·통계·지도 범위) · accumDateFilter()(Coverage
+//   방문 집계) → RouteDB 조회 조건 fromDate/toDate(양 끝 포함, 'YYYY-MM-DD' 날짜만)
+//   → coverageCalcKey(정규화된 날짜 포함) → renderAccumView(token으로 늦은 결과 차단)
+// ══════════════════════════════════════════════════════════
+
+// 'YYYY-MM-DD'이면서 실제로 있는 날짜만 받는다 — 그 외는 ''(= 그쪽 끝 제한 없음)
 function normalizeAccumDate(value){
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(value||'')) ? String(value) : '';
+  const s=String(value||'').trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+  const [y,m,d]=s.split('-').map(Number);
+  const dt=new Date(Date.UTC(y,m-1,d));
+  return (dt.getUTCFullYear()===y&&dt.getUTCMonth()===m-1&&dt.getUTCDate()===d)?s:'';
+}
+
+function describeAccumDateRange(from,to){
+  if(from&&to) return from===to?from:`${from} ~ ${to}`;
+  if(from) return `${from} ~ (최신)`;
+  if(to) return `(처음) ~ ${to}`;
+  return '전체 기간';
+}
+
+function setAccumDateNotice(text){
+  const el=document.getElementById('accum-date-notice');
+  if(!el) return;
+  el.textContent=text||'';
+  el.style.display=text?'inline':'none';
+}
+
+function isDateInputPartial(el){
+  return !!(el&&el.validity&&el.validity.badInput);
 }
 
 function updateAccumDateFilterUI(){
   const fromEl=document.getElementById('accum-date-from');
   const toEl=document.getElementById('accum-date-to');
-  if(fromEl&&fromEl.value!==accumDateFrom) fromEl.value=accumDateFrom;
-  if(toEl&&toEl.value!==accumDateTo) toEl.value=accumDateTo;
+  // 덜 입력 중인 칸(badInput)이나 지금 입력 중인(포커스) 칸은 덮어쓰지 않는다 — 값을 다시
+  // 넣으면 날짜칸의 입력 위치가 초기화돼서 이어 치던 숫자가 엉뚱한 칸으로 간다
+  const keep=el=>!el||isDateInputPartial(el)||document.activeElement===el;
+  if(!keep(fromEl)&&fromEl.value!==accumDateFrom) fromEl.value=accumDateFrom;
+  if(!keep(toEl)&&toEl.value!==accumDateTo) toEl.value=accumDateTo;
   const label=document.getElementById('accum-date-label');
-  if(!label) return;
-  if(accumDateFrom&&accumDateTo) label.textContent=`${accumDateFrom} ~ ${accumDateTo}`;
-  else if(accumDateFrom) label.textContent=`${accumDateFrom} 이후`;
-  else if(accumDateTo) label.textContent=`${accumDateTo} 이전`;
-  else label.textContent='전체 기간';
+  if(label) label.textContent=`표시 기간: ${describeAccumDateRange(accumDateFrom,accumDateTo)}`;
 }
 
+// 날짜 범위를 바꾼다. 정규화한 범위가 지금과 같으면 다시 계산하지 않고 false를 돌려준다.
+// 범위가 바뀌면 날짜가 Coverage 캐시 키에 들어 있어서 새 범위로 새로 계산되고(정적 Geometry는
+// 재사용), 이전 범위로 진행 중이던 렌더는 accumRenderToken으로 버려진다.
 function setAccumDateRange(from,to){
+  cancelAccumDateInputTimer(); // 기다리던 날짜칸 자동 적용은 이 호출로 대신한다
   let nextFrom=normalizeAccumDate(from);
   let nextTo=normalizeAccumDate(to);
-  if(nextFrom&&nextTo&&nextFrom>nextTo) [nextFrom,nextTo]=[nextTo,nextFrom];
+  let swapped=false;
+  if(nextFrom&&nextTo&&nextFrom>nextTo){ [nextFrom,nextTo]=[nextTo,nextFrom]; swapped=true; }
+  setAccumDateNotice(swapped?'시작일이 종료일보다 늦어서 서로 바꿔 적용했어요.':'');
+  if(nextFrom===accumDateFrom&&nextTo===accumDateTo){
+    updateAccumDateFilterUI();
+    return false;
+  }
   accumDateFrom=nextFrom;
   accumDateTo=nextTo;
   updateAccumDateFilterUI();
   renderAccumView();
+  return true;
+}
+
+// 날짜칸 change는 입력 도중에도 여러 번 온다(예: 24일을 치면 "2"를 친 순간 2일로) —
+// 그때마다 다시 계산하면 계산하는 동안 이어 치던 숫자가 엉뚱하게 들어간다. 마지막 변경 뒤
+// 잠깐 기다렸다가 한 번만 적용한다. Enter·"날짜 적용" 버튼은 바로 적용한다.
+const ACCUM_DATE_INPUT_DEBOUNCE_MS=600;
+let accumDateInputTimer=null;
+
+function cancelAccumDateInputTimer(){
+  if(accumDateInputTimer){ clearTimeout(accumDateInputTimer); accumDateInputTimer=null; }
+}
+
+function scheduleAccumDateInputApply(){
+  cancelAccumDateInputTimer();
+  accumDateInputTimer=setTimeout(()=>{ accumDateInputTimer=null; applyAccumDateInputs('debounce'); },ACCUM_DATE_INPUT_DEBOUNCE_MS);
+}
+
+// 날짜칸 두 개의 지금 값을 읽어 적용한다. 덜 입력된 칸(예: 연도만 입력)은 적용하지 않고
+// 지금 적용된 값을 유지한다 — 버튼/Enter로 적용했을 때는 안내하고, 자동 적용(debounce)
+// 때 그 칸을 아직 입력 중(포커스)이면 안내하지 않는다.
+function applyAccumDateInputs(trigger){
+  cancelAccumDateInputTimer();
+  const fromEl=document.getElementById('accum-date-from');
+  const toEl=document.getElementById('accum-date-to');
+  const partialEls=[fromEl,toEl].filter(isDateInputPartial);
+  const from=fromEl&&!isDateInputPartial(fromEl)?fromEl.value:accumDateFrom;
+  const to=toEl&&!isDateInputPartial(toEl)?toEl.value:accumDateTo;
+  const changed=setAccumDateRange(from,to);
+  const stillTyping=trigger==='debounce'&&partialEls.some(el=>document.activeElement===el);
+  if(partialEls.length&&!stillTyping) setAccumDateNotice('날짜를 연·월·일까지 끝까지 입력해 주세요(예: 2026-09-01). 덜 입력된 칸은 적용하지 않았어요.');
+  return changed;
 }
 
 function onAccumDateInputChange(){
-  setAccumDateRange(
-    document.getElementById('accum-date-from').value,
-    document.getElementById('accum-date-to').value
-  );
+  scheduleAccumDateInputApply();
+}
+
+// Enter → 바로 적용. 그 밖의 키를 치는 동안에는(다른 날짜칸으로 넘어가 치는 중 포함) 자동 적용을 미룬다.
+function onAccumDateInputKeydown(event){
+  if(event&&event.key==='Enter'){ applyAccumDateInputs('enter'); return; }
+  if(accumDateInputTimer) scheduleAccumDateInputApply();
 }
 
 function clearAccumDateFilter(){
-  setAccumDateRange('','');
+  ['accum-date-from','accum-date-to'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  return setAccumDateRange('','');
 }
 
 function setAccumLastMonth(){
   const now=new Date();
   const first=new Date(now.getFullYear(),now.getMonth()-1,1);
   const last=new Date(now.getFullYear(),now.getMonth(),0);
-  setAccumDateRange(dstr(first),dstr(last));
+  return setAccumDateRange(dstr(first),dstr(last));
+}
+
+// ══════════════════════════════════════════════════════════
+//  📷 현재 지도 캡처 (데스크톱 앱 전용)
+//
+//  Electron 메인 프로세스가 webContents.capturePage(지도 영역)로 화면에 실제 그려진
+//  픽셀을 찍는다 — 외부 지도 타일(CORS)·Leaflet Canvas Layer도 그대로 들어간다.
+//  화면(renderer)은 지도 영역 좌표와 기본 파일명만 넘기고, 저장 위치 선택·파일 쓰기는
+//  메인 프로세스가 한다(preload의 captureMap 하나만 노출). 브라우저 모드는 지원하지 않는다.
+//
+//  캡처에는 "적용 완료된" 현재 지도만 들어간다. 적용 전 선택(pending) 미리보기, 확대/축소
+//  버튼, 로딩 표시, 호버 툴팁, 꼭짓점 핸들은 잠깐 숨기고 finally에서 반드시 되돌린다.
+//  지도를 그리는 중(날짜 변경 직후 포함)에는 버튼이 비활성이라 이전 지도를 찍지 않는다.
+// ══════════════════════════════════════════════════════════
+let accumRendering=false;
+let mapCaptureInFlight=false;
+const MAP_CAPTURE_HIDE_SELECTOR='#accum-map .leaflet-control-zoom, #accum-tooltip, #coverage-loading, #accum-map .vertex-handle';
+const MAP_CAPTURE_TILE_WAIT_MS=8000;
+
+function mapCaptureSupported(){
+  return !!(window.routeAPI&&window.routeAPI.isDesktop&&typeof window.routeAPI.captureMap==='function');
+}
+
+// 최신 상태로 다 그려져 있어서 지금 찍어도 되는지
+// (이미 버려진 이전 날짜의 계산이 뒤에서 아직 돌고 있어도, 최신 렌더가 끝났으면 찍을 수 있다)
+function isAccumMapSettled(){
+  return !!accumMap&&accumViewInitialized&&!accumRendering&&!boundaryDrawMode
+    &&coverageCacheKey===accumViewKey();
+}
+
+function updateCaptureButton(){
+  const btn=document.getElementById('accum-capture-btn');
+  if(!btn) return;
+  const supported=mapCaptureSupported();
+  const ready=isAccumMapSettled();
+  btn.disabled=!supported||!ready||mapCaptureInFlight;
+  btn.textContent=mapCaptureInFlight?'📷 캡처 중…':'📷 현재 지도 캡처';
+  btn.title=!supported?'지도 캡처는 데스크톱 앱에서만 지원해요(브라우저 모드에서는 지원하지 않아요)'
+    :mapCaptureInFlight?'캡처하는 중이에요'
+    :!ready?'지도 계산이 끝나면 캡처할 수 있어요'
+    :'지금 보이는 누적 지도를 PNG로 저장';
+}
+
+function accumMapModeLabel(){
+  return showCoverageGaps?(showCoverageDepth?'CoverageDepth':'Coverage'):'Density';
+}
+
+function buildMapCaptureFileName(now){
+  return MapCapture.buildCaptureFileName({
+    zone:accumZoneFilter==='all'?'전체구역':accumZoneFilter,
+    dateFrom:accumDateFrom,
+    dateTo:accumDateTo,
+    mode:accumMapModeLabel(),
+  },now||new Date());
+}
+
+// 지도 DOM의 화면 좌표(CSS px) — 메인 프로세스가 페이지 확대 배율을 반영해 DIP로 바꾼다
+function mapCaptureRect(){
+  const r=document.getElementById('accum-map').getBoundingClientRect();
+  return {x:r.left,y:r.top,width:r.width,height:r.height};
+}
+
+const waitMs=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const nextPaint=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+
+// 줌/이동 애니메이션과 배경 타일 로딩이 끝날 때까지(최대 timeoutMs) 기다린다
+async function waitForAccumMapIdle(timeoutMs){
+  const t0=Date.now();
+  const busy=()=>({
+    animating:!!(accumMap&&(accumMap._animatingZoom||(accumMap._panAnim&&accumMap._panAnim._inProgress))),
+    tilesLoading:!!(accumTileLayer&&typeof accumTileLayer.isLoading==='function'&&accumTileLayer.isLoading()),
+  });
+  let state=busy();
+  while((state.animating||state.tilesLoading)&&Date.now()-t0<timeoutMs){
+    await waitMs(100);
+    state=busy();
+  }
+  return {tilesLoaded:!state.tilesLoading,animating:state.animating};
+}
+
+// 캡처 동안 숨길 화면 요소들을 숨기고, 되돌리는 함수 목록을 돌려준다
+function hideUiForMapCapture(){
+  const restores=[];
+  hideAccumTooltip();
+  mapCaptureHidingPending=true;
+  renderPendingManualPreview();
+  restores.push(()=>{ mapCaptureHidingPending=false; renderPendingManualPreview(); });
+  document.querySelectorAll(MAP_CAPTURE_HIDE_SELECTOR).forEach(el=>{
+    const prev=el.style.visibility;
+    el.style.visibility='hidden';
+    restores.push(()=>{ el.style.visibility=prev; });
+  });
+  return restores;
+}
+
+// capturePage는 창에 실제로 보이는 픽셀만 찍는다 — 지도가 스크롤 아래로 걸쳐 있으면 캡처
+// 동안 지도를 화면 안으로 스크롤하고, 끝나면 원래 스크롤 위치로 되돌린다.
+function scrollMapIntoViewForCapture(){
+  const mapEl=document.getElementById('accum-map');
+  if(!mapEl||typeof mapEl.scrollIntoView!=='function') return [];
+  const saved=[];
+  for(let el=mapEl.parentElement;el;el=el.parentElement) saved.push([el,el.scrollTop,el.scrollLeft]);
+  const root=document.scrollingElement;
+  if(root&&!saved.some(([el])=>el===root)) saved.push([root,root.scrollTop,root.scrollLeft]);
+  mapEl.scrollIntoView({block:'nearest',inline:'nearest'});
+  return [()=>saved.forEach(([el,top,left])=>{ el.scrollTop=top; el.scrollLeft=left; })];
+}
+
+// 지도가 창보다 커서 스크롤해도 다 안 보이면 true — 보이는 부분만 저장된다
+function mapRectClipped(rect){
+  const vw=window.innerWidth, vh=window.innerHeight;
+  if(!(vw>0&&vh>0)) return false;
+  return rect.x<0||rect.y<0||rect.x+rect.width>vw+1||rect.y+rect.height>vh+1;
+}
+
+// 반환: {status:'saved'|'canceled'|'error'|'not-ready'|'unsupported'|'busy', ...}
+async function captureAccumMap(){
+  if(mapCaptureInFlight) return {status:'busy'};
+  if(!mapCaptureSupported()){
+    showError('지도 캡처는 데스크톱 앱에서만 지원해요. 브라우저 모드에서는 운영체제 화면 캡처 기능을 사용해 주세요.');
+    return {status:'unsupported'};
+  }
+  if(!isAccumMapSettled()){
+    if(typeof showToast==='function') showToast('지도를 계산하는 중이에요. 다 그려진 뒤에 다시 눌러 주세요.');
+    return {status:'not-ready'};
+  }
+  mapCaptureInFlight=true;
+  updateCaptureButton();
+  let restores=[];
+  try{
+    accumMap.invalidateSize();
+    const idle=await waitForAccumMapIdle(MAP_CAPTURE_TILE_WAIT_MS);
+    if(!isAccumMapSettled()){
+      if(typeof showToast==='function') showToast('캡처를 준비하는 동안 지도가 다시 계산되기 시작했어요. 다 그려진 뒤에 다시 눌러 주세요.');
+      return {status:'not-ready'};
+    }
+    restores=hideUiForMapCapture();
+    restores.push(...scrollMapIntoViewForCapture());
+    await nextPaint();
+    const fileName=buildMapCaptureFileName();
+    const rect=mapCaptureRect();
+    const clipped=mapRectClipped(rect);
+    const res=await window.routeAPI.captureMap(rect,fileName);
+    if(!res||res.canceled){
+      if(typeof showToast==='function') showToast('지도 캡처 저장을 취소했어요.');
+      return {status:'canceled',fileName};
+    }
+    const tileNote=idle.tilesLoaded?'':' (일부 배경 지도 타일이 아직 로딩 중이었어요)';
+    const clipNote=clipped?' (지도가 창보다 커서 보이는 부분만 저장했어요)':'';
+    if(typeof showToast==='function') showToast(`지도 캡처를 저장했어요: ${res.filePath}${tileNote}${clipNote}`);
+    return {status:'saved',fileName,tilesLoaded:idle.tilesLoaded,clipped,...res};
+  }catch(err){
+    console.warn('[경로뷰어] 지도 캡처 실패:',err);
+    showError('지도를 캡처하지 못했어요. ('+err.message+')');
+    return {status:'error',error:err.message};
+  }finally{
+    restores.reverse().forEach(fn=>{ try{ fn(); }catch(_){ /* 복원 실패는 무시 */ } });
+    mapCaptureInFlight=false;
+    updateCaptureButton();
+  }
 }
 
 function setAccumZone(zone){
@@ -1837,7 +2164,7 @@ function setAccumZone(zone){
 function initAccumMap(){
   if(accumMap) return;
   accumMap=L.map('accum-map',{zoomSnap:0.5,zoomDelta:0.5,preferCanvas:true}).setView([37.498,127.032],11);
-  addNoKeyOsmTileLayer(accumMap);
+  accumTileLayer=addNoKeyOsmTileLayer(accumMap)||null;
   accumDensityLayer=L.layerGroup().addTo(accumMap);
   coverageLayer=L.layerGroup().addTo(accumMap);
   manualCellsLayer=L.layerGroup().addTo(accumMap);
@@ -1957,8 +2284,23 @@ function markAccumViewRendered(token,viewKey,complete){
   coverageDirty=!complete||accumViewKey()!==viewKey;
 }
 
+// 그리는 중(accumRendering)에는 지도 캡처 버튼을 막는다 — 날짜를 바꾼 직후 이전 지도를
+// 찍지 않도록, 최신 렌더가 끝났을 때만 다시 연다.
 async function renderAccumView(){
   const token=++accumRenderToken; // 빠르게 필터를 바꿔도 늦게 온 결과가 화면을 덮지 않게
+  accumRendering=true;
+  updateCaptureButton();
+  try{
+    await renderAccumViewInner(token);
+  }finally{
+    if(token===accumRenderToken){
+      accumRendering=false;
+      updateCaptureButton();
+    }
+  }
+}
+
+async function renderAccumViewInner(token){
   const statusEl=document.getElementById('accum-status');
   const statsEl=document.getElementById('accum-stats');
 

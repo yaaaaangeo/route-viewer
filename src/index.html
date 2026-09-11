@@ -117,12 +117,18 @@
       <button class="btn ghost" type="button" id="coverage-toggle-btn" onclick="toggleCoverageGaps()">커버리지 갭 보기</button>
     </div>
     <div id="accum-date-filter">
-      <label class="accum-date-field">시작일 <input type="date" id="accum-date-from" onchange="onAccumDateInputChange()"/></label>
-      <label class="accum-date-field">종료일 <input type="date" id="accum-date-to" onchange="onAccumDateInputChange()"/></label>
+      <!-- min/max가 없으면 Chromium 날짜칸의 연도가 6자리까지 받아서, 키보드로 20260901을
+           치면 연도=202609가 되고 월/일이 비어 값이 ''로 남았다(날짜 필터가 적용되지 않던 원인).
+           max를 4자리 연도로 두면 연도 4자리 뒤 월·일로 넘어간다. -->
+      <label class="accum-date-field">시작일 <input type="date" id="accum-date-from" min="2000-01-01" max="2099-12-31" onchange="onAccumDateInputChange()" onkeydown="onAccumDateInputKeydown(event)"/></label>
+      <label class="accum-date-field">종료일 <input type="date" id="accum-date-to" min="2000-01-01" max="2099-12-31" onchange="onAccumDateInputChange()" onkeydown="onAccumDateInputKeydown(event)"/></label>
+      <button class="btn ghost" type="button" id="accum-date-apply-btn" onclick="applyAccumDateInputs()" title="입력한 시작일·종료일로 지도와 통계를 다시 계산">날짜 적용</button>
       <button class="btn ghost" type="button" onclick="setAccumLastMonth()">지난달</button>
-      <button class="btn ghost" type="button" onclick="clearAccumDateFilter()">전체 기간</button>
-      <span id="accum-date-label" class="mono">전체 기간</span>
+      <button class="btn ghost" type="button" id="accum-date-clear-btn" onclick="clearAccumDateFilter()" title="날짜 조건을 지우고 전체 기간으로">날짜 초기화</button>
+      <span id="accum-date-label" class="mono">표시 기간: 전체 기간</span>
+      <span id="accum-date-notice" class="mono" style="display:none;"></span>
       <span style="flex:1;"></span>
+      <button class="btn ghost" type="button" id="accum-capture-btn" onclick="captureAccumMap()" disabled title="지금 보이는 누적 지도를 PNG로 저장">📷 현재 지도 캡처</button>
       <button class="btn ghost" type="button" id="boundary-edit-toggle-btn" onclick="toggleBoundaryEdit()" style="display:none;" title="구역 경계 수정">⚙️</button>
     </div>
     <div id="accum-hint" class="mono">지도 위에 마우스를 가져다 대면 그 근처 기록이 바로 떠요</div>
@@ -321,6 +327,7 @@
 <script src="js/ui.js"></script>
 <script src="js/auth.js"></script>
 <script src="js/calendar.js"></script>
+<script src="js/map-capture.js"></script>
 <script src="js/accum.js"></script>
 <script src="js/statistics.js"></script>
 <script src="js/replay.js"></script>

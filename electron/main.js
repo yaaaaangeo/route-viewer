@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { RouteDatabase } = require('./database.js');
+const MapCapture = require('../src/js/map-capture.js');
 
 const APP_ID = 'com.navapp.routeviewer';
 let mainWindow = null;
@@ -375,6 +376,31 @@ function registerIpc() {
 
   handle('app:revealDatabase', () => { shell.showItemInFolder(dbFilePath()); return true; });
   handle('app:checkForUpdates', () => triggerUpdateCheck(true));
+
+  // ── 누적 지도 캡처 ─────────────────────────────────────
+  // 화면이 넘긴 지도 영역(CSS px)만 webContents.capturePage()로 찍는다 — 화면에 실제로
+  // 그려진 픽셀을 그대로 가져오므로 외부 지도 타일(CORS)·Leaflet Canvas Layer도 빠지지 않는다.
+  // 저장 대화상자보다 먼저 찍어서 대화상자가 이미지에 들어가지 않게 한다.
+  // 반환: {canceled:true} | {canceled:false, filePath, width, height, bytes}
+  handle('app:captureMap', async (rect, defaultName) => {
+    if (!mainWindow) throw new Error('앱 창이 없어요.');
+    const wc = mainWindow.webContents;
+    const [viewWidth, viewHeight] = mainWindow.getContentSize();
+    const area = MapCapture.normalizeCaptureRect(rect, wc.getZoomFactor(), { width: viewWidth, height: viewHeight });
+    const image = await wc.capturePage(area);
+    if (!image || image.isEmpty()) throw new Error('지도 화면을 캡처하지 못했어요.');
+    const png = image.toPNG();
+    const res = await dialog.showSaveDialog(mainWindow, {
+      title: '현재 지도 캡처 저장',
+      defaultPath: path.join(app.getPath('pictures'), MapCapture.safeCaptureFileName(defaultName)),
+      filters: [{ name: 'PNG 이미지', extensions: ['png'] }],
+    });
+    if (res.canceled || !res.filePath) return { canceled: true };
+    const filePath = /\.png$/i.test(res.filePath) ? res.filePath : res.filePath + '.png';
+    await fs.promises.writeFile(filePath, png);
+    const size = image.getSize();
+    return { canceled: false, filePath, width: size.width, height: size.height, bytes: png.length };
+  });
 
   // ══════════════════════════════════════════════════════
   //  서버 동기화 — server.js 를 하나 띄워두면 여러 데스크톱 앱이

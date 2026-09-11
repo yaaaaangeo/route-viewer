@@ -62,6 +62,9 @@ contextBridge.exposeInMainWorld('routeAPI', {
   info: () => call('app:info'),
   revealDatabase: () => call('app:revealDatabase'),
   checkForUpdates: () => call('app:checkForUpdates'),
+  // 누적 지도 캡처 — 지도 영역 좌표와 기본 파일명만 넘긴다. 캡처·저장 위치 선택·쓰기는
+  // 메인 프로세스가 하므로 화면 코드는 임의 경로에 파일을 쓸 수 없다.
+  captureMap: (rect, defaultName) => call('app:captureMap', rect, defaultName),
 
   // ── 서버 동기화 ──
   syncGetConfig: () => call('sync:getConfig'),

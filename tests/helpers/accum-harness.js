@@ -56,7 +56,7 @@ function makeLeaflet(stats) {
     map() {
       stats.maps++;
       const m = {
-        setView() { return m; }, fitBounds() { stats.fitBounds++; return m; },
+        setView() { return m; }, fitBounds(b) { stats.fitBounds++; stats.lastFitBounds = b; return m; },
         invalidateSize() { stats.invalidateSize++; }, on() { return m; },
         addLayer() {}, removeLayer() {}, containerPointToLatLng() { return { lat: 0, lng: 0 }; },
       };
@@ -132,6 +132,7 @@ async function createAccumHarness() {
   });
   load(ctx, 'src/js/coverage-grid.js');
   load(ctx, 'src/js/storage.js');
+  load(ctx, 'src/js/map-capture.js');
   load(ctx, 'src/js/accum.js');
   // app.js 전체를 로드하면 시작 절차(startRouteViewer)까지 돌기 때문에 switchTab만 잘라 쓴다
   const switchTabSrc = readSource('src/js/app.js').match(/function switchTab\(tab\)\{[\s\S]*?\r?\n\}\r?\n/);
@@ -148,7 +149,9 @@ async function createAccumHarness() {
       const t0 = Date.now();
       while (Date.now() - t0 < timeoutMs) {
         await sleep(10);
-        if (h.eval('coverageCacheKey===accumViewKey()&&coverageInFlight.size===0')) { await sleep(5); return true; }
+        // 최신 렌더가 끝났고(accumRendering=false) 그린 화면이 지금 상태와 같으면 완료 —
+        // 이미 버려진 이전 계산이 뒤에서 아직 돌고 있는 것은 기다리지 않는다
+        if (h.eval('!accumRendering&&coverageCacheKey===accumViewKey()')) { await sleep(5); return true; }
       }
       return false;
     },

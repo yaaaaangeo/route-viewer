@@ -214,6 +214,8 @@
     function matches(v, filter) {
       if (!filter) return true;
       if (filter.date && v.date !== filter.date) return false;
+      // 날짜 범위는 'YYYY-MM-DD' 날짜에만 — '날짜미상'이 "시작일만" 필터에 끼지 않게(database.js DATE_ONLY_SQL)
+      if ((filter.fromDate || filter.toDate) && !/^\d{4}-\d{2}-\d{2}$/.test(v.date || '')) return false;
       if (filter.fromDate && !(v.date >= filter.fromDate)) return false;
       if (filter.toDate && !(v.date <= filter.toDate)) return false;
       if (filter.zone && filter.zone !== 'all' && v.zone !== filter.zone) return false;

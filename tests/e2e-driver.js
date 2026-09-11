@@ -32,7 +32,8 @@ module.exports = function run({ app, mainWindow, dbFilePath }) {
     // level 3 = error
     if (level >= 2) {
       const text = `${message} (${source}:${line})`;
-      if (!/favicon|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|fonts\.googleapis|basemaps\.cartocdn|Autofill/i.test(text)) {
+      // "지도 캡처 실패 … no-such-dir"는 아래 캡처 테스트가 일부러 없는 폴더로 저장시켜 만든 경고라 뺀다
+      if (!/favicon|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|fonts\.googleapis|basemaps\.cartocdn|Autofill|지도 캡처 실패: Error: ENOENT.*no-such-dir/i.test(text)) {
         consoleErrors.push(text);
       }
     }
@@ -375,6 +376,120 @@ async function main(win, dbFilePath) {
     check('선택 적용 → 미방문 셀이 SQLite에 저장된다(unvisited 1칸)', afterApply.unvisited.length === 1, JSON.stringify(afterApply));
     await js(win, `(async()=>{ await RouteDB.saveZoneManualCells('강남',{excluded:[],visited:[],unvisited:[]}); return true; })()`); // 이후 검증에 영향 없게 원복
     await sleep(200);
+  }
+
+  // ── 누적 지도 날짜 필터(실제 키보드 입력) · 📷 현재 지도 캡처(실제 capturePage → PNG) ──
+  section('신규 — 누적 지도 날짜 필터(키보드) · 📷 현재 지도 캡처');
+  {
+    const { dialog, nativeImage } = require('electron');
+    const os = require('os');
+    const capDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rv-capture-'));
+    const origSave = dialog.showSaveDialog;
+    const saveCalls = [];
+    let saveMode = 'save';
+    // 저장 대화상자만 바꿔치기 — 캡처(capturePage)·PNG 변환·파일 쓰기는 main.js 실제 코드 그대로
+    dialog.showSaveDialog = async (_w, opts) => {
+      saveCalls.push(opts.defaultPath);
+      if (saveMode === 'cancel') return { canceled: true };
+      if (saveMode === 'fail') return { canceled: false, filePath: path.join(capDir, 'no-such-dir', 'x.png') };
+      return { canceled: false, filePath: path.join(capDir, path.basename(opts.defaultPath)) };
+    };
+    const analyzePng = file => {
+      const img = nativeImage.createFromPath(file);
+      const { width, height } = img.getSize();
+      const buf = img.toBitmap(); // BGRA
+      const colors = new Set();
+      let red = 0;
+      for (let i = 0; i < buf.length; i += 4 * 7) {
+        const b = buf[i], g = buf[i + 1], r = buf[i + 2];
+        colors.add(((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
+        if (r > 200 && g < 150 && b < 150) red++;
+      }
+      return { width, height, bytes: fs.statSync(file).size, distinctColors: colors.size, redSamples: red };
+    };
+    const visitedCells = async () => {
+      const t = await js(win, `document.getElementById('coverage-detail').innerText`);
+      const m = t.match(/(?:^|[^미])방문 Cell\s*([\d,]+)/);
+      return m ? Number(m[1].replace(/,/g, '')) : NaN;
+    };
+    const dbg = win.webContents.debugger;
+    try {
+      await waitCoverageIdle(win);
+      const fullVisited = await visitedCells();
+      // 실제 키보드 입력(CDP) — 예전엔 연도칸이 6자리까지 받아 20260824가 적용되지 않았다
+      win.show(); win.focus(); win.webContents.focus();
+      dbg.attach('1.3');
+      for (const id of ['accum-date-from', 'accum-date-to']) {
+        await js(win, `document.getElementById('${id}').focus()`);
+        for (const ch of '20260824') {
+          await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: ch, code: 'Digit' + ch, text: ch, windowsVirtualKeyCode: ch.charCodeAt(0) });
+          await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, code: 'Digit' + ch, windowsVirtualKeyCode: ch.charCodeAt(0) });
+          await sleep(40);
+        }
+      }
+      dbg.detach();
+      await sleep(1000); // 날짜칸 자동 적용(debounce 600ms)을 기다린다
+      await waitCoverageIdle(win);
+      const typed = await js(win, `({from:accumDateFrom,to:accumDateTo,label:document.getElementById('accum-date-label').textContent})`);
+      check('키보드로 20260824를 입력하면 날짜 필터가 적용된다',
+        typed.from === '2026-08-24' && typed.to === '2026-08-24' && typed.label === '표시 기간: 2026-08-24', JSON.stringify(typed));
+      const dayVisited = await visitedCells();
+      check('선택한 날짜 기준으로 Coverage 방문 Cell 수가 바뀐다', dayVisited !== fullVisited && dayVisited > 0,
+        `전체 ${fullVisited}칸 → 2026-08-24 ${dayVisited}칸`);
+
+      const disabledRightAfter = await js(win, `(()=>{ setAccumDateRange('2026-08-25','2026-08-25'); return document.getElementById('accum-capture-btn').disabled; })()`);
+      check('날짜를 바꾸면 새 계산이 끝날 때까지 캡처 버튼 비활성', disabledRightAfter === true);
+      await sleep(200);
+      await waitCoverageIdle(win);
+      check('계산이 끝나면 캡처 버튼 활성', (await js(win, `document.getElementById('accum-capture-btn').disabled`)) === false);
+
+      const mapRect = await js(win, `(()=>{const r=document.getElementById('accum-map').getBoundingClientRect();return {w:r.width,h:r.height};})()`);
+      const cov = await js(win, `captureAccumMap()`);
+      check('Coverage Map 캡처 → PNG 저장', cov.status === 'saved' && fs.existsSync(cov.filePath) && fs.statSync(cov.filePath).size > 0,
+        cov.filePath ? `${path.basename(cov.filePath)} ${fs.statSync(cov.filePath).size}B` : JSON.stringify(cov));
+      check('기본 파일명에 구역·날짜·모드가 들어간다',
+        /^RouteViewer_강남_20260825_Coverage_\d{8}_\d{6}\.png$/.test(path.basename(saveCalls[saveCalls.length - 1] || '')), saveCalls[saveCalls.length - 1]);
+      if (cov.status === 'saved') {
+        const a = analyzePng(cov.filePath);
+        check('PNG 크기가 지도 영역 비율과 같다', Math.abs(a.width / a.height - mapRect.w / mapRect.h) < 0.02,
+          `${a.width}x${a.height} (지도 ${Math.round(mapRect.w)}x${Math.round(mapRect.h)})`);
+        check('빈 화면이 아니다(색상 다양도)', a.distinctColors > 30, `${a.distinctColors}색`);
+        check('Coverage 빨간 미방문 칸이 이미지에 들어 있다', a.redSamples > 20, `빨간 샘플 ${a.redSamples}`);
+        console.log('  캡처 파일(Coverage): ' + cov.filePath);
+      }
+      check('캡처 후 숨겼던 지도 컨트롤이 복원된다',
+        (await js(win, `(document.querySelector('#accum-map .leaflet-control-zoom')||{style:{}}).style.visibility`)) !== 'hidden');
+
+      await js(win, `clearError()`);
+      saveMode = 'cancel';
+      const canceled = await js(win, `captureAccumMap()`);
+      check('저장 취소 → 오류로 표시하지 않는다', canceled.status === 'canceled' &&
+        (await js(win, `getComputedStyle(document.getElementById('error-box')).display`)) === 'none');
+      saveMode = 'fail';
+      const failedCap = await js(win, `captureAccumMap()`);
+      check('저장 실패(없는 폴더) → 오류 메시지 표시', failedCap.status === 'error' &&
+        (await js(win, `getComputedStyle(document.getElementById('error-box')).display`)) !== 'none', failedCap.error);
+      await js(win, `clearError()`);
+      saveMode = 'save';
+
+      await js(win, `clearAccumDateFilter(); toggleCoverageGaps()`); // 밀도 지도 + 전체 기간
+      await sleep(200);
+      await waitCoverageIdle(win);
+      const dens = await js(win, `captureAccumMap()`);
+      check('밀도 지도 캡처 → PNG 저장(전체기간_Density)', dens.status === 'saved' && /_강남_전체기간_Density_/.test(path.basename(dens.filePath || '')),
+        dens.filePath ? path.basename(dens.filePath) : JSON.stringify(dens));
+      if (dens.status === 'saved') {
+        const d = analyzePng(dens.filePath);
+        check('밀도 지도 PNG도 빈 화면이 아니다', d.bytes > 0 && d.distinctColors > 30, `${d.width}x${d.height} ${d.distinctColors}색 ${d.bytes}B`);
+        console.log('  캡처 파일(Density): ' + dens.filePath);
+      }
+      await js(win, `toggleCoverageGaps()`); // 커버리지 모드로 되돌림(아래 원복 코드가 끈다)
+      await sleep(200);
+      await waitCoverageIdle(win);
+    } finally {
+      dialog.showSaveDialog = origSave;
+      try { dbg.detach(); } catch (_) { /* 이미 분리됨 */ }
+    }
   }
 
   await js(win, `toggleCoverageGaps(); setAccumZone('all')`); // 커버리지/구역 필터 상태 원복
