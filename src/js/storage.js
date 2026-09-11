@@ -324,11 +324,23 @@
       }
     }
 
+    // 날짜 요약에 유효 수집 시간(collectionSec)이 추가됐다 — 예전 요약은 한 번만 다시 만든다
+    // (database.js _migrateSummaries 와 같은 규칙, 같은 SUMMARY_VERSION)
+    async function migrateSummariesIfNeeded() {
+      const version = global.CollectionStats.SUMMARY_VERSION;
+      if ((await metaGet('summary_version', 0)) === version) return;
+      const db = await ready();
+      const t = db.transaction(['summaries'], 'readonly');
+      const rows = await reqp(t.objectStore('summaries').getAll());
+      for (const r of rows) await rebuildDateSummary(r.date);
+      await metaSet('summary_version', version);
+    }
+
     return {
       kind: 'indexeddb',
       label: 'IndexedDB',
 
-      async init() { await ready(); await seedDefaultsIfNeeded(); },
+      async init() { await ready(); await seedDefaultsIfNeeded(); await migrateSummariesIfNeeded(); },
 
       async stats() {
         const db = await ready();

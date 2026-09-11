@@ -24,6 +24,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Database } = require('node-sqlite3-wasm');
 const CoverageGrid = require('../src/js/coverage-grid.js');
+const CollectionStats = require('../src/js/collection-stats.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -75,6 +76,16 @@ class RouteDatabase {
     try { this.db.run('PRAGMA journal_mode = WAL'); } catch (_) { /* 기본 저널 사용 */ }
     this.db.run('PRAGMA synchronous = NORMAL');
     this._migrate();
+    this._migrateSummaries();
+  }
+
+  // 날짜 요약에 유효 수집 시간(collectionSec)이 추가됐다(CollectionStats.SUMMARY_VERSION).
+  // 예전 DB는 앱을 처음 켤 때 한 번만 전체 날짜 요약을 다시 만든다.
+  _migrateSummaries() {
+    const version = String(CollectionStats.SUMMARY_VERSION);
+    if (this.getMeta('summary_version') === version) return;
+    this.rebuildAllSummaries();
+    this.setMeta('summary_version', version);
   }
 
   close() {
@@ -1129,6 +1140,8 @@ function buildDaySummary(rows) {
     endTime: maxTime,
     distanceKm: Math.round(distM / 10) / 100,
     quality: { gaps, teleports, total: gaps + teleports },
+    // 유효 수집 시간(초) — 차량별 90초 이하 기록 간격의 합(collection-stats.js, IndexedDB와 같은 규칙)
+    collectionSec: CollectionStats.validDurationSec(rows),
   };
 }
 

@@ -95,6 +95,7 @@ function createStorageContext({ api, indexedDB, IDBKeyRange }) {
   if (indexedDB) { extra.indexedDB = indexedDB; extra.IDBKeyRange = IDBKeyRange; }
   const ctx = baseContext(extra);
   load(ctx, 'src/js/coverage-grid.js');
+  load(ctx, 'src/js/collection-stats.js');
   load(ctx, 'src/js/storage.js');
   return ctx;
 }

@@ -117,6 +117,8 @@ window.buildDaySummaryFromPoints=function(sortedPoints){
     startTime:base.startTime, endTime:base.endTime,
     distanceKm:Math.round(distM/10)/100,
     quality:{gaps:q.gaps.length,teleports:q.teleports.length,total:q.total},
+    // 유효 수집 시간(초) — database.js buildDaySummary와 같은 규칙(collection-stats.js)
+    collectionSec:CollectionStats.validDurationSec(sortedPoints),
   };
 };
 

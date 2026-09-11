@@ -282,3 +282,29 @@
   .sync-last{margin-left:0;}
   .settings-form-label{width:100%;}
 }
+
+/* ── 달력 맨 위: 전체 데이터 수집 현황 ── */
+#collection-progress{
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:10px 12px;display:flex;flex-direction:column;gap:6px;flex:none;
+}
+.cp-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+.cp-title{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px;}
+.cp-latest{font-size:10.5px;color:var(--text-faint);}
+.cp-table-wrap{overflow-x:auto;}
+.cp-table{width:100%;min-width:560px;border-collapse:collapse;font-size:11.5px;}
+.cp-table th,.cp-table td{padding:5px 8px;border-bottom:1px solid var(--line-soft);white-space:nowrap;}
+.cp-table thead th{font-size:10.5px;font-weight:600;color:var(--text-dim);text-align:right;}
+.cp-table thead th:first-child,.cp-table tbody th{text-align:left;}
+.cp-table td{text-align:right;color:var(--text);}
+.cp-table tbody tr:last-child th,.cp-table tbody tr:last-child td{border-bottom:none;}
+.cp-row.cp-kpi{--cp-color:var(--teal);}
+.cp-row.cp-proposal{--cp-color:var(--amber);}
+.cp-table tbody th{font-weight:700;color:var(--cp-color);}
+.cp-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle;background:var(--cp-color);}
+.cp-collected{font-weight:600;}
+.cp-progress{min-width:160px;}
+.cp-pct{color:var(--cp-color);font-weight:700;margin-right:8px;}
+.cp-bar{display:inline-block;width:90px;height:5px;border-radius:3px;background:var(--line);vertical-align:middle;overflow:hidden;}
+.cp-bar-fill{display:block;height:100%;background:var(--cp-color);}
+.cp-note{font-size:10.5px;color:var(--text-faint);}

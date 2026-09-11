@@ -89,6 +89,15 @@ app.whenReady().then(async () => {
       const b64 = fs.readFileSync(path.join(XLSX_DIR, f)).toString('base64');
       await js(`(async()=>{const bin=atob(${JSON.stringify(b64)});const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);await handleFiles([new File([u],${JSON.stringify(f)})]);closeModal();return 1;})()`);
     }
+    // 달력 맨 위 "전체 데이터 수집 현황" — 브라우저 모드(IndexedDB 날짜 요약)에서도 같은 규칙으로 표시
+    await js(`switchTab('calendar')`);
+    const cpBrowser = await js(`({
+      first:document.getElementById('calendar-view').firstElementChild.id,
+      collected:document.querySelector('#cp-body .cp-collected').textContent,
+      expected:fmtNum(Math.round(CollectionStats.summarizeCollection([...dateSummaryIndex.values()]).totalSec/60)),
+      text:document.getElementById('cp-body').innerText.replace(/\\s+/g,' ')})`);
+    check('브라우저 모드(IndexedDB)에서도 달력 맨 위 수집 현황 = 날짜 요약 유효 수집 시간 합',
+      cpBrowser.first === 'collection-progress' && cpBrowser.collected === cpBrowser.expected && cpBrowser.collected !== '0', cpBrowser.text);
     // 이 테스트는 다운로드 경로를 검증한다(파일 저장 창은 자동화할 수 없어 단위 테스트에서 검증)
     await js(`window.showSaveFilePicker = undefined; switchTab('accum')`);
     await sleep(300);

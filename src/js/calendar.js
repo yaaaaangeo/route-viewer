@@ -11,11 +11,47 @@
 let dateSummaryIndex = new Map();
 let calMonth = new Date();
 
-// DB에서 날짜 요약을 다시 읽어온다. 데이터가 바뀔 때마다(import/삭제/복구) 호출.
+// DB에서 날짜 요약을 다시 읽어온다. 데이터가 바뀔 때마다(시작·import·삭제·백업 복원·
+// 서버 동기화) 호출된다 — 전체 데이터 수집 현황도 여기서만 다시 합산한다.
 async function refreshDateIndex(){
   const rows=await RouteDB.listDateSummaries();
   dateSummaryIndex=new Map(rows.map(r=>[r.date,r]));
+  recomputeCollectionTotals();
+  renderCollectionProgress();
   return dateSummaryIndex;
+}
+
+// ── 전체 데이터 수집 현황(달력 맨 위 표) ─────────────────────
+// 날짜 요약에 저장된 날짜별 유효 수집 시간(collectionSec)만 더한다 — 원본 GPS 기록은
+// 가져오지 않는다. 현재 보고 있는 달·선택한 날짜와 무관한 DB 전체 누적이며, 월 이동이나
+// 날짜 선택은 이 값을 다시 계산하지 않는다(refreshDateIndex 때만).
+let collectionTotals={totalSec:0,dateCount:0,latestDate:null,missing:0};
+const collectionStats={computations:0,renders:0};
+
+function recomputeCollectionTotals(){
+  collectionStats.computations++;
+  collectionTotals=CollectionStats.summarizeCollection([...dateSummaryIndex.values()]);
+  return collectionTotals;
+}
+
+function renderCollectionProgress(){
+  const body=document.getElementById('cp-body');
+  if(!body) return;
+  collectionStats.renders++;
+  const progress=CollectionStats.collectionProgress(collectionTotals.totalSec);
+  body.innerHTML=progress.rows.map(r=>`
+    <tr class="cp-row cp-${escapeHtml(r.key)}">
+      <th scope="row"><span class="cp-dot"></span>${escapeHtml(r.label)}</th>
+      <td class="mono">${fmtNum(r.targetClips)}</td>
+      <td class="mono">${fmtNum(r.targetMinutes)}</td>
+      <td class="mono cp-collected">${fmtNum(r.collectedMinutes)}</td>
+      <td class="cp-progress"><span class="mono cp-pct">${CollectionStats.formatPercent(r.percent)}</span><span class="cp-bar"><span class="cp-bar-fill" style="width:${r.barPercent.toFixed(2)}%"></span></span></td>
+    </tr>`).join('');
+  const latest=document.getElementById('cp-latest');
+  if(latest){
+    latest.textContent=`최근 데이터: ${collectionTotals.latestDate||'없음'}`
+      +(collectionTotals.missing?` · 수집 시간 계산 전 날짜 ${collectionTotals.missing}일`:'');
+  }
 }
 
 function hasAnyData(){ return dateSummaryIndex.size>0; }
@@ -128,18 +164,18 @@ function renderDaySummary(sum,cached){
 
   const distanceKm=cached&&cached.distanceKm!=null?cached.distanceKm:null;
   const quality=cached&&cached.quality?cached.quality:null;
-  let hours=null;
-  if(sum.startTime&&sum.endTime){
-    let sec=timeToSec(sum.endTime)-timeToSec(sum.startTime);
-    if(sec!=null){ if(sec<0) sec+=86400; hours=sec/3600; }
-  }
+  // 주행 시간 = 날짜 요약의 유효 수집 시간(collectionSec: 차량별로 90초 넘는 GPS 공백은 빼고
+  // 더한 값) — 달력 맨 위 "전체 데이터 수집 현황"과 같은 규칙. 예전엔 마지막 시각 - 첫 시각이라
+  // 오전·오후 사이 쉬는 시간까지 주행 시간에 들어갔다.
+  const collectionSec=cached&&Number.isFinite(cached.collectionSec)?cached.collectionSec:null;
+  const hours=collectionSec!=null?collectionSec/3600:null;
 
   el.innerHTML=`
     <div class="ds-title">일자 요약</div>
     <div class="ds-row"><span class="ds-label">운행 시간</span><span class="mono" style="font-size:12px;">${sum.startTime||'—'} → ${sum.endTime||'—'}</span></div>
     <div class="ds-row"><span class="ds-label">주행 거리</span><span class="mono" style="font-size:12px;">${distanceKm!=null?distanceKm.toFixed(1)+' km':'—'}</span></div>
     <div class="ds-row"><span class="ds-label">기록 수</span><span class="mono" style="font-size:12px;">${fmtNum(sum.count)}개</span></div>
-    <div class="ds-row"><span class="ds-label">주행 시간</span><span class="mono" style="font-size:12px;">${hours!=null?hours.toFixed(1)+' h':'—'}</span></div>
+    <div class="ds-row"><span class="ds-label">주행 시간</span><span class="mono" style="font-size:12px;">${hours!=null?`${hours.toFixed(1)} h (${fmtNum(Math.round(collectionSec/60))}분)`:'—'}</span></div>
     <div class="ds-row"><span class="ds-label">GPS 공백</span><span class="mono" style="font-size:12px;">${quality?fmtNum(quality.gaps):'—'}</span></div>
     <div class="ds-row"><span class="ds-label">GPS 점프</span><span class="mono" style="font-size:12px;">${quality?fmtNum(quality.teleports):'—'}</span></div>
     <div class="ds-row"><span class="ds-label">구역</span>${zoneChips}</div>

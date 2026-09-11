@@ -14,7 +14,8 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
   중복 판정 키는 `date | time | vehicle | lat(소수점 6자리) | lng(소수점 6자리)`이고,
   같은 키인데 `place/road/weather/timeOfDay/traffic/speed` 값이 다르면 "충돌"로 따로 집계합니다.
 - **Import History** — 파일별 원본/추가/중복/충돌 건수, 대표 차량·거리, 불러온 사람, 충돌 상세.
-- **달력 · 일자 요약** — 운행 시간·구역·차량·주행 거리·기록 수·주행 시간·GPS 공백/점프.
+- **전체 데이터 수집 현황** — 달력 맨 위 표에 KPI·제안 목표 대비 누적 수집 시간과 진행률.
+- **달력 · 일자 요약** — 운행 시간·구역·차량·주행 거리·기록 수·주행 시간(유효 수집 시간)·GPS 공백/점프.
 - **누적 지도** — 전체 또는 선택한 날짜 범위 기록의 밀도 지도 + 구역별 **Coverage Map**,
   현재 지도 **PNG 캡처**(데스크톱 앱·브라우저 모드).
 - **통계** — 지역별/차량별 분포.
@@ -23,6 +24,40 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
 - **백업/복구** — 병합 복구(기본) / 전체 교체 복구(주행 기록만 교체, 설정·수동 셀은 지우지 않음).
 
 ---
+
+## 달력 — 전체 데이터 수집 현황
+
+달력 탭 맨 위에 DB에 저장된 **전체 기간** 데이터의 누적 현황을 표로 보여줍니다(보고 있는 달·선택한 날짜와 무관).
+
+| 구분 | 목표 Clip 수 | 목표 시간(분) | 수집 시간(분) | 진행률(%) |
+|---|---:|---:|---:|---:|
+| KPI | 8,000 | 4,000 | 자동 계산 | 수집 시간 ÷ 4,000 × 100 |
+| 제안 | 20,000 | 10,000 | 자동 계산 | 수집 시간 ÷ 10,000 × 100 |
+
+- **목표값**은 `src/js/collection-stats.js`의 `COLLECTION_TARGETS` 한 곳에서 관리합니다(표의 행도 이 목록으로 그림).
+  목표 Clip 수는 현재 목표값만 표시하고, 진행률은 **수집 시간 기준**입니다.
+- **수집 시간(유효 수집 시간)** 계산 규칙 — SQLite와 IndexedDB가 같은 함수(`CollectionStats.validDurationSec`)를 씁니다.
+  1. 날짜별 · 차량별로 기록을 나눕니다.
+  2. 차량마다 시각 순으로 정렬하고(같은 시각 기록은 하나로 봄) 연속한 두 기록의 간격을 구합니다.
+  3. 간격이 0초 초과 **90초 이하**면 더하고, **90초보다 긴 간격은 GPS 공백으로 보고 뺍니다**
+     (기존 품질 검사의 "GPS 공백" 기준과 같은 값). 오전 1시간 + 오후 1시간 = 2시간(마지막−처음 = 9시간이 아님).
+  4. 차량별 합계를 더합니다 — 여러 차량이 같은 시간대에 수집하면 각각 따로 셉니다.
+  5. 모든 날짜를 더해 초 → 분으로 바꿉니다. 표의 수집 시간은 반올림한 정수 분, 진행률은 초 단위 값으로 계산해
+     소수 첫째 자리까지 표시합니다(예: 1,234분 → KPI 30.9%, 제안 12.3%).
+- **중복 제외**: import 때 `date|time|vehicle|lat|lng`로 중복 제거돼 DB에 실제로 남은 기록만 씁니다. 같은 파일 재등록,
+  동일 GPS 레코드, 삭제된 날짜는 들어가지 않고, 같은 차량·같은 시간대의 겹친 세션은 시각을 합쳐서 한 번만 셉니다.
+  (차량 이름이 파일마다 다르게 적혀 있으면 — 예: "토레스 3호"/"토레스 3호차" — 다른 차량으로 셉니다.)
+- **목표 초과**: 진행률 숫자는 100%로 자르지 않고 그대로(예: 4,500분 → 112.5%), 진행 막대 너비만 최대 100%입니다.
+  데이터가 없으면 수집 시간 `0`, 진행률 `0.0%`입니다. 표 오른쪽 위에 DB의 가장 최신 기록 날짜를 "최근 데이터"로 표시합니다.
+- **저장·성능**: 날짜별 유효 수집 시간은 import·삭제·백업 복원·서버 동기화 때 만들어지는 날짜 요약에
+  `collectionSec`로 저장되고, 달력은 날짜 요약만 더합니다(원본 GPS 기록을 다시 읽지 않음).
+  `collectionSec`가 없는 예전 DB는 앱을 처음 켤 때 날짜 요약을 한 번 다시 만듭니다(`summary_version` 2).
+- **자동 갱신**: 앱 시작, 파일 import, 날짜/전체 삭제, 백업 복원, 서버 동기화 뒤 날짜 요약을 다시 읽을 때
+  (`refreshDateIndex`) 한 번만 다시 합산합니다. 월 이동·날짜 선택으로는 다시 계산하지 않습니다.
+- 달력 일자 요약의 **주행 시간**도 이제 같은 값(그 날짜의 유효 수집 시간)입니다 — 예전에는 마지막 시각 − 첫 시각이라
+  쉬는 시간까지 포함됐습니다.
+- 참고: 이 저장소의 `주행기록/` 28개 파일(14일)을 넣으면 수집 시간 3,093분(KPI 77.3%, 제안 30.9%)이며,
+  단순 "마지막 − 처음" 합으로는 5,706분이 됩니다(`tests/collection-progress-test.js`가 출력).
 
 ## 누적 지도 — 날짜 필터
 
@@ -222,11 +257,12 @@ npm run test:browser-capture   # 브라우저 모드 지도 캡처 E2E (Electron
 | `tests/coverage-manual-cells-test.js` | 현재 선택/확정 분리·선택 초기화·선택 적용·저장 실패·미방문·Coverage 캐시/무효화·늦은 비동기 결과 | 82 |
 | `tests/accum-date-filter-test.js` | 날짜 범위별 밀도 지도·통계·Coverage 방문/%/Depth, 날짜 캐시 키·Geometry 재사용·debounce·늦은 결과 차단, SQLite↔IndexedDB 동등성 | 50 |
 | `tests/map-capture-test.js` | 캡처 파일명·영역 계산, 버튼 활성 조건·IPC 요청·취소/실패·중복 클릭·pending 제외·UI 복원·날짜 변경 직후, 브라우저 모드 합성(타일 z-index 순서·페이드 투명도·CSS filter·다운로드/저장 창·CORS 오류) | 51 |
-| `npm run test:browser-capture` → `tests/browser-capture-e2e.js` | 실제 브라우저 모드(`server.js` + IndexedDB, preload 없는 창)에서 캡처 → 다운로드된 PNG 크기·타일·흑백 필터·밀도 원·빨간 칸 픽셀 검사 (인터넷 필요) | 13 |
+| `tests/collection-progress-test.js` | 수집 시간 규칙(90초 공백·차량/날짜 합산·중복), 진행률·목표 초과, 재등록·삭제·복원·동기화·재시작·요약 마이그레이션, SQLite↔IndexedDB(실제 `core.js` 요약 함수) 동등성, 달력 표·일자 요약 주행 시간·월 이동 시 재계산 없음 — 입력·기대·실제값 출력 | 46 |
+| `npm run test:browser-capture` → `tests/browser-capture-e2e.js` | 실제 브라우저 모드(`server.js` + IndexedDB, preload 없는 창) — 달력 수집 현황 표, 지도 캡처 → 다운로드된 PNG 크기·타일·흑백 필터·밀도 원·빨간 칸 픽셀 검사 (인터넷 필요) | 14 |
 | `node tests/server-sync-test.js` | `server.js` 공유 저장 병합(수동 셀 병합 포함) — 포트 8099로 서버를 띄움 | 25 |
-| E2E (`tests/e2e-driver.js`) | 실제 Electron 창을 띄워 화면 조작 — 날짜 키보드 입력, 실제 `capturePage` PNG 저장(Coverage·Density, 픽셀 검사) 포함 | 130 |
+| E2E (`tests/e2e-driver.js`) | 실제 Electron 창을 띄워 화면 조작 — 달력 수집 현황 표(날짜 삭제 후 갱신), 날짜 키보드 입력, 실제 `capturePage` PNG 저장(Coverage·Density, 픽셀 검사) 포함 | 133 |
 
-`npm test` 합계 392개(10개 파일). 최근 실행: 브라우저 모드 캡처 E2E 13/13 통과, 데스크톱 E2E 130개 중 129개 통과 —
+`npm test` 합계 438개(11개 파일). 최근 실행: 브라우저 모드 E2E 14/14 통과, 데스크톱 E2E 133개 중 132개 통과 —
 실패 1건은 아래 알려진 이슈의 "지역별 Coverage 요약 패널"이며, Overpass 경고가 콘솔 에러로 집계돼 종료 코드는 1입니다. `tests/manual-cells-storage-test.js`는 브라우저 IndexedDB 백엔드를
 `tests/helpers/fake-indexeddb.js`(테스트 전용 최소 구현)로 Node에서 실행하고,
 `tests/coverage-manual-cells-test.js`는 실제 `accum.js`/`storage.js`를 vm으로 로드해 SQLite로 돌립니다
@@ -256,6 +292,7 @@ route-viewer/
 │   └─ js/
 │       ├─ coverage-grid.js 방문 칸 계산 · 수동 셀 형식/병합 · Cell 크기 (SQLite·브라우저·서버 공용)
 │       ├─ map-capture.js   지도 캡처 파일명 · 캡처 영역 계산 (화면·메인 프로세스 공용)
+│       ├─ collection-stats.js 유효 수집 시간 · 수집 목표(COLLECTION_TARGETS) · 진행률 (SQLite·브라우저 공용)
 │       ├─ storage.js       저장소 파사드 RouteDB (SQLite ↔ IndexedDB) + 변경 알림
 │       ├─ accum.js         누적 지도 · 구역 경계 · Coverage 계산/캐시 · 수동 셀 편집
 │       ├─ app.js           탭 전환 · 시작 절차

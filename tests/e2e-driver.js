@@ -192,6 +192,18 @@ async function main(win, dbFilePath) {
     (await js(win, `document.querySelectorAll('#cal-grid .cal-chip').length`)) > 0);
   check('지점 수가 표시된다',
     /개 지점/.test(await js(win, `document.querySelector('#cal-grid .cal-cell.has-data .cal-count').textContent`)));
+  const cp = await js(win, `(()=>{
+    const t=CollectionStats.summarizeCollection([...dateSummaryIndex.values()]);
+    return {text:document.getElementById('collection-progress').innerText.replace(/\\s+/g,' '),
+      minutes:fmtNum(Math.round(t.totalSec/60)), rows:document.querySelectorAll('#cp-body tr').length,
+      first:document.getElementById('calendar-view').firstElementChild.id,
+      collected:document.querySelector('#cp-body .cp-collected').textContent};
+  })()`);
+  check('달력 맨 위에 "전체 데이터 수집 현황" 표(KPI·제안 2행, 목표값, 최근 데이터)',
+    cp.first === 'collection-progress' && cp.rows === 2 &&
+    ['전체 데이터 수집 현황', 'KPI', '제안', '8,000', '4,000', '20,000', '10,000', '최근 데이터: 2026-08-25'].every(k => cp.text.includes(k)),
+    cp.text.slice(0, 160));
+  check('표의 수집 시간 = DB 날짜 요약 유효 수집 시간 합(분)', cp.collected === cp.minutes, `${cp.collected}분`);
   await shot(win, '02-calendar');
 
   // ── 날짜 상세 + 리플레이 ────────────────────────────
@@ -718,7 +730,14 @@ async function main(win, dbFilePath) {
   await shot(win, '09-data-manager');
 
   // 날짜 하나 삭제 (확인창은 OS 다이얼로그라 DB 호출로 대체 검증)
+  const collectedBeforeDelete = await js(win, `document.querySelector('#cp-body .cp-collected').textContent`);
+  const deletedDaySec = await js(win, `(dateSummaryIndex.get('2026-08-12')||{}).collectionSec||0`);
   await js(win, `(async()=>{await RouteDB.deleteDate('2026-08-12'); await refreshDateIndex(); await renderDataView(); return true;})()`);
+  const collectedAfterDelete = await js(win, `document.querySelector('#cp-body .cp-collected').textContent`);
+  const expectedAfterDelete = await js(win, `fmtNum(Math.round(CollectionStats.summarizeCollection([...dateSummaryIndex.values()]).totalSec/60))`);
+  check('날짜 삭제 후 전체 데이터 수집 현황이 바로 갱신된다',
+    collectedAfterDelete === expectedAfterDelete && (deletedDaySec === 0 || collectedAfterDelete !== collectedBeforeDelete),
+    `${collectedBeforeDelete}분 → ${collectedAfterDelete}분 (삭제한 날짜 ${Math.round(deletedDaySec / 60)}분)`);
   await sleep(400);
   check('날짜 하나만 삭제된다',
     (await js(win, `sortedDataDates()`)).join(',') === '2026-08-24,2026-08-25',
