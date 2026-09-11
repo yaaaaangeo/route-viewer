@@ -308,3 +308,7 @@
 .cp-bar{display:inline-block;width:90px;height:5px;border-radius:3px;background:var(--line);vertical-align:middle;overflow:hidden;}
 .cp-bar-fill{display:block;height:100%;background:var(--cp-color);}
 .cp-note{font-size:10.5px;color:var(--text-faint);}
+.cp-span{color:var(--text-dim);}
+.cp-sub{display:block;margin-top:2px;font-size:10px;color:var(--text-faint);}
+/* 달력 칸: 그 날짜의 수집 시간 · 주행 시간 */
+.cal-time{margin-top:2px;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}

@@ -38,14 +38,17 @@ function renderCollectionProgress(){
   const body=document.getElementById('cp-body');
   if(!body) return;
   collectionStats.renders++;
-  const progress=CollectionStats.collectionProgress(collectionTotals.totalSec);
+  const progress=CollectionStats.collectionProgress(collectionTotals.totalSec,undefined,collectionTotals.totalSpanSec);
+  // 주행 시간(첫~마지막 기록, 휴식 포함)과 수집 시간(GPS가 실제 기록된 시간)을 나란히 보여준다.
+  // 진행률은 수집 시간 기준이고, 주행 시간 기준 진행률은 그 아래 참고로만 적는다.
   body.innerHTML=progress.rows.map(r=>`
     <tr class="cp-row cp-${escapeHtml(r.key)}">
       <th scope="row"><span class="cp-dot"></span>${escapeHtml(r.label)}</th>
       <td class="mono">${fmtNum(r.targetClips)}</td>
       <td class="mono">${fmtNum(r.targetMinutes)}</td>
+      <td class="mono cp-span">${fmtNum(r.driveMinutes)}</td>
       <td class="mono cp-collected">${fmtNum(r.collectedMinutes)}</td>
-      <td class="cp-progress"><span class="mono cp-pct">${CollectionStats.formatPercent(r.percent)}</span><span class="cp-bar"><span class="cp-bar-fill" style="width:${r.barPercent.toFixed(2)}%"></span></span></td>
+      <td class="cp-progress"><span class="mono cp-pct">${CollectionStats.formatPercent(r.percent)}</span><span class="cp-bar"><span class="cp-bar-fill" style="width:${r.barPercent.toFixed(2)}%"></span></span><span class="mono cp-sub">주행 기준 ${CollectionStats.formatPercent(r.drivePercent)}</span></td>
     </tr>`).join('');
   const latest=document.getElementById('cp-latest');
   if(latest){
@@ -118,6 +121,13 @@ function renderCalendarGrid(){
       const cnt=document.createElement('div');
       cnt.className='cal-count'; cnt.textContent=`${fmtNum(sum.count)}개 지점`;
       cell.appendChild(cnt);
+      if(Number.isFinite(sum.collectionSec)&&Number.isFinite(sum.driveSpanSec)){
+        const tm=document.createElement('div');
+        tm.className='cal-time';
+        tm.textContent=`수집 ${fmtNum(Math.round(sum.collectionSec/60))}분 · 주행 ${fmtNum(Math.round(sum.driveSpanSec/60))}분`;
+        tm.title='수집 = GPS가 실제로 기록된 시간(90초 넘는 공백 제외) · 주행 = 첫 기록~마지막 기록(휴식 포함)';
+        cell.appendChild(tm);
+      }
       cell.onclick=()=>openDayDetail(key);
     }
     grid.appendChild(cell);
@@ -164,18 +174,21 @@ function renderDaySummary(sum,cached){
 
   const distanceKm=cached&&cached.distanceKm!=null?cached.distanceKm:null;
   const quality=cached&&cached.quality?cached.quality:null;
-  // 주행 시간 = 날짜 요약의 유효 수집 시간(collectionSec: 차량별로 90초 넘는 GPS 공백은 빼고
-  // 더한 값) — 달력 맨 위 "전체 데이터 수집 현황"과 같은 규칙. 예전엔 마지막 시각 - 첫 시각이라
-  // 오전·오후 사이 쉬는 시간까지 주행 시간에 들어갔다.
+  // 주행 시간 = 차량별 첫 기록~마지막 기록(휴식·GPS 공백 포함, driveSpanSec)
+  // 수집 시간 = 그중 GPS가 실제로 기록된 시간(차량별로 90초 넘는 공백 제외, collectionSec)
+  // 둘 다 날짜 요약에 저장된 값이고, 달력 맨 위 "전체 데이터 수집 현황"과 같은 규칙이다.
   const collectionSec=cached&&Number.isFinite(cached.collectionSec)?cached.collectionSec:null;
-  const hours=collectionSec!=null?collectionSec/3600:null;
+  const driveSec=cached&&Number.isFinite(cached.driveSpanSec)?cached.driveSpanSec:null;
+  const fmtDuration=sec=>`${(sec/3600).toFixed(1)} h (${fmtNum(Math.round(sec/60))}분)`;
+  const gapMinutes=(collectionSec!=null&&driveSec!=null)?Math.round((driveSec-collectionSec)/60):0;
 
   el.innerHTML=`
     <div class="ds-title">일자 요약</div>
     <div class="ds-row"><span class="ds-label">운행 시간</span><span class="mono" style="font-size:12px;">${sum.startTime||'—'} → ${sum.endTime||'—'}</span></div>
     <div class="ds-row"><span class="ds-label">주행 거리</span><span class="mono" style="font-size:12px;">${distanceKm!=null?distanceKm.toFixed(1)+' km':'—'}</span></div>
     <div class="ds-row"><span class="ds-label">기록 수</span><span class="mono" style="font-size:12px;">${fmtNum(sum.count)}개</span></div>
-    <div class="ds-row"><span class="ds-label">주행 시간</span><span class="mono" style="font-size:12px;">${hours!=null?`${hours.toFixed(1)} h (${fmtNum(Math.round(collectionSec/60))}분)`:'—'}</span></div>
+    <div class="ds-row"><span class="ds-label">주행 시간</span><span class="mono" style="font-size:12px;" title="첫 기록~마지막 기록(휴식·GPS 공백 포함)">${driveSec!=null?fmtDuration(driveSec):'—'}</span></div>
+    <div class="ds-row"><span class="ds-label">수집 시간</span><span class="mono" style="font-size:12px;" title="GPS가 실제로 기록된 시간(90초 넘는 공백 제외)">${collectionSec!=null?fmtDuration(collectionSec)+(gapMinutes>0?` · 공백 ${fmtNum(gapMinutes)}분 제외`:''):'—'}</span></div>
     <div class="ds-row"><span class="ds-label">GPS 공백</span><span class="mono" style="font-size:12px;">${quality?fmtNum(quality.gaps):'—'}</span></div>
     <div class="ds-row"><span class="ds-label">GPS 점프</span><span class="mono" style="font-size:12px;">${quality?fmtNum(quality.teleports):'—'}</span></div>
     <div class="ds-row"><span class="ds-label">구역</span>${zoneChips}</div>

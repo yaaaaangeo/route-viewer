@@ -204,6 +204,14 @@ async function main(win, dbFilePath) {
     ['전체 데이터 수집 현황', 'KPI', '제안', '8,000', '4,000', '20,000', '10,000', '최근 데이터: 2026-08-25'].every(k => cp.text.includes(k)),
     cp.text.slice(0, 160));
   check('표의 수집 시간 = DB 날짜 요약 유효 수집 시간 합(분)', cp.collected === cp.minutes, `${cp.collected}분`);
+  const cpSpan = await js(win, `(()=>{
+    const t=CollectionStats.summarizeCollection([...dateSummaryIndex.values()]);
+    return {shown:document.querySelector('#cp-body .cp-span').textContent, expected:fmtNum(Math.round(t.totalSpanSec/60)),
+      cellTimes:[...document.querySelectorAll('#cal-grid .cal-time')].map(e=>e.textContent)};
+  })()`);
+  check('표에 주행 시간(첫~마지막 기록)도 따로 표시되고, 달력 칸마다 수집·주행 시간이 보인다',
+    cpSpan.shown === cpSpan.expected && cpSpan.cellTimes.length >= 3 && cpSpan.cellTimes.every(t => /^수집 [\d,]+분 · 주행 [\d,]+분$/.test(t)),
+    `주행 ${cpSpan.shown}분 · 칸: ${cpSpan.cellTimes.join(' | ')}`);
   await shot(win, '02-calendar');
 
   // ── 날짜 상세 + 리플레이 ────────────────────────────
@@ -693,7 +701,7 @@ async function main(win, dbFilePath) {
   await sleep(400);
   const daySummaryText = await js(win, `document.getElementById('day-summary').innerText`);
   check('일자 요약에 주행 거리/기록 수/주행 시간/GPS 공백/GPS 점프가 모두 보인다',
-    ['주행 거리', '기록 수', '주행 시간', 'GPS 공백', 'GPS 점프'].every(k => daySummaryText.includes(k)),
+    ['주행 거리', '기록 수', '주행 시간', '수집 시간', 'GPS 공백', 'GPS 점프'].every(k => daySummaryText.includes(k)),
     daySummaryText.replace(/\s+/g, ' ').slice(0, 200));
   await shot(win, '15-day-summary');
 

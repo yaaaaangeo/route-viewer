@@ -119,6 +119,8 @@ window.buildDaySummaryFromPoints=function(sortedPoints){
     quality:{gaps:q.gaps.length,teleports:q.teleports.length,total:q.total},
     // 유효 수집 시간(초) — database.js buildDaySummary와 같은 규칙(collection-stats.js)
     collectionSec:CollectionStats.validDurationSec(sortedPoints),
+    // 주행 시간(초) — 차량별 첫 기록~마지막 기록(휴식·공백 포함)의 합
+    driveSpanSec:CollectionStats.spanDurationSec(sortedPoints),
   };
 };
 

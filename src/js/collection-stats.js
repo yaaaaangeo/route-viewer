@@ -15,6 +15,9 @@
 //    5) 차량별 합계를 더한다(여러 차량이 동시에 수집하면 각각 따로 센다)
 //  기록은 이미 import 때 date|time|vehicle|lat|lng로 중복 제거돼 DB에 있는 것만 쓴다.
 //  전체 수집 시간 = 모든 날짜 요약의 collectionSec 합(원본 기록을 다시 읽지 않는다).
+//
+//  주행 시간(driveSpanSec) — 날짜 요약에 함께 저장된다: 날짜·차량별 첫 기록~마지막 기록
+//  (휴식·GPS 공백 포함)을 차량별로 더한 값. 수집 시간과 나란히 보여준다(진행률은 수집 시간 기준).
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -28,8 +31,9 @@
   // 이보다 긴 기록 간격은 수집 시간에서 뺀다 — quality.js/database.js GAP_THRESHOLD_SEC(90)와 같은 값
   const COLLECTION_GAP_SEC = 90;
 
-  // 날짜 요약 형식 버전 — 2: collectionSec 추가. 예전 요약은 앱을 켤 때 한 번 다시 만든다.
-  const SUMMARY_VERSION = 2;
+  // 날짜 요약 형식 버전 — 2: collectionSec 추가, 3: driveSpanSec 추가.
+  // 예전 요약은 앱을 켤 때 한 번 다시 만든다.
+  const SUMMARY_VERSION = 3;
 
   // 수집 목표 — 여기 한 곳에서만 관리한다(화면 표의 행도 이 목록으로 그린다)
   const COLLECTION_TARGETS = [
@@ -66,30 +70,62 @@
     return total;
   }
 
-  // 날짜 요약 목록 → 전체 누적 {totalSec, dateCount, latestDate, missing}
-  // missing: collectionSec가 없는(아직 다시 만들지 않은 예전) 요약 수 — 정상이면 0
+  // 주행 시간(driveSpanSec) — 한 날짜에서 차량마다 첫 기록 ~ 마지막 기록(중간 휴식·GPS 공백
+  // 포함)을 재서 차량별로 더한 값. "마지막 시각 - 첫 시각"으로 단순 계산한 시간과 같다.
+  // 수집 시간(validDurationSec)은 이 중에서 GPS가 실제로 기록된 시간만이다.
+  function spanDurationSec(rows) {
+    const byVehicle = new Map();
+    for (const r of rows || []) {
+      const t = timeToSec(r && r.time);
+      if (t == null) continue;
+      const v = String((r && r.vehicle) || '');
+      const cur = byVehicle.get(v);
+      if (!cur) byVehicle.set(v, { min: t, max: t });
+      else { if (t < cur.min) cur.min = t; if (t > cur.max) cur.max = t; }
+    }
+    let total = 0;
+    byVehicle.forEach(({ min, max }) => { total += max - min; });
+    return total;
+  }
+
+  // 날짜 요약 목록 → 전체 누적 {totalSec(수집), totalSpanSec(주행), dateCount, latestDate, missing}
+  // missing: collectionSec/driveSpanSec가 없는(아직 다시 만들지 않은 예전) 요약 수 — 정상이면 0
   function summarizeCollection(summaries) {
-    let totalSec = 0, dateCount = 0, missing = 0, latestDate = null;
+    let totalSec = 0, totalSpanSec = 0, dateCount = 0, missing = 0, latestDate = null;
     for (const s of summaries || []) {
       if (!s) continue;
       dateCount++;
-      if (Number.isFinite(s.collectionSec)) totalSec += s.collectionSec;
-      else missing++;
+      if (Number.isFinite(s.collectionSec) && Number.isFinite(s.driveSpanSec)) {
+        totalSec += s.collectionSec;
+        totalSpanSec += s.driveSpanSec;
+      } else {
+        missing++;
+      }
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(s.date || '')) && (!latestDate || s.date > latestDate)) latestDate = s.date;
     }
-    return { totalSec, dateCount, latestDate, missing };
+    return { totalSec, totalSpanSec, dateCount, latestDate, missing };
   }
 
-  // 진행률은 수집 시간 기준. 퍼센트는 100%로 자르지 않고, 막대 너비만 100%로 자른다.
-  function collectionProgress(totalSec, targets) {
+  // 진행률은 수집 시간 기준(percent). 퍼센트는 100%로 자르지 않고, 막대 너비만 100%로 자른다.
+  // spanSec(주행 시간)을 주면 참고용 주행 시간 기준 진행률(drivePercent)도 같이 낸다.
+  function collectionProgress(totalSec, targets, spanSec) {
     const sec = Number.isFinite(totalSec) && totalSec > 0 ? totalSec : 0;
+    const span = Number.isFinite(spanSec) && spanSec > 0 ? spanSec : 0;
     const minutes = sec / 60;
+    const driveMinutes = span / 60;
     return {
       collectedSec: sec,
       collectedMinutes: Math.round(minutes),
+      driveSec: span,
+      driveMinutes: Math.round(driveMinutes),
       rows: (targets || COLLECTION_TARGETS).map(t => {
         const percent = t.targetMinutes > 0 ? (minutes / t.targetMinutes) * 100 : 0;
-        return { ...t, collectedMinutes: Math.round(minutes), percent, barPercent: Math.min(percent, 100) };
+        const drivePercent = t.targetMinutes > 0 ? (driveMinutes / t.targetMinutes) * 100 : 0;
+        return {
+          ...t,
+          collectedMinutes: Math.round(minutes), percent, barPercent: Math.min(percent, 100),
+          driveMinutes: Math.round(driveMinutes), drivePercent,
+        };
       }),
     };
   }
@@ -105,6 +141,7 @@
     COLLECTION_TARGETS,
     timeToSec,
     validDurationSec,
+    spanDurationSec,
     summarizeCollection,
     collectionProgress,
     formatPercent,

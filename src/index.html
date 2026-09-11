@@ -104,11 +104,11 @@
       </div>
       <div class="cp-table-wrap">
         <table class="cp-table">
-          <thead><tr><th scope="col">구분</th><th scope="col">목표 Clip 수</th><th scope="col">목표 시간(분)</th><th scope="col">수집 시간(분)</th><th scope="col">진행률(%)</th></tr></thead>
+          <thead><tr><th scope="col">구분</th><th scope="col">목표 Clip 수</th><th scope="col">목표 시간(분)</th><th scope="col" title="첫 기록~마지막 기록(휴식·GPS 공백 포함)">주행 시간(분)</th><th scope="col" title="GPS가 실제로 기록된 시간(90초 넘는 공백 제외)">수집 시간(분)</th><th scope="col">진행률(%)</th></tr></thead>
           <tbody id="cp-body"></tbody>
         </table>
       </div>
-      <div class="cp-note">수집 시간은 중복 제거된 전체 주행기록의 유효 수집 시간을 기준으로 계산합니다. 같은 차량의 기록 간격이 90초를 넘는 GPS 공백은 빼고, 여러 날짜·차량의 시간은 더합니다.</div>
+      <div class="cp-note">수집 시간은 중복 제거된 전체 주행기록의 유효 수집 시간을 기준으로 계산합니다(같은 차량의 기록 간격이 90초를 넘는 GPS 공백 제외). 주행 시간은 날짜·차량별 첫 기록부터 마지막 기록까지(휴식 포함)입니다. 여러 날짜·차량의 시간은 더하고, 진행률은 수집 시간 기준입니다.</div>
     </section>
     <div id="cal-status"></div>
     <div id="cal-header">

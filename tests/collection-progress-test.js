@@ -47,6 +47,7 @@ function session(date, vehicle, start, count, stepSec, latBase) {
   return out;
 }
 const minutesOf = summaries => CollectionStats.summarizeCollection(summaries).totalSec / 60;
+const spanMinutesOf = summaries => CollectionStats.summarizeCollection(summaries).totalSpanSec / 60;
 function freshPath() { return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rv-collect-')), 'route-viewer.db'); }
 
 // 브라우저(IndexedDB) 저장소 — 날짜 요약은 실제 core.js의 buildDaySummaryFromPoints로 만든다
@@ -78,12 +79,18 @@ function unitTests() {
   const naive = (15 * 3600 - 9 * 3600) / 60;
   check('3. 하루 중 긴 공백(10:00~14:00)은 수집 시간에 포함되지 않는다', secTwo === 7200,
     io('같은 차량 09:00~10:00 + 14:00~15:00', '120분 (단순 마지막-처음이면 ' + naive + '분)', `${secTwo / 60}분`));
+  const spanTwo = CollectionStats.spanDurationSec(twoSessions);
+  check('   주행 시간(첫~마지막 기록)은 휴식을 포함해 따로 계산한다', spanTwo === 6 * 3600,
+    io('같은 두 세션', '주행 360분(09:00~15:00) / 수집 120분', `주행 ${spanTwo / 60}분 / 수집 ${secTwo / 60}분`));
   const boundary = CollectionStats.validDurationSec([{ time: '09:00:00', vehicle: 'A' }, { time: '09:01:30', vehicle: 'A' }, { time: '09:03:01', vehicle: 'A' }]);
   check('   공백 기준: 90초 간격은 포함, 91초 간격은 제외', boundary === 90, io('간격 90초, 91초', '90초', `${boundary}초`));
 
   const twoVehicles = [...oneHour, ...session('2026-09-01', '토레스 2호', '09:00:00', 61, 30, 37.52)];
   const secVeh = CollectionStats.validDurationSec(twoVehicles);
   check('5. 같은 시간대 다른 차량은 각각 따로 더한다', secVeh === 3600 + 1800, io('1호 60분 + 2호 30분(동시간대)', '90분', `${secVeh / 60}분`));
+
+  const spanVeh = CollectionStats.spanDurationSec(twoVehicles);
+  check('   주행 시간도 차량별로 더한다', spanVeh === 3600 + 1800, io('1호 09:00~10:00 + 2호 09:00~09:30', '90분', `${spanVeh / 60}분`));
 
   const dupSession = [...oneHour, ...oneHour.map(r => ({ ...r, lat: r.lat + 0.001 }))];
   const secDup = CollectionStats.validDurationSec(dupSession);
@@ -100,6 +107,12 @@ function unitTests() {
     pct(p4500, 0) === '112.5%' && p4500.rows[0].barPercent === 100 && pct(p4500, 1) === '45.0%',
     io('4,500분', 'KPI 112.5%(막대 100) / 제안 45.0%', `${pct(p4500, 0)}(막대 ${p4500.rows[0].barPercent}) / ${pct(p4500, 1)}`));
   check('   두 행 모두 같은 현재 수집 시간을 쓴다', p1234.rows.every(r => r.collectedMinutes === 1234));
+  const pd = CollectionStats.collectionProgress(1234 * 60, undefined, 5706 * 60);
+  const dpct = i => CollectionStats.formatPercent(pd.rows[i].drivePercent);
+  check('   주행 시간 기준 진행률은 참고로 따로 계산하고, 진행률 본값은 수집 시간 기준 그대로',
+    pct(pd, 0) === '30.9%' && dpct(0) === '142.7%' && dpct(1) === '57.1%' && pd.driveMinutes === 5706,
+    io('수집 1,234분 · 주행 5,706분', 'KPI 30.9%(주행 기준 142.7%) / 제안 12.3%(주행 기준 57.1%)',
+      `${pct(pd, 0)}(주행 기준 ${dpct(0)}) / ${pct(pd, 1)}(주행 기준 ${dpct(1)})`));
   check('   목표값은 한 곳(COLLECTION_TARGETS)에서 관리',
     JSON.stringify(CollectionStats.COLLECTION_TARGETS.map(t => [t.label, t.targetClips, t.targetMinutes])) === JSON.stringify([['KPI', 8000, 4000], ['제안', 20000, 10000]]));
 }
@@ -136,11 +149,13 @@ async function idbAdapter(fake) {
 }
 
 async function scenario(store, results) {
-  const step = async (label, expectedMin) => {
-    const actual = minutesOf(await store.summaries());
-    results.push([label, actual]);
+  const step = async label => {
+    const sums = await store.summaries();
+    const actual = minutesOf(sums);
+    results.push([label, actual, spanMinutesOf(sums)]);
     return actual;
   };
+  const spanNow = async () => spanMinutesOf(await store.summaries());
   const A = session('2026-09-01', '토레스 1호', '09:00:00', 121, 30);
   const B = session('2026-09-01', '토레스 1호', '14:00:00', 121, 30, 37.51);
   const C = session('2026-09-02', '토레스 1호', '10:00:00', 121, 30, 37.53);
@@ -153,6 +168,8 @@ async function scenario(store, results) {
   await store.importRecords([...A, ...B], { filename: 'day1-v1.xlsx' });
   m = await step('day1');
   check(`[${L}] 3. 하루 두 세션(긴 공백 제외)`, m === 120, io('09-01 1호 09~10시 + 14~15시', '120분', `${m}분`));
+  const sp1 = await spanNow();
+  check(`[${L}]    같은 날 주행 시간은 휴식 포함으로 따로(09:00~15:00)`, sp1 === 360, io('09-01 1호 두 세션', '주행 360분 / 수집 120분', `주행 ${sp1}분 / 수집 ${m}분`));
   await store.importRecords(C, { filename: 'day2.xlsx' });
   m = await step('day2');
   check(`[${L}] 4. 여러 날짜 합산`, m === 180, io('+ 09-02 1호 1시간', '180분', `${m}분`));
@@ -173,8 +190,9 @@ async function scenario(store, results) {
   const payload = await store.backup();
   const restored = await store.fresh();
   await restored.restore(payload, 'merge');
-  const mr = minutesOf(await restored.summaries());
-  results.push(['restore', mr]);
+  const restoredSums = await restored.summaries();
+  const mr = minutesOf(restoredSums);
+  results.push(['restore', mr, spanMinutesOf(restoredSums)]);
   check(`[${L}] 8. 백업을 새 DB에 복원하면 값이 그대로 복구된다`, mr === 150, io('백업 → 빈 DB 병합 복원', '150분', `${mr}분`));
   if (restored.close) restored.close();
 
@@ -189,6 +207,8 @@ async function scenario(store, results) {
   await store.reopen();
   m = await step('restart');
   check(`[${L}] 10. 앱 재시작(DB 다시 열기) 후에도 같은 값`, m === 180, io('닫았다 다시 열기', '180분', `${m}분`));
+  const spR = await spanNow();
+  check(`[${L}]    주행 시간 누적도 유지(09-01 1호 360 + 2호 30 + 09-03 3호 30)`, spR === 420, io('재시작 후', '주행 420분', `주행 ${spR}분`));
 }
 
 async function storageTests() {
@@ -204,9 +224,10 @@ async function storageTests() {
   const before = minutesOf(raw.listDateSummaries());
   await sqlite.reopen();
   const after = minutesOf(sqlite.raw().listDateSummaries());
-  check('   기존 데이터 마이그레이션: collectionSec 없는 예전 요약 → 앱을 켤 때 다시 만들어 채운다',
-    before === 0 && after === 180 && sqlite.raw().getMeta('summary_version') === String(CollectionStats.SUMMARY_VERSION),
-    io('요약에서 collectionSec 제거 + summary_version=1', '다시 열면 180분', `${before}분 → ${after}분`));
+  const afterSpan = spanMinutesOf(sqlite.raw().listDateSummaries());
+  check('   기존 데이터 마이그레이션: 수집·주행 시간이 없는 예전 요약 → 앱을 켤 때 다시 만들어 채운다',
+    before === 0 && after === 180 && afterSpan === 420 && sqlite.raw().getMeta('summary_version') === String(CollectionStats.SUMMARY_VERSION),
+    io('요약에서 collectionSec·driveSpanSec 제거 + summary_version=1', '다시 열면 수집 180분 · 주행 420분', `${before}분 → 수집 ${after}분 · 주행 ${afterSpan}분`));
   const rebuiltCount = sqlite.raw().rebuildAllSummaries();
   check('   날짜 요약 재생성(rebuildAllSummaries) 후에도 같은 값',
     minutesOf(sqlite.raw().listDateSummaries()) === 180, io(`${rebuiltCount}일 재생성`, '180분', `${minutesOf(sqlite.raw().listDateSummaries())}분`));
@@ -238,13 +259,17 @@ async function storageTests() {
   }
   const sSum = realDb.listDateSummaries();
   const iSum = await realIdb.listDateSummaries();
-  const perDate = s => s.map(r => `${r.date}:${r.collectionSec}`).join(',');
+  const perDate = s => s.map(r => `${r.date}:${r.collectionSec}:${r.driveSpanSec}`).join(',');
   const realMin = minutesOf(sSum);
+  const realSpan = spanMinutesOf(sSum);
   const naiveMin = sSum.reduce((acc, r) => acc + (CollectionStats.timeToSec(r.endTime) - CollectionStats.timeToSec(r.startTime)) / 60, 0);
-  check('   실제 기록: 날짜별 수집 시간이 두 저장소에서 같다', perDate(sSum) === perDate(iSum),
-    `${files.length}개 파일 · ${sSum.length}일 · 수집 ${Math.round(realMin).toLocaleString('ko-KR')}분 (단순 마지막-처음 합이면 ${Math.round(naiveMin).toLocaleString('ko-KR')}분)`);
-  const prog = CollectionStats.collectionProgress(realMin * 60);
-  console.log(`         현재 저장소 주행기록 기준 진행률: KPI ${CollectionStats.formatPercent(prog.rows[0].percent)} · 제안 ${CollectionStats.formatPercent(prog.rows[1].percent)}`);
+  check('   실제 기록: 날짜별 수집 시간·주행 시간이 두 저장소에서 같다', perDate(sSum) === perDate(iSum),
+    `${files.length}개 파일 · ${sSum.length}일 · 수집 ${Math.round(realMin).toLocaleString('ko-KR')}분 · 주행 ${Math.round(realSpan).toLocaleString('ko-KR')}분`);
+  check('   실제 기록: 주행 시간 합 = 날짜별 "마지막 시각 − 첫 시각" 단순 계산 합(하루 한 차량이라 같다)',
+    Math.round(realSpan) === Math.round(naiveMin), io(`${sSum.length}일`, `${Math.round(naiveMin)}분`, `${Math.round(realSpan)}분`));
+  const prog = CollectionStats.collectionProgress(realMin * 60, undefined, realSpan * 60);
+  console.log(`         현재 저장소 주행기록 기준 진행률(수집): KPI ${CollectionStats.formatPercent(prog.rows[0].percent)} · 제안 ${CollectionStats.formatPercent(prog.rows[1].percent)}`
+    + ` / 주행 기준(참고): KPI ${CollectionStats.formatPercent(prog.rows[0].drivePercent)} · 제안 ${CollectionStats.formatPercent(prog.rows[1].drivePercent)}`);
   realDb.close();
 }
 
@@ -267,29 +292,30 @@ async function calendarTests() {
   const tableText = () => doc.getElementById('cp-body').innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
   await run('refreshDateIndex()');
-  check('1. 데이터가 없을 때 표: 수집 시간 0 · 진행률 0.0% (빈칸 아님)',
-    /KPI 8,000 4,000 0 0\.0%/.test(tableText()) && /제안 20,000 10,000 0 0\.0%/.test(tableText()) && doc.getElementById('cp-latest').textContent === '최근 데이터: 없음',
-    io('날짜 요약 0개', 'KPI 8,000 4,000 0 0.0% / 제안 20,000 10,000 0 0.0%', tableText()));
+  check('1. 데이터가 없을 때 표: 주행·수집 시간 0 · 진행률 0.0% (빈칸 아님)',
+    /KPI 8,000 4,000 0 0 0\.0% 주행 기준 0\.0%/.test(tableText()) && /제안 20,000 10,000 0 0 0\.0% 주행 기준 0\.0%/.test(tableText()) &&
+    doc.getElementById('cp-latest').textContent === '최근 데이터: 없음',
+    io('날짜 요약 0개', 'KPI 8,000 4,000 0 0 0.0% / 제안 20,000 10,000 0 0 0.0%', tableText()));
 
   summaries = [
-    { date: '2026-08-31', count: 10, collectionSec: 1234 * 60 - 3600 },
-    { date: '2026-09-01', count: 242, collectionSec: 3600, startTime: '09:00:00', endTime: '15:00:00' },
+    { date: '2026-08-31', count: 10, collectionSec: 1234 * 60 - 3600, driveSpanSec: 2000 * 60 - 21600 },
+    { date: '2026-09-01', count: 242, collectionSec: 3600, driveSpanSec: 21600, startTime: '09:00:00', endTime: '15:00:00' },
   ];
   await run('refreshDateIndex()');
-  check('6. 천 단위 구분 · 두 행이 같은 수집 시간 · 진행률 소수 첫째 자리',
-    /KPI 8,000 4,000 1,234 30\.9%/.test(tableText()) && /제안 20,000 10,000 1,234 12\.3%/.test(tableText()),
-    io('날짜 요약 합 1,234분', 'KPI … 1,234 30.9% / 제안 … 1,234 12.3%', tableText()));
+  check('6. 천 단위 · 두 행 같은 값 · 주행 시간과 수집 시간을 따로 · 진행률은 수집 기준(주행 기준은 참고)',
+    /KPI 8,000 4,000 2,000 1,234 30\.9% 주행 기준 50\.0%/.test(tableText()) && /제안 20,000 10,000 2,000 1,234 12\.3% 주행 기준 20\.0%/.test(tableText()),
+    io('수집 합 1,234분 · 주행 합 2,000분', 'KPI 8,000 4,000 2,000 1,234 30.9% 주행 기준 50.0% / 제안 … 12.3% 주행 기준 20.0%', tableText()));
   check('   최근 데이터 = DB의 가장 최신 기록 날짜', doc.getElementById('cp-latest').textContent === '최근 데이터: 2026-09-01', doc.getElementById('cp-latest').textContent);
-  check('   진행률 막대 너비', /width:30\.85%/.test(doc.getElementById('cp-body').innerHTML) && /width:12\.34%/.test(doc.getElementById('cp-body').innerHTML));
+  check('   진행률 막대 너비(수집 기준)', /width:30\.85%/.test(doc.getElementById('cp-body').innerHTML) && /width:12\.34%/.test(doc.getElementById('cp-body').innerHTML));
 
-  summaries = [{ date: '2026-09-10', count: 1, collectionSec: 4500 * 60 }];
+  summaries = [{ date: '2026-09-10', count: 1, collectionSec: 4500 * 60, driveSpanSec: 6000 * 60 }];
   await run('refreshDateIndex()');
   check('13. 목표 초과: 112.5% 그대로 표시, 막대만 100%',
-    /KPI 8,000 4,000 4,500 112\.5%/.test(tableText()) && /width:100\.00%/.test(doc.getElementById('cp-body').innerHTML), tableText());
+    /KPI 8,000 4,000 6,000 4,500 112\.5% 주행 기준 150\.0%/.test(tableText()) && /width:100\.00%/.test(doc.getElementById('cp-body').innerHTML), tableText());
 
   summaries = [
-    { date: '2026-08-31', count: 10, collectionSec: 1234 * 60 - 3600 },
-    { date: '2026-09-01', count: 242, collectionSec: 3600 * 2, startTime: '09:00:00', endTime: '15:00:00' },
+    { date: '2026-08-31', count: 10, collectionSec: 1234 * 60 - 3600, driveSpanSec: 1500 * 60 },
+    { date: '2026-09-01', count: 242, collectionSec: 3600 * 2, driveSpanSec: 21600, startTime: '09:00:00', endTime: '15:00:00' },
   ];
   await run('refreshDateIndex()');
   const comp = run('collectionStats.computations');
@@ -299,13 +325,23 @@ async function calendarTests() {
   check('16. 월 이동·날짜 선택만으로는 전체 집계를 다시 하지 않는다(DB 요약 조회도 없음)',
     run('collectionStats.computations') === comp && listCalls === calls,
     io('월 이동 4번 + 날짜 선택 1번', `집계 ${comp}회·조회 ${calls}회 그대로`, `집계 ${run('collectionStats.computations')}회·조회 ${listCalls}회`));
+  const cellTimes = [];
+  const walk = el => { if (el.className === 'cal-time') cellTimes.push(el.textContent); (el.children || []).forEach(walk); };
+  walk(doc.getElementById('cal-grid'));
+  check('   달력 칸마다 그 날짜의 수집 시간·주행 시간을 따로 보여준다',
+    cellTimes.includes('수집 120분 · 주행 360분') && cellTimes.includes('수집 1,174분 · 주행 1,500분'),
+    io('09-01 수집 7200초·주행 21600초 / 08-31 수집 70440초·주행 90000초', '수집 120분 · 주행 360분 / 수집 1,174분 · 주행 1,500분', [...new Set(cellTimes)].join(' | ')));
   const dayText = doc.getElementById('day-summary').innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  const dayHours = (dayText.match(/주행 시간 ([\d.]+) h \((\d+)분\)/) || []);
-  check('15. 일자 요약 "주행 시간"도 같은 규칙(09:00~15:00 사이 쉬는 시간 제외 → 2.0 h, 120분)',
-    dayHours[1] === '2.0' && dayHours[2] === '120',
-    io('09-01 요약 collectionSec 7200 · 기록 09:00~15:00', '2.0 h (120분) — 예전 방식이면 6.0 h', dayHours[0] || dayText));
-  const tableMinutes = Number((tableText().match(/KPI 8,000 4,000 ([\d,]+)/) || [])[1].replace(/,/g, ''));
-  check('   표의 수집 시간 = 일자 요약 주행 시간의 합과 같은 값', tableMinutes === Math.round((1234 * 60 - 3600 + 7200) / 60), io('08-31 + 09-01', '1,294분', `${tableMinutes}분`));
+  const driveRow = (dayText.match(/주행 시간 ([\d.]+) h \(([\d,]+)분\)/) || []);
+  const collectRow = (dayText.match(/수집 시간 ([\d.]+) h \(([\d,]+)분\)( · 공백 ([\d,]+)분 제외)?/) || []);
+  check('15. 일자 요약: 주행 시간(첫~마지막 기록)과 수집 시간(표와 같은 규칙)을 따로 표시',
+    driveRow[1] === '6.0' && driveRow[2] === '360' && collectRow[1] === '2.0' && collectRow[2] === '120' && collectRow[4] === '240',
+    io('09-01 요약 driveSpanSec 21600 · collectionSec 7200', '주행 6.0 h (360분) / 수집 2.0 h (120분) · 공백 240분 제외', `${driveRow[0]} / ${collectRow[0]}`));
+  const tm = tableText().match(/KPI 8,000 4,000 ([\d,]+) ([\d,]+)/) || [];
+  const tableDrive = Number(String(tm[1]).replace(/,/g, '')), tableCollect = Number(String(tm[2]).replace(/,/g, ''));
+  check('   표의 주행·수집 시간 = 날짜별 값의 합',
+    tableCollect === Math.round((1234 * 60 - 3600 + 7200) / 60) && tableDrive === 1500 + 360,
+    io('08-31 + 09-01', '주행 1,860분 · 수집 1,294분', `주행 ${tableDrive}분 · 수집 ${tableCollect}분`));
 }
 
 async function main() {

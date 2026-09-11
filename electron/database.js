@@ -1142,6 +1142,8 @@ function buildDaySummary(rows) {
     quality: { gaps, teleports, total: gaps + teleports },
     // 유효 수집 시간(초) — 차량별 90초 이하 기록 간격의 합(collection-stats.js, IndexedDB와 같은 규칙)
     collectionSec: CollectionStats.validDurationSec(rows),
+    // 주행 시간(초) — 차량별 첫 기록~마지막 기록(휴식·공백 포함)의 합
+    driveSpanSec: CollectionStats.spanDurationSec(rows),
   };
 }
 
