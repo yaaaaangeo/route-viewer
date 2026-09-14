@@ -5,14 +5,16 @@
 //  Electron을 그냥 "브라우저"로 쓴다: preload 없는 창으로 http://127.0.0.1:<port>/src/index.html
 //  을 열면 window.routeAPI가 없어서 앱이 브라우저 모드(IndexedDB)로 돈다. 캡처는 캔버스 합성
 //  경로를 타고, 다운로드는 will-download로 임시 폴더에 받아 픽셀을 검사한다.
-//  (배경 지도 타일은 인터넷의 basemaps.cartocdn.com에서 CORS로 받는다 — OSM 공식 타일 서버는
-//   앱을 차단해서 "Access blocked" 403 이미지가 온다)
+//  (배경 지도 타일은 인터넷의 tile.openstreetmap.org 에서 CORS로 받는다. OSM 은 앱을 식별하는
+//   User-Agent 를 요구해서, Electron 을 브라우저 삼아 도는 이 테스트는 창 세션에
+//   applyOsmTileUserAgent() 를 걸어야 타일이 온다 — 안 걸면 "Access blocked" 403 이미지가 온다)
 //
 //  실행:  npm run test:browser-capture
 // ══════════════════════════════════════════════════════════
 'use strict';
 
 const { app, BrowserWindow, nativeImage } = require('electron');
+const { applyOsmTileUserAgent } = require('../electron/osm-tile-ua.js');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -65,6 +67,10 @@ app.whenReady().then(async () => {
     check('브라우저 모드 서버(server.js)가 뜬다', up);
 
     const win = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { partition: 'rv-browser-capture-' + Date.now() } });
+    // 이 테스트는 Electron 을 "브라우저" 삼아 도는 탓에 UA 가 Electron 이고, 그대로 두면 OSM 이
+    // 타일을 차단한다(진짜 브라우저 모드는 크롬 UA 라 통과 — 이건 테스트 환경 때문에 필요한 것).
+    // 전용 partition 이라 defaultSession 이 아닌 이 창의 세션에 걸어야 한다.
+    applyOsmTileUserAgent(win.webContents.session, app.getVersion());
     let waiting = null;
     win.webContents.session.on('will-download', (_e, item) => {
       const file = path.join(dlDir, item.getFilename());
@@ -106,6 +112,28 @@ app.whenReady().then(async () => {
     check('브라우저 모드에서도 캡처 버튼이 활성', await js(`mapCaptureMode()==='browser' && !document.getElementById('accum-capture-btn').disabled`),
       await js(`document.getElementById('accum-capture-btn').title`));
     const mapRect = await js(`(()=>{const r=document.getElementById('accum-map').getBoundingClientRect();return {w:r.width,h:r.height,dpr:window.devicePixelRatio};})()`);
+
+    // 배경 타일이 "진짜 지도"인지 — 차단 타일도 워터마크 타일도 HTTP 200 으로 오기 때문에 상태
+    // 코드로는 못 잡는다(실제로 겪은 회귀: 200 만 보고 타일 서버를 바꿨다가 지도 전체에
+    // "API KEY REQUIRED" 워터마크가 찍혔다). 그래서 화면에 실제로 그려진 타일의 픽셀을 읽는다.
+    // fetch() 로 다시 받지 않는 이유: index.html 의 CSP connect-src 에 타일 호스트가 없어서
+    // (img-src 로만 허용) fetch 는 막힌다 — 그리고 화면에 뜬 타일을 보는 쪽이 더 정확하다.
+    // OSM 차단 이미지는 흰 바탕 + 노란 빗금이라 색이 몇 개 안 되므로 강남 도심 타일과 구분된다.
+    const tileProbe = await js(`(()=>{
+      const img=document.querySelector('#accum-map img.leaflet-tile');
+      if(!img) return {ok:false,reason:'화면에 타일이 없다'};
+      if(!(img.complete&&img.naturalWidth>0)) return {ok:false,reason:'타일을 아직 못 받았다'};
+      const c=document.createElement('canvas'); c.width=img.naturalWidth; c.height=img.naturalHeight;
+      const ctx=c.getContext('2d'); ctx.drawImage(img,0,0);
+      let d; try{ d=ctx.getImageData(0,0,c.width,c.height).data; }
+      catch(e){ return {ok:false,reason:'캔버스가 오염됐다(타일 CORS 실패)'}; }
+      const colors=new Set();
+      for(let i=0;i<d.length;i+=4) colors.add(((d[i]>>4)<<8)|((d[i+1]>>4)<<4)|(d[i+2]>>4));
+      return {ok:true,url:img.src,size:c.width+'x'+c.height,colors:colors.size};
+    })()`);
+    check('배경 타일이 차단 이미지가 아니다(OSM 타일 정책 User-Agent 통과)',
+      tileProbe.ok && tileProbe.colors > 40,
+      tileProbe.ok ? `${tileProbe.size} · ${tileProbe.colors}색 · ${tileProbe.url}` : tileProbe.reason);
 
     // ── 밀도 지도 ──
     const dl1 = nextDownload();

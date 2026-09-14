@@ -8,12 +8,13 @@
 // ══════════════════════════════════════════════════════════
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const { RouteDatabase } = require('./database.js');
 const MapCapture = require('../src/js/map-capture.js');
+const { applyOsmTileUserAgent } = require('./osm-tile-ua.js');
 
 const APP_ID = 'com.navapp.routeviewer';
 let mainWindow = null;
@@ -472,6 +473,9 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     app.setAppUserModelId(APP_ID);
+    // 창을 만들기 전에 걸어야 첫 타일 요청부터 적용된다 — 안 걸면 OSM 이 Electron UA 를
+    // 차단해서 지도가 "Access blocked" 타일로 덮인다.
+    applyOsmTileUserAgent(session.defaultSession, app.getVersion());
     openDatabase();
     registerIpc();
     buildMenu();
