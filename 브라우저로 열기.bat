@@ -1,0 +1,67 @@
+@echo off
+setlocal
+cd /d "%~dp0"
+
+rem ==========================================================
+rem  Route Viewer - browser mode launcher
+rem
+rem  Why this exists: opening src\index.html straight from Explorer
+rem  (file://) makes the browser request map tiles with no Referer
+rem  (Origin: null). OSM's tile usage policy blocks such requests and
+rem  returns an "Access blocked" 403 image, so the map ends up covered
+rem  in yellow hazard stripes. Over localhost the Referer is present and
+rem  real tiles come back. Measured: blocked 6,987 B / real tile 43,121 B.
+rem
+rem  Server settings (HOST etc.) are deliberately left alone - other
+rem  devices may rely on the existing sync behaviour. Only the URL we
+rem  open uses 127.0.0.1, which is what puts a Referer on tile requests.
+rem
+rem  This file is ASCII on purpose: cmd.exe parses batch files byte by
+rem  byte in the active code page, so non-ASCII text here gets read as
+rem  commands and the script breaks.
+rem ==========================================================
+
+set "PORT=8080"
+set "URL=http://127.0.0.1:%PORT%/"
+
+rem node: prefer PATH, fall back to the portable node in tooling\
+set "NODE=node"
+where node >nul 2>nul
+if errorlevel 1 set "NODE=%~dp0tooling\node-v24.19.0-win-x64\node.exe"
+if /i not "%NODE%"=="node" if not exist "%NODE%" (
+  echo [ERROR] Node.js not found. Install Node.js, then run this again.
+  pause
+  exit /b 1
+)
+
+rem already running? then just open the browser
+netstat -an | findstr /c:":%PORT% " | findstr /i "LISTENING" >nul
+if not errorlevel 1 (
+  echo Server is already running. Opening %URL%
+  start "" "%URL%"
+  exit /b 0
+)
+
+echo Starting server...
+start "Route Viewer server - close this window to stop it" "%NODE%" server.js
+
+rem wait for the port to accept connections, then open the browser
+set /a tries=0
+:wait
+set /a tries+=1
+netstat -an | findstr /c:":%PORT% " | findstr /i "LISTENING" >nul
+if not errorlevel 1 goto ready
+if %tries% geq 20 goto failed
+ping -n 2 127.0.0.1 >nul
+goto wait
+
+:ready
+echo Opening %URL%
+start "" "%URL%"
+exit /b 0
+
+:failed
+echo [ERROR] The server did not start within 20 seconds.
+echo Check the "Route Viewer server" window for the reason.
+pause
+exit /b 1
