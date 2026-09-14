@@ -22,7 +22,11 @@ rem  commands and the script breaks.
 rem ==========================================================
 
 set "PORT=8080"
-set "URL=http://127.0.0.1:%PORT%/"
+rem Must be /src/index.html, not "/". The server does serve src\index.html at
+rem "/", but then the browser resolves the page's relative links against "/",
+rem so css/style.css becomes /css/style.css and 404s - the page loads with no
+rem styling at all. /src/index.html makes those relative links resolve right.
+set "URL=http://127.0.0.1:%PORT%/src/index.html"
 
 rem node: prefer PATH, fall back to the portable node in tooling\
 set "NODE=node"
