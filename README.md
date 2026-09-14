@@ -110,9 +110,14 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
   ① 줌 단계별 타일 묶음을 z-index 순서로(이전 줌 단계의 확대된 타일이 위에 겹치지 않게), 화면과 같은 CSS filter
   (`.leaflet-tile-pane`의 흑백·밝기)를 걸어서 ② 그 위에 Leaflet Canvas Layer(`preferCanvas` — 칸·원·경계선 전부)
   ③ 지도 저작권 표시를 글자로. 화면 배율(`devicePixelRatio`)만큼 선명하게 만듭니다.
-  - 배경 타일(`tile.openstreetmap.org`)은 `Access-Control-Allow-Origin: *`를 보내므로 누적 지도 타일을
-    `crossOrigin:'anonymous'`로 받아 캔버스가 오염되지 않습니다. 타일 서버를 CORS를 허용하지 않는 곳으로 바꾸면
-    "CORS를 허용하지 않아 이미지를 만들 수 없어요" 오류가 납니다.
+  - 배경 타일(`basemaps.cartocdn.com` — CARTO Voyager, OSM 데이터로 렌더한 키 없는 타일)은
+    `Access-Control-Allow-Origin: *`를 보내므로 누적 지도 타일을 `crossOrigin:'anonymous'`로 받아 캔버스가
+    오염되지 않습니다. 타일 서버를 CORS를 허용하지 않는 곳으로 바꾸면 "CORS를 허용하지 않아 이미지를 만들 수
+    없어요" 오류가 납니다.
+  - **OSM 공식 타일 서버(`tile.openstreetmap.org`)는 쓰지 않습니다.** 자원봉사 운영이라 타일 사용 정책에 따라
+    브라우저로 식별되지 않는 앱(Electron 포함)을 차단하고, 그때 타일 대신 "Access blocked" 403 이미지를
+    돌려줍니다(응답에 `x-blocked: Access denied` 헤더). 지도가 노란 빗금 + Access blocked 타일로 덮이면
+    타일 소스가 OSM으로 되돌아갔는지 `src/js/core.js`의 `addNoKeyOsmTileLayer()`를 확인하세요.
   - `ctx.filter`를 지원하지 않는 브라우저(Safari)에서는 배경 지도가 흑백 필터 없이 원본 색으로 저장됩니다.
 - **포함**: 지금 중심·줌·범위, 선택 구역, 날짜 범위, 밀도 지도 또는 Coverage Map(방문/미방문 칸, 적용 완료된 수동
   방문·미방문·제외 상태), 구역 경계, 배경 지도 타일, 지도 저작권 표시.
@@ -320,7 +325,7 @@ route-viewer/
 - **`release/win-unpacked`의 패키지 앱은 3.1.1**이라 날짜 필터·지도 캡처가 들어 있지 않습니다(그 `app.asar`에는
   날짜 입력칸과 `fromDate` 조건이 없음). 3.1.2 설치 파일은 이번에 빌드하지 않았습니다 — `npm run dist`가 필요합니다.
 - 데스크톱 앱의 지도 캡처는 창보다 큰 지도면 보이는 부분만 저장됩니다(브라우저 모드는 지도 전체).
-  브라우저 모드 캡처는 배경 타일 서버의 CORS 허용(현재 OSM은 허용)에 기대고, Safari에서는 타일 흑백 필터가 빠집니다.
+  브라우저 모드 캡처는 배경 타일 서버의 CORS 허용(현재 CARTO는 허용)에 기대고, Safari에서는 타일 흑백 필터가 빠집니다.
 - **지역별 Coverage 요약 패널이 비어 있습니다.** `index.html`에 `#coverage-summary` 자리가 있고 E2E도 이 요약을
   확인하지만, 현재 코드에는 이 영역을 채우는 함수가 없습니다(선택한 한 구역의 상세 패널 `#coverage-detail`만 동작).
   그래서 E2E의 "요약에 강남 Coverage %가 표시된다" 1건은 이번 변경 전 코드에서도 실패합니다.

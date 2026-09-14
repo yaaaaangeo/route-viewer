@@ -37,14 +37,20 @@ const VEHICLE_STORAGE_PLACE={
   lng:127.03873445954,
 };
 
-// extraOptions: 누적 지도는 {crossOrigin:'anonymous'}를 넘긴다 — OSM 타일 서버가
+// 배경 타일은 CARTO Voyager(OSM 데이터로 렌더한 무료·키 없는 타일)를 쓴다.
+// 왜 tile.openstreetmap.org 를 안 쓰나: OSM 공식 타일 서버는 자원봉사 운영이라
+// 타일 사용 정책(operations.osmfoundation.org/policies/tiles)에 따라 앱을 차단한다 —
+// Electron 앱처럼 브라우저로 식별되지 않는 클라이언트에는 타일 대신 "Access blocked"
+// 403 이미지가 오고, 응답에 `x-blocked: Access denied` 헤더가 붙는다(실제로 겪은 회귀:
+// 지도 전체가 노란 빗금 + Access blocked 타일로 덮였다).
+// extraOptions: 누적 지도는 {crossOrigin:'anonymous'}를 넘긴다 — CARTO 타일도
 // Access-Control-Allow-Origin:* 를 보내므로, CORS로 받은 타일은 브라우저 모드 지도 캡처
 // (캔버스 합성)에 그려도 캔버스가 오염되지 않는다.
 function addNoKeyOsmTileLayer(targetMap,extraOptions){
-  return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    subdomains:'abc',
-    maxZoom:19,
-    attribution:'© OpenStreetMap contributors',
+  return L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',{
+    subdomains:'abcd',
+    maxZoom:20,
+    attribution:'© OpenStreetMap contributors © CARTO',
     ...(extraOptions||{}),
   }).addTo(targetMap);
 }

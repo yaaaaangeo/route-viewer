@@ -5,7 +5,8 @@
 //  Electron을 그냥 "브라우저"로 쓴다: preload 없는 창으로 http://127.0.0.1:<port>/src/index.html
 //  을 열면 window.routeAPI가 없어서 앱이 브라우저 모드(IndexedDB)로 돈다. 캡처는 캔버스 합성
 //  경로를 타고, 다운로드는 will-download로 임시 폴더에 받아 픽셀을 검사한다.
-//  (배경 지도 타일은 인터넷의 tile.openstreetmap.org에서 CORS로 받는다)
+//  (배경 지도 타일은 인터넷의 basemaps.cartocdn.com에서 CORS로 받는다 — OSM 공식 타일 서버는
+//   앱을 차단해서 "Access blocked" 403 이미지가 온다)
 //
 //  실행:  npm run test:browser-capture
 // ══════════════════════════════════════════════════════════
