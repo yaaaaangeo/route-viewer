@@ -120,11 +120,20 @@ OSM 공식 타일 서버는 자원봉사가 운영해서 [타일 사용 정책](
 **앱을 식별할 수 있는 User-Agent** 를 요구합니다. Electron 기본 UA 로 요청하면 타일 대신 "Access blocked" 403
 이미지가 오고(응답에 `x-blocked: Access denied` 헤더) 지도가 노란 빗금으로 덮입니다. 그래서 데스크톱 앱은
 `electron/osm-tile-ua.js` 의 `applyOsmTileUserAgent()` 로 **타일 요청에만** UA 를 바꿔서 보냅니다
-(Overpass 등 다른 요청은 건드리지 않습니다). 브라우저 모드는 브라우저 자신의 UA 로 나가서 그대로 통과합니다.
+(Overpass 등 다른 요청은 건드리지 않습니다).
+
+**브라우저 모드는 브라우저가 OSM 에 직접 가지 않습니다.** `server.js` 가 `/tiles/z/x/y.png` 로 타일을 대신 받아
+주는 프록시를 둡니다 — 앱 식별 UA 로 OSM 에 요청하고, 받은 타일은 `tile-cache/`(git 제외)에 7일간 캐시합니다.
+브라우저가 직접 받던 때에는 **새 프로필 Edge 는 통과하는데 사용자 PC 의 Edge 는 "Access blocked"** 를 받는 일이
+있었고, 그 차이(프로필·캐시·Referer 등)는 밖에서 관찰도 수정도 할 수 없었습니다. 프록시를 거치면 브라우저 상태와
+무관해집니다. OSM 이 거절하면(`x-blocked` 헤더 · 4xx/5xx · 이미지 아닌 응답) 캐시하지 않고 502 를 주며 서버 창에
+`[tiles] OSM 이 타일 z/x/y 를 거절: …` 로그를 남깁니다(10초에 한 줄로 묶음). 예전에 받아 둔 타일이 있으면 오래됐어도
+그걸 줍니다. 프록시가 못 준 칸만 화면이 OSM 에서 직접 받아 봅니다.
 
 실측값(강남 z14 타일): 차단 이미지 **6,987바이트** / 정상 타일 **43,121바이트**.
 
-- 지도가 노란 빗금 + "Access blocked" 로 덮이면 → UA 주입이 빠진 것입니다.
+- 지도가 노란 빗금 + "Access blocked" 로 덮이면 → 데스크톱은 UA 주입이 빠진 것, 브라우저 모드는 서버 창의
+  `[tiles]` 로그부터 봅니다(로그가 없으면 화면이 `/tiles` 를 쓰지 않는 것 — 서버 없이 연 경우 등).
 - 타일에 **"API KEY REQUIRED"** 워터마크가 찍히면 → 키가 필요한 상용 타일(CARTO 등)로 바뀐 것입니다.
 - **둘 다 HTTP 200 으로 옵니다.** 상태 코드만 확인해서는 절대 못 잡고, 타일 그림을 직접 봐야 압니다
   (실제로 겪은 회귀: 200 만 보고 CARTO 로 바꿨다가 지도 전체에 워터마크가 찍혔습니다).
@@ -271,11 +280,10 @@ npm run test:browser-capture   # 브라우저 모드 지도 캡처 E2E (Electron
 기다렸다가 브라우저를 엽니다. 서버가 이미 떠 있으면 브라우저만 엽니다. 서버 설정(`HOST` 등)은 바꾸지 않고
 접속 주소만 `127.0.0.1` 을 씁니다.
 
-> ⚠️ **`src\index.html` 을 탐색기에서 더블클릭해 `file://` 로 열면 배경 지도가 나오지 않습니다.**
-> `file://` 은 Referer 없이(`Origin: null`) 타일을 요청하고, OSM 은 타일 사용 정책에 따라 그런 요청에
-> "Access blocked" 403 이미지를 돌려줍니다(실측: 차단 **6,987바이트** / 정상 **43,121바이트**).
-> 페이지 JS 로는 Referer 도 User-Agent 도 만들 수 없어서 **코드로는 해결할 수 없습니다** — localhost 로 접속해야 합니다.
-> 데스크톱 앱(Electron)은 이 문제가 없습니다(`electron/osm-tile-ua.js` 가 UA 를 붙여줍니다).
+> `src\index.html` 을 탐색기에서 더블클릭해 `file://` 로 열면 서버를 거치지 않으므로 타일 프록시·서버 동기화를 쓰지
+> 못하고, 타일을 브라우저가 OSM 에서 직접 받습니다 — 그 브라우저 상태에 따라 차단될 수 있습니다. 브라우저 모드는
+> 런처로 여세요. (예전 README 에 "file:// 은 Referer 가 없어 원리적으로 차단된다"고 적었던 것은 curl 로 헤더를 흉내 낸
+> 측정에서 나온 틀린 결론이었습니다 — 실제 Edge 는 file:// 에서도 통과했습니다.)
 
 ### 테스트
 
@@ -292,11 +300,12 @@ npm run test:browser-capture   # 브라우저 모드 지도 캡처 E2E (Electron
 | `tests/accum-date-filter-test.js` | 날짜 범위별 밀도 지도·통계·Coverage 방문/%/Depth, 날짜 캐시 키·Geometry 재사용·debounce·늦은 결과 차단, SQLite↔IndexedDB 동등성 | 50 |
 | `tests/map-capture-test.js` | 캡처 파일명·영역 계산, 버튼 활성 조건·IPC 요청·취소/실패·중복 클릭·pending 제외·UI 복원·날짜 변경 직후, 브라우저 모드 합성(타일 z-index 순서·페이드 투명도·CSS filter·다운로드/저장 창·CORS 오류) | 51 |
 | `tests/collection-progress-test.js` | 수집 시간 규칙(90초 공백·차량/날짜 합산·중복)과 주행 시간(첫~마지막 기록), 진행률·목표 초과·주행 기준 참고값, 재등록·삭제·복원·동기화·재시작·요약 마이그레이션, SQLite↔IndexedDB(실제 `core.js` 요약 함수) 동등성, 실제 주행기록의 주행 시간 = 단순 계산 합, 달력 표·달력 칸·일자 요약·월 이동 시 재계산 없음 — 입력·기대·실제값 출력 | 55 |
-| `npm run test:browser-capture` → `tests/browser-capture-e2e.js` | 실제 브라우저 모드(`server.js` + IndexedDB, preload 없는 창) — 달력 수집 현황 표, 지도 캡처 → 다운로드된 PNG 크기·타일·흑백 필터·밀도 원·빨간 칸 픽셀 검사 (인터넷 필요) | 14 |
+| `tests/tile-proxy-test.js` | `server.js` 타일 프록시 — 가짜 OSM 서버로: 앱 식별 UA·서브도메인, MISS→HIT 캐시, 동시 요청 1회로 합침, 차단 이미지(200+`x-blocked`)·403 → 502·캐시 안 함·거절 로그, 차단 시 오래된 캐시(STALE), 잘못된 좌표·경로 404 (인터넷 불필요) | 15 |
+| `npm run test:browser-capture` → `tests/browser-capture-e2e.js` | 실제 브라우저 모드(`server.js` + IndexedDB, preload 없는 창) — 달력 수집 현황 표, 화면 타일이 `/tiles` 프록시로 오고 차단 이미지가 아님(픽셀), 지도 캡처 → 다운로드된 PNG 크기·타일·흑백 필터·밀도 원·빨간 칸 픽셀 검사 (인터넷 필요) | 16 |
 | `node tests/server-sync-test.js` | `server.js` 공유 저장 병합(수동 셀 병합 포함) — 포트 8099로 서버를 띄움 | 25 |
 | E2E (`tests/e2e-driver.js`) | 실제 Electron 창을 띄워 화면 조작 — 달력 수집 현황 표(날짜 삭제 후 갱신), 날짜 키보드 입력, 실제 `capturePage` PNG 저장(Coverage·Density, 픽셀 검사) 포함 | 133 |
 
-`npm test` 합계 447개(11개 파일). 최근 실행: 브라우저 모드 E2E 14/14 통과, 데스크톱 E2E 132개 통과·1개 실패
+`npm test` 합계 462개(12개 파일). 최근 실행: 브라우저 모드 E2E 16/16 통과, 데스크톱 E2E 132개 통과·1개 실패
 (건물 데이터를 못 받은 날에는 탭 복귀 재사용 검사 1개를 설계상 건너뜀) —
 실패 1건은 아래 알려진 이슈의 "지역별 Coverage 요약 패널"이며, Overpass 경고가 콘솔 에러로 집계돼 종료 코드는 1입니다. `tests/manual-cells-storage-test.js`는 브라우저 IndexedDB 백엔드를
 `tests/helpers/fake-indexeddb.js`(테스트 전용 최소 구현)로 Node에서 실행하고,

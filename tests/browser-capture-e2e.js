@@ -5,9 +5,9 @@
 //  Electron을 그냥 "브라우저"로 쓴다: preload 없는 창으로 http://127.0.0.1:<port>/src/index.html
 //  을 열면 window.routeAPI가 없어서 앱이 브라우저 모드(IndexedDB)로 돈다. 캡처는 캔버스 합성
 //  경로를 타고, 다운로드는 will-download로 임시 폴더에 받아 픽셀을 검사한다.
-//  (배경 지도 타일은 인터넷의 tile.openstreetmap.org 에서 CORS로 받는다. OSM 은 앱을 식별하는
-//   User-Agent 를 요구해서, Electron 을 브라우저 삼아 도는 이 테스트는 창 세션에
-//   applyOsmTileUserAgent() 를 걸어야 타일이 온다 — 안 걸면 "Access blocked" 403 이미지가 온다)
+//  (배경 지도 타일은 server.js 의 타일 프록시(/tiles)를 거쳐 인터넷의 tile.openstreetmap.org 에서
+//   받는다 — 인터넷 필요. 프록시가 못 준 칸만 화면이 OSM 에서 직접 받으므로, 그 경우에 대비해
+//   창 세션에도 applyOsmTileUserAgent() 를 걸어 둔다)
 //
 //  실행:  npm run test:browser-capture
 // ══════════════════════════════════════════════════════════
@@ -54,7 +54,7 @@ app.whenReady().then(async () => {
   const dlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rv-browser-capture-'));
   const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     cwd: ROOT,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(PORT), HOST: '127.0.0.1' },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(PORT), HOST: '127.0.0.1', ROUTE_VIEWER_TILE_CACHE: path.join(dlDir, 'tile-cache') },
     stdio: 'pipe',
   });
   server.stderr.on('data', d => console.error('[server]', String(d)));
@@ -134,6 +134,8 @@ app.whenReady().then(async () => {
     check('배경 타일이 차단 이미지가 아니다(OSM 타일 정책 User-Agent 통과)',
       tileProbe.ok && tileProbe.colors > 40,
       tileProbe.ok ? `${tileProbe.size} · ${tileProbe.colors}색 · ${tileProbe.url}` : tileProbe.reason);
+    check('브라우저 모드 배경 타일은 server.js 타일 프록시(/tiles)로 받는다(브라우저가 OSM 에 직접 가지 않음)',
+      tileProbe.ok && tileProbe.url.startsWith(`${BASE}/tiles/`), tileProbe.ok ? tileProbe.url : tileProbe.reason);
 
     // ── 밀도 지도 ──
     const dl1 = nextDownload();

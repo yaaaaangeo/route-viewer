@@ -4,6 +4,8 @@ const path = require('path');
 
 const { RouteDatabase, dedupeHistory } = require('./electron/database.js');
 const CoverageGrid = require('./src/js/coverage-grid.js');
+const { osmTileUserAgent } = require('./electron/osm-tile-ua.js');
+const APP_VERSION = require('./package.json').version;
 
 const ROOT = __dirname;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -292,8 +294,136 @@ async function handleUpdates(req, res) {
   }
 }
 
+// ══════════════════════════════════════════════════════════
+//  배경 지도 타일 프록시 — 브라우저 모드 화면은 OSM 에 직접 가지 않고 이 서버의
+//  /tiles/z/x/y.png 로 타일을 받는다.
+//
+//  왜: 브라우저가 tile.openstreetmap.org 에 직접 요청하면, 그 브라우저의 Referer·프로필·
+//  캐시 상태에 따라 OSM 이 "Access blocked" 403 이미지를 돌려주는 일이 실제로 있었다
+//  (새 프로필 Edge 는 통과하는데 사용자 PC 의 Edge 는 막혔고, 밖에서는 원인을 볼 수 없었다).
+//  서버가 대신 받으면 요청은 항상 앱을 식별하는 User-Agent(OSM 타일 정책이 요구하는 것)로
+//  나가고, 받은 타일은 디스크에 캐시해서 OSM 에 같은 타일을 반복 요청하지 않는다(정책 권장).
+//
+//  OSM 이 거절하면(x-blocked 헤더 / 4xx·5xx / 이미지가 아닌 응답) 캐시하지 않고 서버 창에
+//  로그를 남긴다 — 다시 막히면 추측하지 말고 이 로그부터 본다. 예전에 받아 둔 타일이 있으면
+//  오래됐어도 그걸 준다.
+// ══════════════════════════════════════════════════════════
+const TILE_UPSTREAM = process.env.ROUTE_VIEWER_TILE_UPSTREAM || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const TILE_CACHE_DIR = process.env.ROUTE_VIEWER_TILE_CACHE || path.join(ROOT, 'tile-cache');
+const TILE_MAX_ZOOM = 19;
+const TILE_FRESH_MS = 7 * 24 * 60 * 60 * 1000; // 이보다 오래된 캐시는 다시 받아 본다
+const TILE_FETCH_TIMEOUT_MS = 15000;
+const tileInflight = new Map(); // 같은 타일 동시 요청 → OSM 에는 한 번만
+let tileRefusalLog = { last: 0, suppressed: 0 };
+
+function parseTilePath(pathname) {
+  const m = /^\/tiles\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/.exec(pathname);
+  if (!m) return null;
+  const z = Number(m[1]);
+  const x = Number(m[2]);
+  const y = Number(m[3]);
+  const n = 2 ** z;
+  if (z > TILE_MAX_ZOOM || x >= n || y >= n) return null;
+  return { z, x, y };
+}
+
+// 지도 한 화면이 타일 수십 장이라, 막히면 같은 로그가 쏟아지지 않게 10초에 한 줄로 묶는다
+function logTileRefused(t, detail) {
+  const now = Date.now();
+  if (now - tileRefusalLog.last < 10000) { tileRefusalLog.suppressed++; return; }
+  const more = tileRefusalLog.suppressed ? ` (그 사이 ${tileRefusalLog.suppressed}건 더)` : '';
+  console.warn(`[tiles] OSM 이 타일 ${t.z}/${t.x}/${t.y} 를 거절: ${detail}${more}`);
+  tileRefusalLog = { last: now, suppressed: 0 };
+}
+
+async function fetchTileUpstream(t) {
+  const url = TILE_UPSTREAM
+    .replace('{s}', 'abc'[(t.x + t.y) % 3])
+    .replace('{z}', t.z).replace('{x}', t.x).replace('{y}', t.y);
+  const res = await fetch(url, {
+    headers: { 'User-Agent': osmTileUserAgent(APP_VERSION) },
+    signal: AbortSignal.timeout(TILE_FETCH_TIMEOUT_MS),
+  });
+  const body = Buffer.from(await res.arrayBuffer());
+  const blocked = res.headers.get('x-blocked');
+  const type = res.headers.get('content-type') || '';
+  // 차단 이미지는 HTTP 200 + image/png 로도 오므로 상태 코드만 보면 안 된다 — x-blocked 로 가린다
+  if (!res.ok || blocked || !type.startsWith('image/')) {
+    return { ok: false, detail: `HTTP ${res.status}${blocked ? ` · x-blocked: ${blocked}` : ''}${type.startsWith('image/') ? '' : ` · ${type || 'no content-type'}`}` };
+  }
+  return { ok: true, body };
+}
+
+async function writeTileCache(file, body) {
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tmp, body);
+    await fs.rename(tmp, file);
+  } catch (err) {
+    // 캐시 쓰기 실패는 화면에 영향 없음 — 타일은 이미 받았다
+    console.warn(`[tiles] 캐시 저장 실패: ${err.message}`);
+  }
+}
+
+function sendTile(res, body, cacheStatus) {
+  send(res, 200, body, {
+    'Content-Type': 'image/png',
+    'Cache-Control': 'public, max-age=86400',
+    'X-Tile-Cache': cacheStatus,
+  });
+}
+
+async function handleTiles(req, res) {
+  const t = parseTilePath(new URL(req.url, 'http://localhost').pathname);
+  if (!t) {
+    send(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+    return;
+  }
+  const file = path.join(TILE_CACHE_DIR, String(t.z), String(t.x), `${t.y}.png`);
+
+  let stale = false;
+  try {
+    const st = await fs.stat(file);
+    if (Date.now() - st.mtimeMs < TILE_FRESH_MS) {
+      sendTile(res, await fs.readFile(file), 'HIT');
+      return;
+    }
+    stale = true;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+
+  const key = `${t.z}/${t.x}/${t.y}`;
+  let job = tileInflight.get(key);
+  if (!job) {
+    job = (async () => {
+      const result = await fetchTileUpstream(t).catch(err => ({ ok: false, detail: err.message }));
+      if (result.ok) await writeTileCache(file, result.body);
+      return result;
+    })().finally(() => tileInflight.delete(key));
+    tileInflight.set(key, job);
+  }
+  const result = await job;
+
+  if (result.ok) {
+    sendTile(res, result.body, 'MISS');
+    return;
+  }
+  logTileRefused(t, result.detail);
+  if (stale) {
+    sendTile(res, await fs.readFile(file), 'STALE');
+    return;
+  }
+  send(res, 502, `tile unavailable: ${result.detail}`, { 'Content-Type': 'text/plain; charset=utf-8' });
+}
+
 const server = http.createServer(async (req, res) => {
   try {
+    if (req.url.startsWith('/tiles/')) {
+      await handleTiles(req, res);
+      return;
+    }
     if (req.url === '/api/route-data' || req.url.startsWith('/api/route-data?')) {
       await handleApi(req, res);
       return;

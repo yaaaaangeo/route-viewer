@@ -42,22 +42,45 @@ const VEHICLE_STORAGE_PLACE={
 // 그렇지 않은 클라이언트에는 타일 대신 "Access blocked" 403 이미지를 돌려준다(응답에
 // `x-blocked: Access denied` 헤더). Electron 기본 UA가 딱 이 차단 대상이라, 데스크톱 앱은
 // electron/osm-tile-ua.js 의 applyOsmTileUserAgent() 로 타일 요청 UA를 바꿔서 보낸다.
-// 브라우저 모드는 브라우저 자신의 UA로 나가므로 그대로 통과한다.
+// 브라우저 모드(server.js 로 띄운 http 화면)는 OSM 에 직접 가지 않고 같은 서버의 타일 프록시
+// (/tiles/z/x/y.png)로 받는다 — 브라우저가 직접 요청하면 그 브라우저의 Referer·프로필 상태에
+// 따라 차단되는 일이 실제로 있었고(새 프로필 Edge 는 통과, 사용자 PC 의 Edge 는 차단), 프록시는
+// 항상 앱 식별 UA 로 요청하고 캐시한다. 프록시가 그 칸을 못 주면 그 칸만 OSM 에서 직접 받는다.
 //
-// 지도가 노란 빗금 + Access blocked 타일로 덮이면 UA 주입이 빠진 것이다.
+// 지도가 노란 빗금 + Access blocked 타일로 덮이면: 데스크톱은 UA 주입, 브라우저 모드는
+// server.js 창의 "[tiles] OSM 이 타일 … 를 거절" 로그부터 본다.
 // 키가 필요한 상용 타일(CARTO 등)로 바꾸면 타일에 "API KEY REQUIRED" 워터마크가 찍힌다 —
 // 둘 다 HTTP 200으로 오기 때문에 상태 코드만 봐서는 못 잡고, 타일 그림을 봐야 안다.
 //
 // extraOptions: 누적 지도는 {crossOrigin:'anonymous'}를 넘긴다 — OSM 타일 서버가
 // Access-Control-Allow-Origin:* 를 보내므로, CORS로 받은 타일은 브라우저 모드 지도 캡처
 // (캔버스 합성)에 그려도 캔버스가 오염되지 않는다.
+const OSM_DIRECT_TILE_URL='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+function osmTileUrlTemplate(){
+  const loc=typeof location!=='undefined'?location:null;
+  const desktop=typeof window!=='undefined'&&!!window.routeAPI;
+  return loc&&/^https?:$/.test(loc.protocol)&&!desktop?'/tiles/{z}/{x}/{y}.png':OSM_DIRECT_TILE_URL;
+}
+
 function addNoKeyOsmTileLayer(targetMap,extraOptions){
-  return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  const url=osmTileUrlTemplate();
+  const layer=L.tileLayer(url,{
     subdomains:'abc',
     maxZoom:19,
     attribution:'© OpenStreetMap contributors',
     ...(extraOptions||{}),
   }).addTo(targetMap);
+  if(url!==OSM_DIRECT_TILE_URL){
+    // 프록시가 없는 서버로 띄웠거나 프록시가 그 타일을 못 받았으면(502) 그 칸만 OSM 에서 직접 받는다
+    layer.on('tileerror',e=>{
+      const img=e.tile, c=e.coords;
+      if(!img||!c||img.getAttribute('data-osm-direct')) return;
+      img.setAttribute('data-osm-direct','1');
+      img.src=L.Util.template(OSM_DIRECT_TILE_URL,{s:'abc'[Math.abs(c.x+c.y)%3],z:c.z,x:c.x,y:c.y});
+    });
+  }
+  return layer;
 }
 
 function initMap(){

@@ -10,6 +10,9 @@ database/*.db
 database/*.db-*
 route-viewer-shared-data.json
 
+# server.js 타일 프록시가 받아 둔 배경 지도 타일 캐시
+tile-cache/
+
 node_modules/
 
 # 개인 주행 기록·백업 — 실제 GPS 이동 기록이 담겨 있어 git에 올리지 않는다

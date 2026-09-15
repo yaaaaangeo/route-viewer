@@ -5,16 +5,17 @@ cd /d "%~dp0"
 rem ==========================================================
 rem  Route Viewer - browser mode launcher
 rem
-rem  Why this exists: opening src\index.html straight from Explorer
-rem  (file://) makes the browser request map tiles with no Referer
-rem  (Origin: null). OSM's tile usage policy blocks such requests and
-rem  returns an "Access blocked" 403 image, so the map ends up covered
-rem  in yellow hazard stripes. Over localhost the Referer is present and
-rem  real tiles come back. Measured: blocked 6,987 B / real tile 43,121 B.
+rem  Why this exists: browser mode needs server.js running. Besides the
+rem  page and sync, server.js proxies the background map tiles
+rem  (/tiles/z/x/y.png): it fetches them from OSM with an identifying
+rem  User-Agent and caches them in tile-cache\, so the browser never
+rem  talks to OSM directly. When this PC's Edge fetched OSM tiles itself
+rem  it got the "Access blocked" 403 image, while a fresh Edge profile
+rem  did not - a difference that cannot be seen or fixed from outside.
+rem  If tiles get refused, the server window logs "[tiles] ...".
 rem
 rem  Server settings (HOST etc.) are deliberately left alone - other
-rem  devices may rely on the existing sync behaviour. Only the URL we
-rem  open uses 127.0.0.1, which is what puts a Referer on tile requests.
+rem  devices may rely on the existing sync behaviour.
 rem
 rem  This file is ASCII on purpose: cmd.exe parses batch files byte by
 rem  byte in the active code page, so non-ASCII text here gets read as
