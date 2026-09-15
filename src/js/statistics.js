@@ -259,8 +259,69 @@ async function renderStatsView(){
   cardsHTML.push(distCardHTML('장소',placeDist,total,showPct,barColor));
   cardsHTML.push(distCardHTML('도로종류',roadDist,total,showPct,barColor));
   cardsHTML.push(distCardHTML('날씨',weatherDist,total,showPct,barColor));
-  cardsHTML.push(distCardHTML('시간대',timeDist,total,showPct,barColor));
+  // 파일의 '시간대' 열 원본(nav-app이 넣은 주간/일몰) — 아래 교통 시간대·조도 조건과는 다른, 그대로 보존하는 값
+  cardsHTML.push(distCardHTML('파일 원본 시간대',timeDist,total,showPct,barColor));
+
+  // ── 교통 시간대 · 조도 조건 · 요일 — 날짜 요약의 조건 칸을 더한다(SQLite/IndexedDB 같은 함수) ──
+  let summaries=[];
+  try{ summaries=await RouteDB.listDateSummaries(); }
+  catch(err){ console.warn('[경로뷰어] 날짜 요약 조회 실패:',err); }
+  if(token!==statsRenderToken) return;
+  cardsHTML.push(...conditionStatsCardsHTML(summaries,filter));
 
   regionGridEl.innerHTML=statsMode==='region'?cardsHTML.join(''):'';
   vehicleGridEl.innerHTML=statsMode==='vehicle'?cardsHTML.join(''):'';
+}
+
+// 통계 탭의 조건 카드들. filter 는 statsFilter()({zone} 또는 {vehicleLike}) — 기록 수 카드들과 같은 조건.
+function conditionStatsCardsHTML(summaries,filter){
+  const signature=currentClassificationSignature();
+  const agg=groupBy=>ConditionStats.aggregate(summaries,{filter,groupBy,signature});
+  const traffic=agg(['trafficPeriod']);
+  const light=agg(['lightCondition']);
+  const weekday=agg(['weekdayType']);
+  const cards=[];
+  if(traffic.staleDates>0){
+    cards.push(`<div class="dist-card cond-stale-card" style="grid-column:1/-1;"><div class="ir-note warn" style="margin:0;">분류 기준이 바뀐 뒤 아직 다시 분류하지 않은 날짜가 ${fmtNum(traffic.staleDates)}일 있어요. 아래 교통 시간대·조도 분포에는 그 날짜가 예전 기준으로 섞여 있어요 — [설정] 탭에서 재분류해 주세요.</div></div>`);
+  }
+  const card=(title,rows,dim)=>`<div class="dist-card cond-card" data-axis="${dim}"><div class="dc-title">${title}</div>${conditionDistRowsHTML(rows,dim)}</div>`;
+  cards.push(card('교통 시간대 · 수집 시간 / 기록 수',traffic.rows,'trafficPeriod'));
+  cards.push(card('조도 조건 · 수집 시간 / 기록 수',light.rows,'lightCondition'));
+  cards.push(card('평일 · 주말 · 수집 시간 / 기록 수',weekday.rows,'weekdayType'));
+  cards.push(`<div class="dist-card cond-card"><div class="dc-title">분류 기준</div><div class="cond-note">교통 시간대는 고정 시각 구간(설정 탭에서 수정), 조도 조건은 날짜·GPS로 계산한 일출·일몰 ±${currentClassificationConfig().sunriseWindowMinutes}/${currentClassificationConfig().sunsetWindowMinutes}분 기준이에요. 수집 시간은 90초 넘는 GPS 공백을 뺀 유효 수집 시간이에요.</div></div>`);
+
+  // 구역별(지역 모드) / 차량별(차량 모드) × 교통 시간대 · 조도 조건 — 수집 분
+  const rowDim=statsMode==='region'?'zone':'vehicle';
+  cards.push(conditionMatrixCardHTML(summaries,filter,rowDim,'trafficPeriod',signature));
+  cards.push(conditionMatrixCardHTML(summaries,filter,rowDim,'lightCondition',signature));
+  return cards;
+}
+
+function conditionMatrixCardHTML(summaries,filter,rowDim,colDim,signature){
+  const rows=ConditionStats.aggregate(summaries,{filter,groupBy:[rowDim,colDim],signature}).rows;
+  const rowLabel=v=>rowDim==='vehicle'?(normalizeVehicleLabel(v)||'정보 없음'):(v||'정보 없음');
+  // 차량은 '토레스 3호차' → '토레스 3호' 로 합친다(normalizeVehicleEntries 와 같은 규칙)
+  const table=new Map();
+  rows.forEach(r=>{
+    const rk=rowLabel(r[rowDim]);
+    if(!table.has(rk)) table.set(rk,new Map());
+    const cell=table.get(rk).get(r[colDim])||{sec:0,n:0};
+    cell.sec+=r.collectionSec; cell.n+=r.recordCount;
+    table.get(rk).set(r[colDim],cell);
+  });
+  const cols=ConditionStats.DIMENSION_ORDERS[colDim].filter(id=>id!==TimeConditions.UNKNOWN||rows.some(r=>r[colDim]===id));
+  const title=`${rowDim==='zone'?'구역':'차량'}별 ${colDim==='trafficPeriod'?'교통 시간대':'조도 조건'} · 수집 분`;
+  if(!table.size){
+    return `<div class="dist-card cond-card" style="grid-column:1/-1;"><div class="dc-title">${title}</div><div class="dc-empty">데이터 없음</div></div>`;
+  }
+  const head=cols.map(c=>`<th scope="col">${escapeHtml(ConditionStats.dimensionValueLabel(colDim,c))}</th>`).join('');
+  const body=[...table.entries()].sort((a,b)=>a[0].localeCompare(b[0],'ko')).map(([rk,m])=>
+    `<tr><th scope="row">${escapeHtml(rk)}</th>${cols.map(c=>{
+      const cell=m.get(c);
+      return cell?`<td class="mono" title="${fmtNum(cell.n)}개 기록">${fmtNum(Math.round(cell.sec/60))}</td>`:'<td class="mono cond-zero">0</td>';
+    }).join('')}</tr>`).join('');
+  return `<div class="dist-card cond-card cond-matrix-card" data-rows="${rowDim}" data-cols="${colDim}" style="grid-column:1/-1;">
+    <div class="dc-title">${title}</div>
+    <div class="cond-matrix-wrap"><table class="cond-matrix"><thead><tr><th scope="col">${rowDim==='zone'?'구역':'차량'}</th>${head}</tr></thead><tbody>${body}</tbody></table></div>
+  </div>`;
 }

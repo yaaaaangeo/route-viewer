@@ -117,6 +117,12 @@ function setTapeIndex(idx){
   document.getElementById('tape-speed').textContent=p.speed?(p.speed+' km/h'):'—';
   document.getElementById('tape-road').textContent=p.road||'—';
   document.getElementById('tape-idx').textContent=`${idx+1} / ${points.length}`;
+  // 이 지점의 조건 — 날짜 상세(DB)는 이미 분류값이 붙어 오고, 파일을 바로 연 경우는 같은 규칙으로 계산
+  const condEl=document.getElementById('tape-conditions');
+  if(condEl){
+    const cls=p.trafficPeriod?p:{...p,...TimeConditions.classifyRecord(p,currentClassificationConfig())};
+    condEl.innerHTML=conditionBadgesHTML(cls,['trafficPeriod','lightCondition','weekdayType','weather']);
+  }
   if(playheadMarker) playheadMarker.setLatLng([p.lat,p.lng]);
   if(map && !map._tapePanning){
     map.panTo([p.lat,p.lng],{animate:true,duration:.25});

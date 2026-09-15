@@ -256,6 +256,25 @@
     <div class="stats-section-title" style="margin-top:8px;">Coverage Depth 기준</div>
     <div class="ir-note" style="margin:0;">누적 지도의 "커버리지 갭 보기 → Coverage Depth 보기"에서 칸을 몇 등급으로 나눌지 정해요. 숫자를 바꾸면 바로 저장돼요.</div>
     <div id="settings-depth-tiers" class="settings-list"></div>
+
+    <!-- 교통 시간대 · 조도 조건 — 서로 다른 축이다. 판정 규칙은 js/time-conditions.js 한 곳 -->
+    <div class="stats-section-title" style="margin-top:8px;">교통 시간대</div>
+    <div class="ir-note" style="margin:0;">출근·점심·퇴근 같은 교통 흐름 기준의 고정 시각 구간이에요. 시작 시각은 포함하고 종료 시각은 제외해요(시작 ≤ 시각 &lt; 종료). 24시간이 빈틈·겹침 없이 정확히 한 번씩 들어가야 저장돼요. 종료를 시작보다 이르게 쓰면 자정을 넘는 구간이 되고, 24:00은 다음 날 00:00과 같아요.</div>
+    <div id="settings-traffic-periods" class="settings-list"></div>
+    <div id="traffic-period-errors" class="ir-note warn" style="display:none;margin:0;"></div>
+    <div class="settings-actions">
+      <button class="btn" type="button" id="traffic-period-save-btn" onclick="saveTrafficPeriodSettings()">저장</button>
+      <button class="btn ghost" type="button" id="traffic-period-default-btn" onclick="restoreDefaultTrafficPeriods()">기본값 복원</button>
+    </div>
+
+    <div class="stats-section-title" style="margin-top:8px;">조도 조건 (일출·일몰 전후 범위)</div>
+    <div class="ir-note" style="margin:0;">날짜와 GPS 위치로 그날의 일출·일몰 시각을 계산해요(한국 시간 +09:00). 일출·일몰 시각 ± 아래 분 안이면 "일출 전후"/"일몰 전후", 그 사이는 "주간", 나머지는 "야간"이에요. 날짜나 GPS가 없으면 "미분류"예요.</div>
+    <div id="settings-light-windows" class="settings-list"></div>
+    <div id="light-window-errors" class="ir-note warn" style="display:none;margin:0;"></div>
+    <div class="settings-actions">
+      <button class="btn" type="button" id="light-window-save-btn" onclick="saveLightWindowSettings()">저장</button>
+    </div>
+    <div id="classification-status" class="classification-status mono"></div>
   </div>
 
   <div id="error-box"></div>
@@ -287,6 +306,8 @@
           <div class="field">도로 <b id="tape-road">—</b></div>
           <div class="field">지점 <b id="tape-idx">0 / 0</b></div>
         </div>
+        <!-- 이 지점의 조건 — 교통 시간대와 조도는 서로 다른 축이라 따로 표시한다 -->
+        <div class="fields tape-conditions" id="tape-conditions"></div>
       </div>
       <div class="tape-track-wrap">
         <input type="range" id="tape" min="0" max="0" value="0" step="1"/>
@@ -329,6 +350,9 @@
 <script src="../vendor/xlsx/xlsx.full.min.js"></script>
 <script src="js/parser.js"></script>
 <script src="js/collection-stats.js"></script>
+<!-- 교통 시간대·조도·요일 분류 규칙(time-conditions)과 조건별 집계(condition-stats) — SQLite/IndexedDB/화면 공용 -->
+<script src="js/time-conditions.js"></script>
+<script src="js/condition-stats.js"></script>
 <script src="js/core.js"></script>
 <!-- 강남/서초 HD map 도로 데이터 — <script> 태그로 로드해서 각각
      window.HDMAP_GANGNAM_ROADS / window.HDMAP_SEOCHO_ROADS에 담는다.

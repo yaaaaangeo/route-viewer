@@ -36,7 +36,7 @@ const API_METHODS = [
   'getImportConflicts', 'listVehicles', 'saveVehicle', 'setVehicleActive', 'listZones', 'saveZone',
   'setZoneActive', 'getZoneManualCells', 'saveZoneManualCells', 'getSettings', 'setSettings',
   'getCellVisitCounts', 'getBackupHistory', 'setBackupHistory', 'buildBackupPayload',
-  'restoreBackupPayload', 'rebuildAllSummaries',
+  'restoreBackupPayload', 'rebuildAllSummaries', 'getClassificationStatus', 'reclassifySummaries',
 ];
 
 function createDesktopApi(db) {
@@ -54,7 +54,7 @@ function createDesktopApi(db) {
         throw new Error(f.message || `${name} 실패(테스트 주입)`);
       }
       // IPC 를 거친 것처럼 결과를 복사해서 넘긴다(참조 공유로 테스트가 우연히 통과하지 않게)
-      const res = db[name === 'stats' ? 'getStats' : name](...args);
+      const res = await db[name === 'stats' ? 'getStats' : name](...args);
       return res === undefined ? res : structuredClone(res);
     };
   });
@@ -74,7 +74,7 @@ function baseContext(extra) {
       removeItem: k => store.delete(k),
     },
     haversine,
-    buildDaySummaryFromPoints: rows => buildDaySummary(rows),
+    buildDaySummaryFromPoints: (rows, classification) => buildDaySummary(rows, classification),
     dedupeBackupHistory: dedupeHistory,
     ...extra,
   };
@@ -96,6 +96,8 @@ function createStorageContext({ api, indexedDB, IDBKeyRange }) {
   const ctx = baseContext(extra);
   load(ctx, 'src/js/coverage-grid.js');
   load(ctx, 'src/js/collection-stats.js');
+  load(ctx, 'src/js/time-conditions.js');
+  load(ctx, 'src/js/condition-stats.js');
   load(ctx, 'src/js/storage.js');
   return ctx;
 }

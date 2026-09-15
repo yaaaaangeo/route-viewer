@@ -58,7 +58,7 @@ function fakeDocument() {
 }
 async function createBrowserStorage(fake) {
   const ctx = baseContext({ indexedDB: fake.indexedDB, IDBKeyRange: fake.IDBKeyRange, document: fakeDocument(), setInterval: () => 0 });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js'].forEach(f => load(ctx, f));
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js'].forEach(f => load(ctx, f));
   await ctx.RouteDB.init();
   return ctx.RouteDB;
 }
@@ -287,7 +287,7 @@ async function calendarTests() {
     },
     clearError() {}, showError() {}, renderConsole() {}, switchTab() {},
   });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/core.js', 'src/js/calendar.js'].forEach(f => load(ctx, f));
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/core.js', 'src/js/calendar.js'].forEach(f => load(ctx, f));
   const run = code => vm.runInContext(code, ctx);
   const tableText = () => doc.getElementById('cp-body').innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 

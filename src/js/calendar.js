@@ -193,6 +193,38 @@ function renderDaySummary(sum,cached){
     <div class="ds-row"><span class="ds-label">GPS 점프</span><span class="mono" style="font-size:12px;">${quality?fmtNum(quality.teleports):'—'}</span></div>
     <div class="ds-row"><span class="ds-label">구역</span>${zoneChips}</div>
     <div class="ds-row"><span class="ds-label">차량</span>${vehicleChips}</div>
+    ${dayConditionSectionsHTML(cached)}
   `;
   el.style.display='block';
+}
+
+// 일자 요약의 조건 분포 — 날짜 요약에 저장된 조건 칸(conditionCells)만 더한다(원본 기록을 다시 읽지 않음).
+// 수집 시간은 달력 맨 위 표·"수집 시간"과 같은 규칙(차량별 90초 넘는 GPS 공백 제외)이라 합이 서로 맞는다.
+function dayConditionSectionsHTML(cached){
+  if(!cached||!Array.isArray(cached.conditionCells)){
+    return '<div class="ds-row"><span class="ds-label">조건</span><span style="color:var(--text-faint);font-size:11px;">날짜 요약을 다시 만들면 교통 시간대·조도 분포가 표시돼요</span></div>';
+  }
+  const signature=currentClassificationSignature();
+  const by=dim=>ConditionStats.aggregate([cached],{groupBy:[dim],signature}).rows;
+  const combos=ConditionStats.aggregate([cached],{groupBy:['weekdayType','trafficPeriod','lightCondition','weather'],signature}).rows
+    .sort((a,b)=>b.collectionSec-a.collectionSec).slice(0,6);
+  const stale=ConditionStats.isStale(cached,signature)
+    ? '<div class="ir-note warn ds-cond-stale">분류 기준이 바뀐 뒤 아직 다시 분류하지 않은 날짜예요. [설정] 탭에서 재분류하면 새 기준으로 바뀌어요.</div>'
+    : '';
+  return `
+    <div class="ds-cond">
+      ${stale}
+      <div class="ds-cond-grid">
+        <div class="ds-cond-block" data-axis="trafficPeriod">
+          <div class="ds-subtitle">교통 시간대 <span class="ds-hint">수집 시간 · 기록 수</span></div>
+          ${conditionDistRowsHTML(by('trafficPeriod'),'trafficPeriod')}
+        </div>
+        <div class="ds-cond-block" data-axis="lightCondition">
+          <div class="ds-subtitle">조도 조건 <span class="ds-hint">수집 시간 · 기록 수</span></div>
+          ${conditionDistRowsHTML(by('lightCondition'),'lightCondition')}
+        </div>
+      </div>
+      <div class="ds-subtitle">조건 조합 <span class="ds-hint">수집 시간 많은 순</span></div>
+      <div class="ds-combos">${combos.map(c=>`<div class="ds-combo">${conditionBadgesHTML(c)}<span class="mono ds-combo-n">${fmtNum(c.collectionMinutes)}분 · ${fmtNum(c.recordCount)}개</span></div>`).join('')||'<div class="dc-empty">데이터 없음</div>'}</div>
+    </div>`;
 }

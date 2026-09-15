@@ -25,6 +25,8 @@ const crypto = require('crypto');
 const { Database } = require('node-sqlite3-wasm');
 const CoverageGrid = require('../src/js/coverage-grid.js');
 const CollectionStats = require('../src/js/collection-stats.js');
+const TimeConditions = require('../src/js/time-conditions.js');
+const ConditionStats = require('../src/js/condition-stats.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -79,13 +81,22 @@ class RouteDatabase {
     this._migrateSummaries();
   }
 
-  // 날짜 요약에 유효 수집 시간(collectionSec)이 추가됐다(CollectionStats.SUMMARY_VERSION).
-  // 예전 DB는 앱을 처음 켤 때 한 번만 전체 날짜 요약을 다시 만든다.
+  // 날짜 요약 형식이 바뀌면(CollectionStats.SUMMARY_VERSION) 앱을 처음 켤 때 한 번 전체를 다시 만든다.
+  // 형식은 같아도 분류 기준(교통 시간대·일출/일몰 범위)이 요약을 만들 때와 다르면 — 설정을 바꾸고
+  // 재분류가 끝나기 전에 앱을 껐던 경우 — 그 날짜들만 이어서 다시 만든다.
   _migrateSummaries() {
     const version = String(CollectionStats.SUMMARY_VERSION);
-    if (this.getMeta('summary_version') === version) return;
-    this.rebuildAllSummaries();
-    this.setMeta('summary_version', version);
+    if (this.getMeta('summary_version') !== version) {
+      this.rebuildAllSummaries();
+      this.setMeta('summary_version', version);
+      return;
+    }
+    this.reclassifyStaleSummariesSync();
+  }
+
+  // 지금 설정 기준의 분류 설정(교통 시간대·일출/일몰 범위·시간대). 저장값이 깨졌으면 기본값.
+  _classificationConfig() {
+    return TimeConditions.classificationConfig(this.getSettings());
   }
 
   close() {
@@ -446,7 +457,8 @@ class RouteDatabase {
     }
 
     // 영향 받은 날짜의 요약만 다시 계산
-    for (const d of dates) this._rebuildDateSummary(d);
+    const classification = this._classificationConfig();
+    for (const d of dates) this._rebuildDateSummary(d, classification);
 
     const duplicates = normalized.length - inserted;
     return {
@@ -465,9 +477,11 @@ class RouteDatabase {
   // ══════════════════════════════════════════════════════
   //  날짜 요약 (달력용) — 포인트를 화면으로 넘기지 않기 위한 캐시
   // ══════════════════════════════════════════════════════
-  _rebuildDateSummary(date) {
+  // 날짜 요약 한 행을 통째로 다시 쓴다(UPSERT 한 문장) — 중간에 실패해도 그 날짜는
+  // 예전 요약 그대로이거나 새 요약이거나 둘 중 하나다. 원본 기록(driving_records)은 건드리지 않는다.
+  _rebuildDateSummary(date, classification) {
     const rows = this.db.all(
-      `SELECT time, zone, vehicle, latitude AS lat, longitude AS lng
+      `SELECT date, time, zone, vehicle, weather, latitude AS lat, longitude AS lng
          FROM driving_records WHERE date = ? ORDER BY timestamp, id`,
       [date]
     );
@@ -475,7 +489,7 @@ class RouteDatabase {
       this.db.run('DELETE FROM date_summaries WHERE date = ?', [date]);
       return;
     }
-    const summary = buildDaySummary(rows);
+    const summary = buildDaySummary(rows, classification || this._classificationConfig());
     this.db.run(
       `INSERT INTO date_summaries(date, record_count, summary_json) VALUES(?,?,?)
        ON CONFLICT(date) DO UPDATE SET record_count = excluded.record_count,
@@ -486,9 +500,84 @@ class RouteDatabase {
 
   rebuildAllSummaries() {
     const dates = this.db.all('SELECT DISTINCT date FROM driving_records');
+    const classification = this._classificationConfig();
     this.db.run('DELETE FROM date_summaries');
-    for (const r of dates) this._rebuildDateSummary(r.date);
+    for (const r of dates) this._rebuildDateSummary(r.date, classification);
     return dates.length;
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  조건 분류(교통 시간대·조도) 재분류
+  //
+  //  분류값은 원본(시각·날짜·GPS)에서 다시 계산할 수 있는 파생값이라 기록에는 저장하지 않는다.
+  //  저장되는 곳은 날짜 요약의 conditionCells 뿐이고, 요약마다 그때의 분류 서명
+  //  (classificationSignature = 판정 규칙 버전 + 설정값)을 같이 적는다. 설정을 바꾸면 서명이 달라진
+  //  날짜 요약만 다시 만든다 — 날짜 하나씩(한 문장 UPSERT) 처리하므로 중간에 실패하거나 앱이 꺼져도
+  //  원본 기록은 그대로고, 남은 날짜는 다음 실행 때(_migrateSummaries) 이어서 처리된다.
+  // ══════════════════════════════════════════════════════
+  _staleSummaryDates(signature) {
+    const rows = this.db.all(
+      `SELECT date FROM date_summaries
+        WHERE COALESCE(json_extract(summary_json, '$.classificationSignature'), '') <> ?
+        ORDER BY date`,
+      [signature]
+    );
+    // 기록은 있는데 요약이 없는 날짜(예전 버그/중단)도 함께 채운다
+    const missing = this.db.all(
+      `SELECT DISTINCT r.date FROM driving_records r
+         LEFT JOIN date_summaries s ON s.date = r.date
+        WHERE s.date IS NULL`
+    );
+    return [...new Set([...rows, ...missing].map(r => r.date))].sort();
+  }
+
+  getClassificationStatus() {
+    const config = this._classificationConfig();
+    const signature = TimeConditions.classificationSignature(config);
+    const totalDates = (this.db.get('SELECT COUNT(*) AS n FROM date_summaries') || { n: 0 }).n;
+    const running = !!this._reclassifyRun;
+    return {
+      signature,
+      totalDates,
+      staleDates: this._staleSummaryDates(signature).length,
+      running,
+      progress: running ? { ...this._reclassifyProgress } : null,
+    };
+  }
+
+  // 앱 시작·백업 복원·서버 동기화 안에서 쓰는 동기 버전
+  reclassifyStaleSummariesSync() {
+    const config = this._classificationConfig();
+    const signature = TimeConditions.classificationSignature(config);
+    const dates = this._staleSummaryDates(signature);
+    for (const d of dates) this._rebuildDateSummary(d, config);
+    return { rebuilt: dates.length, signature };
+  }
+
+  // 설정 화면에서 쓰는 비동기 버전 — 날짜 사이마다 이벤트 루프를 한 번 비워서, 도는 동안에도
+  // 화면이 getClassificationStatus()로 진행률을 물어볼 수 있다. 이미 돌고 있으면 같은 작업을 돌려준다.
+  reclassifySummaries() {
+    if (this._reclassifyRun) return this._reclassifyRun;
+    const run = (async () => {
+      let rebuilt = 0;
+      // 도는 중에 설정이 또 바뀌면 서명이 달라지므로, 남은 날짜가 없을 때까지 반복한다
+      for (let pass = 0; pass < 5; pass++) {
+        const config = this._classificationConfig();
+        const signature = TimeConditions.classificationSignature(config);
+        const dates = this._staleSummaryDates(signature);
+        if (!dates.length) return { rebuilt, signature };
+        this._reclassifyProgress = { done: 0, total: dates.length };
+        for (const d of dates) {
+          this._rebuildDateSummary(d, config);
+          rebuilt++;
+          this._reclassifyProgress.done++;
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      }
+      return { rebuilt, signature: TimeConditions.classificationSignature(this._classificationConfig()) };
+    })();
+    this._reclassifyRun = run.finally(() => { this._reclassifyRun = null; this._reclassifyProgress = null; });
+    return this._reclassifyRun;
   }
 
   // 달력이 쓰는 데이터 — 날짜별 요약만 (포인트 원본 없음)
@@ -507,6 +596,7 @@ class RouteDatabase {
   //  조회
   // ══════════════════════════════════════════════════════
   // 하루치 원본 — 리플레이/일자 상세용. 하루는 많아야 수천 건이라 그대로 넘긴다.
+  // 교통 시간대·조도·요일은 저장값이 아니라 지금 설정으로 그때 계산해서 붙인다(timeOfDay 원본은 그대로).
   getRecordsByDate(date) {
     const rows = this.db.all(
       `SELECT date, time, vehicle, zone, place, road, weather,
@@ -515,7 +605,8 @@ class RouteDatabase {
          FROM driving_records WHERE date = ? ORDER BY timestamp, id`,
       [date]
     );
-    return rows;
+    const classification = this._classificationConfig();
+    return rows.map(r => ({ ...r, ...TimeConditions.classifyRecord(r, classification) }));
   }
 
   _filterSql(filter = {}) {
@@ -832,22 +923,30 @@ class RouteDatabase {
   // coverageCellSizeM 은 사용자 설정이 아니라 고정값(CoverageGrid.DEFAULT_CELL_SIZE_M)
   // 이다. 예전 버전이 app_settings 에 50을 같이 저장해둔 경우가 있어서, 읽을 때
   // 항상 고정값으로 덮고 저장할 때는 빼고 저장한다.
+  // trafficPeriods / sunriseWindowMinutes / sunsetWindowMinutes 는 저장값이 없거나 깨졌으면 기본값으로
+  // 채워 돌려준다(TimeConditions.classificationConfig — IndexedDB 백엔드와 같은 규칙).
   getSettings() {
     const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: CoverageGrid.DEFAULT_CELL_SIZE_M };
-    try {
-      const saved = JSON.parse(this.getMeta('app_settings', '{}')) || {};
-      return {
-        ...defaults,
-        ...saved,
-        coverageCellSizeM: CoverageGrid.DEFAULT_CELL_SIZE_M,
-        coverageDepthTiers: (Array.isArray(saved.coverageDepthTiers) && saved.coverageDepthTiers.length)
-          ? saved.coverageDepthTiers : defaults.coverageDepthTiers,
-      };
-    } catch (_) { return defaults; }
+    let saved = {};
+    try { saved = JSON.parse(this.getMeta('app_settings', '{}')) || {}; } catch (_) { saved = {}; }
+    const classification = TimeConditions.classificationConfig(saved);
+    return {
+      ...defaults,
+      ...saved,
+      coverageCellSizeM: CoverageGrid.DEFAULT_CELL_SIZE_M,
+      coverageDepthTiers: (Array.isArray(saved.coverageDepthTiers) && saved.coverageDepthTiers.length)
+        ? saved.coverageDepthTiers : defaults.coverageDepthTiers,
+      trafficPeriods: classification.trafficPeriods,
+      sunriseWindowMinutes: classification.sunriseWindowMinutes,
+      sunsetWindowMinutes: classification.sunsetWindowMinutes,
+    };
   }
 
+  // 분류 설정은 저장 전에 검증한다 — 겹침·공백·형식 오류가 하나라도 있으면 아무것도 저장하지 않고
+  // 이유를 담은 Error 를 던진다. 저장만 하고 재분류는 하지 않는다(reclassifySummaries 가 따로 한다).
   setSettings(partial) {
-    const { coverageCellSizeM, ...merged } = { ...this.getSettings(), ...(partial || {}) };
+    const patch = TimeConditions.normalizeClassificationPatch(partial);
+    const { coverageCellSizeM, ...merged } = { ...this.getSettings(), ...patch };
     this.setMeta('app_settings', JSON.stringify(merged));
     return this.getSettings();
   }
@@ -1053,7 +1152,8 @@ class RouteDatabase {
       });
     }
     if (payload.settings && typeof payload.settings === 'object') {
-      this.setSettings(payload.settings);
+      // 잘못된 분류 설정이 든 백업·서버 데이터는 그 값만 빼고(지금 설정 유지) 나머지를 반영한다
+      this.setSettings(TimeConditions.sanitizeClassificationSettings(payload.settings));
     }
     if (Array.isArray(payload.backupHistory)) {
       const merged = mode === 'replace'
@@ -1061,7 +1161,9 @@ class RouteDatabase {
         : [...payload.backupHistory, ...this.getBackupHistory()];
       this.setBackupHistory(dedupeHistory(merged));
     }
-    return { ...result, mode };
+    // 백업의 설정이 분류 기준을 바꿨으면 기존 날짜 요약도 새 기준으로 맞춘다(원본 기록은 그대로)
+    const reclassified = this.reclassifyStaleSummariesSync();
+    return { ...result, mode, reclassifiedDates: reclassified.rebuilt };
   }
 }
 
@@ -1103,7 +1205,8 @@ function mostFrequent(values) {
   return best;
 }
 
-function buildDaySummary(rows) {
+// classification: TimeConditions.classificationConfig(설정) — 없으면 기본 분류 기준
+function buildDaySummary(rows, classification) {
   const zoneCount = {}, vehicleCount = {};
   let minTime = null, maxTime = null;
   let gaps = 0, teleports = 0;
@@ -1144,6 +1247,8 @@ function buildDaySummary(rows) {
     collectionSec: CollectionStats.validDurationSec(rows),
     // 주행 시간(초) — 차량별 첫 기록~마지막 기록(휴식·공백 포함)의 합
     driveSpanSec: CollectionStats.spanDurationSec(rows),
+    // 조건 칸(구역·차량·요일·교통 시간대·조도·날씨별 기록 수·수집 시간) + 분류 서명(condition-stats.js)
+    ...ConditionStats.buildConditionSummary(rows, classification),
   };
 }
 

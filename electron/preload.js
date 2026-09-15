@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld('routeAPI', {
   saveZoneManualCells: (name, data) => call('db:saveZoneManualCells', name, data),
   getSettings: () => call('db:getSettings'),
   setSettings: partial => call('db:setSettings', partial),
+  // 교통 시간대·조도 분류 기준이 바뀐 뒤 날짜 요약 재분류 — 진행률은 getClassificationStatus 로 본다
+  getClassificationStatus: () => call('db:getClassificationStatus'),
+  reclassifySummaries: () => call('db:reclassifySummaries'),
   getCellVisitCounts: (box, cellSizeM) => call('db:getCellVisitCounts', box, cellSizeM),
   getBackupHistory: () => call('db:getBackupHistory'),
   setBackupHistory: h => call('db:setBackupHistory', h),

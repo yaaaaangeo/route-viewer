@@ -312,6 +312,8 @@ function registerIpc() {
   handle('db:saveZoneManualCells', (name, data) => openDatabase().saveZoneManualCells(name, data));
   handle('db:getSettings', () => openDatabase().getSettings());
   handle('db:setSettings', partial => openDatabase().setSettings(partial));
+  handle('db:getClassificationStatus', () => openDatabase().getClassificationStatus());
+  handle('db:reclassifySummaries', () => openDatabase().reclassifySummaries());
   handle('db:getCellVisitCounts', (box, cellSizeM) => openDatabase().getCellVisitCounts(box, cellSizeM));
   handle('db:getBackupHistory', () => openDatabase().getBackupHistory());
   handle('db:setBackupHistory', h => openDatabase().setBackupHistory(h));

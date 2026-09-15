@@ -124,6 +124,8 @@
       saveZoneManualCells: (name, data) => api.saveZoneManualCells(name, data),
       getSettings: () => api.getSettings(),
       setSettings: partial => api.setSettings(partial),
+      getClassificationStatus: () => api.getClassificationStatus(),
+      reclassifySummaries: () => api.reclassifySummaries(),
       getCellVisitCounts: (box, cellSizeM) => api.getCellVisitCounts(box, cellSizeM),
       getBackupHistory: () => api.getBackupHistory(),
       setBackupHistory: h => api.setBackupHistory(h),
@@ -237,7 +239,10 @@
       await done(t);
     }
 
-    async function rebuildDateSummary(date) {
+    // 날짜 요약 한 건을 put 한 번으로 통째로 바꾼다 — 중간에 실패해도 그 날짜는 예전 요약이거나
+    // 새 요약이거나 둘 중 하나다(원본 records 는 건드리지 않는다). database.js _rebuildDateSummary 와 같은 규칙.
+    async function rebuildDateSummary(date, classification) {
+      const config = classification || await classificationConfig();
       const rows = [];
       await scan({ date }, r => rows.push(r));
       const db = await ready();
@@ -247,10 +252,69 @@
       } else {
         rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
         t.objectStore('summaries').put({
-          date, count: rows.length, ...global.buildDaySummaryFromPoints(rows),
+          date, count: rows.length, ...global.buildDaySummaryFromPoints(rows, config),
         });
       }
       await done(t);
+    }
+
+    // ── 설정 · 조건 분류 ──
+    // coverageCellSizeM 은 고정값(CoverageGrid.DEFAULT_CELL_SIZE_M) · 분류 설정은 없거나 깨졌으면 기본값
+    // (database.js getSettings 와 같은 규칙)
+    async function readSettings() {
+      const cellSize = global.CoverageGrid.DEFAULT_CELL_SIZE_M;
+      const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: cellSize };
+      const saved = (await metaGet('app_settings', {})) || {};
+      const classification = global.TimeConditions.classificationConfig(saved);
+      return {
+        ...defaults, ...saved,
+        coverageCellSizeM: cellSize,
+        coverageDepthTiers: (Array.isArray(saved.coverageDepthTiers) && saved.coverageDepthTiers.length)
+          ? saved.coverageDepthTiers : defaults.coverageDepthTiers,
+        trafficPeriods: classification.trafficPeriods,
+        sunriseWindowMinutes: classification.sunriseWindowMinutes,
+        sunsetWindowMinutes: classification.sunsetWindowMinutes,
+      };
+    }
+
+    async function writeSettings(partial) {
+      const patch = global.TimeConditions.normalizeClassificationPatch(partial); // 잘못된 분류 설정이면 여기서 던진다
+      const { coverageCellSizeM, ...merged } = { ...(await readSettings()), ...patch };
+      await metaSet('app_settings', merged);
+      return readSettings();
+    }
+
+    async function classificationConfig() {
+      return global.TimeConditions.classificationConfig(await readSettings());
+    }
+
+    // 분류 서명이 지금과 다른(또는 조건 칸이 없는) 날짜 요약
+    async function staleSummaryDates(signature) {
+      const db = await ready();
+      const t = db.transaction(['summaries'], 'readonly');
+      const rows = await reqp(t.objectStore('summaries').getAll());
+      return rows.filter(r => global.ConditionStats.isStale(r, signature)).map(r => r.date).sort();
+    }
+
+    let reclassifyRun = null;
+    let reclassifyProgress = null;
+
+    async function reclassifyStale() {
+      let rebuilt = 0;
+      // 도는 중에 설정이 또 바뀌면 서명이 달라지므로, 남은 날짜가 없을 때까지 반복한다
+      for (let pass = 0; pass < 5; pass++) {
+        const config = await classificationConfig();
+        const signature = global.TimeConditions.classificationSignature(config);
+        const dates = await staleSummaryDates(signature);
+        if (!dates.length) return { rebuilt, signature };
+        reclassifyProgress = { done: 0, total: dates.length };
+        for (const d of dates) {
+          await rebuildDateSummary(d, config);
+          rebuilt++;
+          reclassifyProgress.done++;
+        }
+      }
+      return { rebuilt, signature: global.TimeConditions.classificationSignature(await classificationConfig()) };
     }
 
     // 차량/지역 하드코딩 목록을 설정 스토어로 최초 1회 migration.
@@ -324,16 +388,20 @@
       }
     }
 
-    // 날짜 요약에 유효 수집 시간(collectionSec)이 추가됐다 — 예전 요약은 한 번만 다시 만든다
-    // (database.js _migrateSummaries 와 같은 규칙, 같은 SUMMARY_VERSION)
+    // 날짜 요약 형식이 바뀌면 한 번 전체를 다시 만들고, 형식은 같아도 분류 기준이 달라진 날짜
+    // (재분류 도중 탭을 닫은 경우)는 이어서 다시 만든다(database.js _migrateSummaries 와 같은 규칙)
     async function migrateSummariesIfNeeded() {
       const version = global.CollectionStats.SUMMARY_VERSION;
-      if ((await metaGet('summary_version', 0)) === version) return;
-      const db = await ready();
-      const t = db.transaction(['summaries'], 'readonly');
-      const rows = await reqp(t.objectStore('summaries').getAll());
-      for (const r of rows) await rebuildDateSummary(r.date);
-      await metaSet('summary_version', version);
+      if ((await metaGet('summary_version', 0)) !== version) {
+        const config = await classificationConfig();
+        const db = await ready();
+        const t = db.transaction(['summaries'], 'readonly');
+        const rows = await reqp(t.objectStore('summaries').getAll());
+        for (const r of rows) await rebuildDateSummary(r.date, config);
+        await metaSet('summary_version', version);
+        return;
+      }
+      await reclassifyStale();
     }
 
     return {
@@ -427,7 +495,8 @@
           await done(t);
         }
 
-        for (const d of dates) await rebuildDateSummary(d);
+        const classification = await classificationConfig();
+        for (const d of dates) await rebuildDateSummary(d, classification);
 
         const duplicates = normalized.length - inserted;
         const distanceKm = fileDistanceKm(normalized);
@@ -462,11 +531,37 @@
         return rows.sort((a, b) => a.date.localeCompare(b.date));
       },
 
+      // 교통 시간대·조도·요일은 저장값이 아니라 지금 설정으로 계산해 붙인다(database.js 와 같은 규칙)
       async getRecordsByDate(date) {
         const rows = [];
         await scan({ date }, r => rows.push(r));
         rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-        return rows.map(stripInternal);
+        const config = await classificationConfig();
+        return rows.map(r => {
+          const rec = stripInternal(r);
+          return { ...rec, ...global.TimeConditions.classifyRecord(rec, config) };
+        });
+      },
+
+      async getClassificationStatus() {
+        const signature = global.TimeConditions.classificationSignature(await classificationConfig());
+        const db = await ready();
+        const t = db.transaction(['summaries'], 'readonly');
+        const totalDates = await reqp(t.objectStore('summaries').count());
+        return {
+          signature,
+          totalDates,
+          staleDates: (await staleSummaryDates(signature)).length,
+          running: !!reclassifyRun,
+          progress: reclassifyRun && reclassifyProgress ? { ...reclassifyProgress } : null,
+        };
+      },
+
+      // 이미 돌고 있으면 같은 작업을 돌려준다(중복 실행 방지)
+      reclassifySummaries() {
+        if (reclassifyRun) return reclassifyRun;
+        reclassifyRun = reclassifyStale().finally(() => { reclassifyRun = null; reclassifyProgress = null; });
+        return reclassifyRun;
       },
 
       async getOverview(filter) {
@@ -716,24 +811,10 @@
         return this.getZoneManualCells(name);
       },
 
-      // coverageCellSizeM 은 고정값(CoverageGrid.DEFAULT_CELL_SIZE_M) — database.js 와 같은 규칙
-      async getSettings() {
-        const cellSize = global.CoverageGrid.DEFAULT_CELL_SIZE_M;
-        const defaults = { coverageDepthTiers: DEFAULT_DEPTH_TIERS, coverageCellSizeM: cellSize };
-        const saved = (await metaGet('app_settings', {})) || {};
-        return {
-          ...defaults, ...saved,
-          coverageCellSizeM: cellSize,
-          coverageDepthTiers: (Array.isArray(saved.coverageDepthTiers) && saved.coverageDepthTiers.length)
-            ? saved.coverageDepthTiers : defaults.coverageDepthTiers,
-        };
-      },
+      getSettings() { return readSettings(); },
 
-      async setSettings(partial) {
-        const { coverageCellSizeM, ...merged } = { ...(await this.getSettings()), ...(partial || {}) };
-        await metaSet('app_settings', merged);
-        return this.getSettings();
-      },
+      // 분류 설정은 저장 전에 검증(겹침·공백·형식 오류면 아무것도 저장하지 않고 던짐). 재분류는 따로.
+      setSettings(partial) { return writeSettings(partial); },
 
       // Coverage Depth — 같은 (date,vehicle) 안에서 시간순으로 셀이 바뀔 때만 새 방문으로 센다.
       // GPS가 ~10초 간격으로 찍혀도 두 점 사이 실제 이동 경로가 지나가는 모든
@@ -849,13 +930,16 @@
           }
         }
         if (payload.settings && typeof payload.settings === 'object') {
-          await this.setSettings(payload.settings);
+          // 잘못된 분류 설정은 그 값만 빼고 반영(database.js 와 같은 규칙)
+          await this.setSettings(global.TimeConditions.sanitizeClassificationSettings(payload.settings));
         }
         if (Array.isArray(payload.backupHistory)) {
           const current = mode === 'replace' ? [] : await this.getBackupHistory();
           await this.setBackupHistory(global.dedupeBackupHistory([...payload.backupHistory, ...current]));
         }
-        return { ...result, mode };
+        // 백업의 설정이 분류 기준을 바꿨으면 기존 날짜 요약도 새 기준으로 맞춘다
+        const reclassified = await reclassifyStale();
+        return { ...result, mode, reclassifiedDates: reclassified.rebuilt };
       },
     };
   }
@@ -900,7 +984,7 @@
   const changeListeners = [];
   const MUTATING_METHODS = new Set([
     'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveZone', 'setZoneActive',
-    'saveZoneManualCells', 'setSettings', 'restoreBackupPayload',
+    'saveZoneManualCells', 'setSettings', 'restoreBackupPayload', 'reclassifySummaries',
   ]);
 
   // 백엔드 메서드를 RouteDB 로 그대로 흘려보낸다
@@ -912,6 +996,7 @@
     'listVehicles', 'saveVehicle', 'setVehicleActive', 'listZones', 'saveZone',
     'setZoneActive', 'getZoneManualCells', 'saveZoneManualCells', 'getSettings', 'setSettings', 'getCellVisitCounts',
     'getBackupHistory', 'setBackupHistory', 'buildBackupPayload', 'restoreBackupPayload',
+    'getClassificationStatus', 'reclassifySummaries',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

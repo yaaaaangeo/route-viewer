@@ -10,7 +10,8 @@ const APP_VERSION = require('./package.json').version;
 const ROOT = __dirname;
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8080);
-const DATA_FILE = path.join(ROOT, 'route-viewer-shared-data.json');
+// 테스트는 ROUTE_VIEWER_DATA_FILE 로 임시 파일을 준다 — 실제 공유 저장 파일을 건드리지 않게
+const DATA_FILE = process.env.ROUTE_VIEWER_DATA_FILE || path.join(ROOT, 'route-viewer-shared-data.json');
 const UPDATES_DIR = path.join(ROOT, 'release');
 const MAX_BODY_BYTES = 100 * 1024 * 1024;
 const WRITE_TOKEN = process.env.ROUTE_VIEWER_WRITE_TOKEN || '';

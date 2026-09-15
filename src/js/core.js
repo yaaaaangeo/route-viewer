@@ -139,7 +139,8 @@ function summarizePoints(dayPoints){
 // 저장소(IndexedDB 백엔드)가 날짜 요약을 만들 때 쓰는 함수.
 // SQLite 백엔드에서는 electron/database.js 의 buildDaySummary 가 같은 일을 한다.
 // 두 곳의 결과 모양이 같아야 달력이 백엔드를 신경 쓰지 않는다.
-window.buildDaySummaryFromPoints=function(sortedPoints){
+// classification: TimeConditions.classificationConfig(설정) — 없으면 기본 분류 기준
+window.buildDaySummaryFromPoints=function(sortedPoints,classification){
   const base=summarizePoints(sortedPoints);
   const q=analyzeDayQuality(sortedPoints);
   let distM=0;
@@ -155,8 +156,43 @@ window.buildDaySummaryFromPoints=function(sortedPoints){
     collectionSec:CollectionStats.validDurationSec(sortedPoints),
     // 주행 시간(초) — 차량별 첫 기록~마지막 기록(휴식·공백 포함)의 합
     driveSpanSec:CollectionStats.spanDurationSec(sortedPoints),
+    // 조건 칸 + 분류 서명 — database.js buildDaySummary 와 같은 함수(condition-stats.js)
+    ...ConditionStats.buildConditionSummary(sortedPoints,classification),
   };
 };
+
+// ── 조건 분류(교통 시간대·조도·요일·날씨) 화면 공용 ─────────────
+// 판정 규칙은 time-conditions.js, 집계는 condition-stats.js — 화면은 다시 계산하지 않고 표시만 한다.
+// classificationConfigCache 는 refreshSettingsCache()(accum.js)가 설정을 읽을 때 채운다.
+function currentClassificationConfig(){
+  return window.classificationConfigCache||TimeConditions.classificationConfig({});
+}
+function currentClassificationSignature(){
+  return TimeConditions.classificationSignature(currentClassificationConfig());
+}
+
+// 축 하나(교통/조도/요일)의 분포 — rows 는 ConditionStats.aggregate(...).rows (그 축 하나로 묶은 것)
+// 수집 시간 기준 막대 + "N분 · M개". 값이 있는 칸만, 정해진 순서로.
+function conditionDistRowsHTML(rows,dim){
+  if(!rows.length) return '<div class="dc-empty">데이터 없음</div>';
+  const maxSec=Math.max(1,...rows.map(r=>r.collectionSec));
+  return rows.map(r=>{
+    const label=ConditionStats.dimensionValueLabel(dim,r[dim]);
+    const pct=Math.round(r.collectionSec/maxSec*100);
+    return `<div class="dist-row cond-row" data-dim="${dim}" data-value="${escapeHtml(r[dim])}">
+      <span class="dist-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+      <span class="dist-bar-wrap"><span class="dist-bar" style="width:${pct}%"></span></span>
+      <span class="dist-count cond-count"><b>${fmtNum(r.collectionMinutes)}분</b> · ${fmtNum(r.recordCount)}개</span>
+    </div>`;
+  }).join('');
+}
+
+// 조건을 한 문자열에 섞지 않고 축별 배지로 — [교통: 퇴근 피크] [조도: 일몰 전후] [요일: 평일] [날씨: 비]
+function conditionBadgesHTML(obj,dims){
+  return ConditionStats.describeConditions(obj,dims).map(c=>
+    `<span class="cond-badge cond-${c.dim}"><span class="cond-axis">${escapeHtml(c.axis)}</span>${escapeHtml(c.value)}</span>`
+  ).join('');
+}
 
 // 백업 기록 정리 — 중복 제거 후 최신 10건만
 window.dedupeBackupHistory=function(history){
