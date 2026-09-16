@@ -106,7 +106,7 @@ async function main() {
   for (const kind of ['SQLite', 'IndexedDB']) {
     const { RouteDB } = kind === 'SQLite' ? await sqliteDB() : await idbDB();
     const ids = await importScenario(RouteDB);
-    const imports = await RouteDB.listImports(10, {});
+    const imports = await RouteDB.listImports(10, { withRelatedRecords: true });
     const byName = new Map(imports.map(i => [i.filename, i]));
     const A = byName.get('A.xlsx'), B = byName.get('B.xlsx'), C = byName.get('C.xlsx');
     if (kind === 'SQLite') {
@@ -125,7 +125,9 @@ async function main() {
         })());
     }
     check(`12. [${kind}] 중복으로 걸러진 레코드도 그 파일의 출처로 남는다(B.xlsx 에 r2·r3 둘 다)`,
-      (B.relatedRecords === undefined ? true : B.relatedRecords === 2), `relatedRecords=${B.relatedRecords}`);
+      B.relatedRecords === 2, `relatedRecords=${B.relatedRecords}`);
+    check(`   [${kind}] 파일별 레코드 수는 필요할 때만 센다(목록을 그릴 때마다 출처를 훑지 않는다)`,
+      (await RouteDB.listImports(10, {}))[0].relatedRecords == null);
     const cnt = await counts(RouteDB);
     check(`13. [${kind}] 한 레코드가 이슈 파일과 정상 파일 양쪽에서 와도 전체 개수는 그대로다`,
       cnt.all === 4, JSON.stringify(cnt));
@@ -399,6 +401,7 @@ async function main() {
     db.importRecords(FILE_C.records, FILE_C.meta);
     // 이 기능 이전에 들어온 데이터를 흉내 낸다 — 출처 관계만 지운다
     db.db.run('DELETE FROM record_sources');
+    db._recomputeIssueMasks();  // 출처가 사라졌으니 레코드의 이슈 마스크도 다시 계산된다
     db.rebuildAllSummaries();   // 출처가 없던 시절의 요약을 그대로 흉내 낸다
     const legacy = {};
     IF.ISSUE_FILTERS.forEach(f => { legacy[f] = db.getOverview({ issueFilter: f }).points; });
@@ -459,11 +462,17 @@ async function main() {
     };
     const grayAll = await grayCount();
     const totalDots = h.eval('accumDensityLayer.getLayers().length');
-    check('61. 누적 지도가 이슈 데이터가 섞인 칸을 회색 원으로 그린다',
-      grayAll > 0 && grayAll === totalDots, `회색 ${grayAll} / 전체 ${totalDots}칸`);
+    const colored = h.eval("accumDensityLayer.getLayers().filter(l=>l.options&&l.options.fillColor!=='#7d8798').length");
+    check('61. 누적 지도가 이슈 몫을 회색 원으로 "겹쳐" 그린다(구역 색 점은 그대로 남는다)',
+      grayAll > 0 && colored > 0 && totalDots === grayAll + colored,
+      `회색 ${grayAll} + 구역색 ${colored} = ${totalDots}개`);
+    const mixed = h.eval("accumDensityLayer.getLayers().filter(l=>l.options&&l.options.fillColor==='#7d8798').map(l=>l.options.radius)");
+    const base = h.eval("accumDensityLayer.getLayers().filter(l=>l.options&&l.options.fillColor!=='#7d8798').map(l=>l.options.radius)");
+    check('   이슈가 절반만 섞인 칸은 회색 점이 더 작아서 두 색이 함께 보인다',
+      mixed.every((r, i) => r < base[i]), `회색 ${mixed.map(r=>r.toFixed(1)).join(',')} / 구역색 ${base.map(r=>r.toFixed(1)).join(',')}`);
     const legend = h.el('accum-issue-legend').innerHTML;
     check('   지도 아래에 "회색 = 이슈 데이터" 안내가 뜬다',
-      /회색 칸/.test(legend) && /이슈로 표시한 파일/.test(legend), legend.replace(/<[^>]+>/g, ' ').slice(0, 80));
+      /회색 점/.test(legend) && /이슈로 표시한 파일/.test(legend) && /겹쳐 그려서/.test(legend), legend.replace(/<[^>]+>/g, ' ').slice(0, 80));
     h.setIssueFilter('clean');
     const grayClean = await grayCount();
     check('   "이슈 없음"으로 보면 회색 칸을 그리지 않는다(그 화면엔 표시할 이슈 데이터가 없다)',

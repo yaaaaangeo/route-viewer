@@ -138,6 +138,21 @@ async function harnessTests() {
   check('날짜 초기화 → 날짜칸도 비워진다', h.el('accum-date-from').value === '' && h.el('accum-date-to').value === '');
 
   section('A-2. 날짜 입력칸 · 정규화');
+  // 앱을 켜고 누적 지도에 처음 들어가면 언제나 "전체 기간"이어야 한다.
+  // (Chromium 이 새로고침 때 날짜칸 값을 되살려도 화면과 조회 조건이 어긋나지 않게 같이 비운다)
+  {
+    const fresh = await createAccumHarness();
+    fresh.el('accum-date-from').value = '2026-09-02';   // 브라우저가 값을 되살린 상황
+    fresh.el('accum-date-to').value = '2026-09-03';
+    fresh.eval('ensureAccumView()');
+    check('누적 지도는 전체 기간으로 시작한다(날짜칸에 남아 있던 값도 비운다)',
+      fresh.eval('accumDateFrom') === '' && fresh.eval('accumDateTo') === ''
+      && fresh.el('accum-date-from').value === '' && fresh.el('accum-date-to').value === ''
+      && /전체 기간/.test(fresh.el('accum-date-label').textContent),
+      fresh.el('accum-date-label').textContent);
+    fresh.db.close();
+  }
+
   // 날짜칸 change는 입력 도중에도 여러 번 온다(24일 → "2"를 친 순간 2일) — 마지막 값만 한 번 적용
   const rendersBeforeTyping = h.eval('coverageStats.renders');
   for (const d of ['2026-09-02', '2026-09-03']) {

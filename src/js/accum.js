@@ -52,8 +52,9 @@ function updateAccumIssueLegend(issueCells,totalCells){
   if(!issueCells){ el.style.display='none'; el.innerHTML=''; return; }
   el.style.display='flex';
   el.innerHTML=`<span class="aleg-dot" style="background:${ISSUE_CELL_COLOR}"></span>`
-    +`<span>회색 칸 ${fmtNum(issueCells)}개 — 이슈로 표시한 파일에서 온 기록이 섞인 자리예요`
-    +`(전체 ${fmtNum(totalCells)}칸). '이슈 없음'으로 보면 그 기록을 뺀 지도가 나와요.</span>`;
+    +`<span>회색 점 ${fmtNum(issueCells)}칸 — 이슈로 표시한 파일에서 온 기록이 섞인 자리예요`
+    +`(전체 ${fmtNum(totalCells)}칸). 구역 색 점 위에 이슈 몫만큼만 겹쳐 그려서, 같은 자리에 문제 없는 날과`
+    +` 문제 있는 날이 겹치면 두 색이 함께 보여요. '이슈 없음'으로 보면 그 기록을 뺀 지도가 나와요.</span>`;
 }
 
 const HOVER_MAX_DIST_M=90; // 커서가 셀 중심에서 이만큼(m) 이내일 때만 그 점의 정보를 보여줌
@@ -2461,7 +2462,22 @@ function refreshAccumUI(){
   updateCellEditHint();
 }
 
+// 누적 지도는 언제나 "전체 기간"으로 시작한다. 날짜칸은 브라우저가 새로고침 때 값을 되살리는
+// 일이 있어서(Chromium 폼 복원), 첫 진입 때 화면 값까지 같이 비워 상태와 어긋나지 않게 한다.
+let accumDateDefaultApplied=false;
+function applyAccumDefaultDateRange(){
+  if(accumDateDefaultApplied) return;
+  accumDateDefaultApplied=true;
+  accumDateFrom=''; accumDateTo='';
+  ['accum-date-from','accum-date-to'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.value='';
+  });
+  updateAccumDateFilterUI();
+}
+
 function ensureAccumView(){
+  applyAccumDefaultDateRange();
   initAccumMap();
 }
 
@@ -2598,17 +2614,26 @@ async function renderAccumViewInner(token){
     const maxN=Math.max(...cells.map(c=>c.n),1);
     const dotColor=accumZoneFilter!=='all'&&ZONE_COLORS[accumZoneFilter] ? ZONE_COLORS[accumZoneFilter] : '#4fd8c7';
     let issueCells=0;
+    const showIssueGray=currentIssueFilter()!=='clean';
     cells.forEach(c=>{
       const t=Math.min(1,c.n/maxN);
-      // 이슈로 표시한 파일에서 온 기록이 섞인 칸은 회색으로 그린다 — 지도에서 바로 구분되게.
-      // '이슈 없음'을 보고 있을 때는 회색을 칠하지 않는다. 그 화면에 남은 기록은 정상 파일에서도
-      // 나온 것들이라(확인 필요 이슈 파일에만 있는 기록은 이미 빠졌다) 회색으로 표시할 이유가 없다.
-      const hasIssue=(c.issueN||0)>0&&currentIssueFilter()!=='clean';
-      if(hasIssue) issueCells++;
+      const radius=4+t*8;
+      // 구역 색 점은 언제나 그대로 그린다 — 이슈가 섞였다고 그 칸의 원래 색이 사라지면
+      // "문제 없는 날도 여기서 달렸다"는 사실이 지도에서 보이지 않는다.
       L.circleMarker([c.lat,c.lng],{
-        radius:4+t*8, weight:0, fillColor:hasIssue?ISSUE_CELL_COLOR:dotColor,
-        fillOpacity:hasIssue?0.55+t*0.35:0.6+t*0.4,
+        radius, weight:0, fillColor:dotColor, fillOpacity:0.6+t*0.4,
       }).addTo(accumDensityLayer);
+      // 이슈 몫만 그 위에 회색으로 겹쳐 올린다. 크기는 그 칸에서 이슈 기록이 차지하는 비율이라,
+      // 반반 섞인 칸은 색 테두리 + 회색 속으로 보이고, 전부 이슈인 칸만 완전히 회색이 된다.
+      // '이슈 없음'을 보고 있을 때는 겹치지 않는다(그 화면에 남은 기록은 정상 파일에서도 나온 것들이다).
+      const issueRatio=c.n?Math.min(1,(c.issueN||0)/c.n):0;
+      if(showIssueGray&&issueRatio>0){
+        issueCells++;
+        L.circleMarker([c.lat,c.lng],{
+          radius:Math.max(2,radius*Math.sqrt(issueRatio)), weight:0,
+          fillColor:ISSUE_CELL_COLOR, fillOpacity:0.85,
+        }).addTo(accumDensityLayer);
+      }
       accumCells.push(c);
     });
     updateAccumIssueLegend(issueCells,cells.length);

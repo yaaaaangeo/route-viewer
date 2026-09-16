@@ -229,6 +229,7 @@ async function renderIssueAdmin(){
       issueOnly:issueAdminOnlyIssues,
       issueStatus:issueAdminStatus||undefined,
       search:issueAdminSearch||undefined,
+      withRelatedRecords:true,   // 이 화면만 "그 파일에서 온 기록 수"를 보여준다
     });
     issueAdminOverview=await RouteDB.getIssueOverview({});
   }catch(err){
@@ -298,7 +299,7 @@ function issueAdminRowHTML(im){
       <div class="issue-item-meta mono">
         <span>${escapeHtml(im.dates||'')}</span>
         ${im.vehicle?`<span>${escapeHtml(im.vehicle)}</span>`:''}
-        <span>기록 ${fmtNum(im.relatedRecords||0)}개</span>
+        ${im.relatedRecords!=null?`<span>기록 ${fmtNum(im.relatedRecords)}개</span>`:''}
         <span>${escapeHtml(formatBackupTime(im.importedAt))}</span>
         ${im.issueUpdatedAt?`<span>이슈 수정 ${escapeHtml(formatBackupTime(im.issueUpdatedAt))}</span>`:''}
       </div>

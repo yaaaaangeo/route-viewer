@@ -904,7 +904,7 @@ async function main(win, dbFilePath) {
     (await js(win, `document.getElementById('modal-title').textContent`)) === '주행 기록 추가 완료'
     && /이슈로 표시한 파일/.test(issueReport), issueReport.replace(/\s+/g, ' ').slice(0, 110));
   await js(win, `closeModal()`);
-  const issueImports = await js(win, `(async()=>{const l=await RouteDB.listImports(50,{issueOnly:true});return l.map(i=>({f:i.filename,n:i.issueNote,s:i.issueStatus,r:i.relatedRecords}));})()`);
+  const issueImports = await js(win, `(async()=>{const l=await RouteDB.listImports(50,{issueOnly:true,withRelatedRecords:true});return l.map(i=>({f:i.filename,n:i.issueNote,s:i.issueStatus,r:i.relatedRecords}));})()`);
   check('Import 이력에 이슈 메모와 "확인 필요" 상태가 남는다',
     issueImports.length === 1 && issueImports[0].s === 'open'
     && issueImports[0].n === 'GPS 가 튀는 구간이 있어요' && issueImports[0].r > 0, JSON.stringify(issueImports));
@@ -947,8 +947,12 @@ async function main(win, dbFilePath) {
     return accumDensityLayer.getLayers().filter(l=>l.options&&l.options.fillColor==='#7d8798').length;
   }catch(_){ return -1; } })()`);
   const grayLegend = await js(win, `document.getElementById('accum-issue-legend').innerText`);
-  check('누적 지도에서 이슈 데이터가 섞인 칸이 회색으로 그려지고 안내가 뜬다',
-    grayCells > 0 && /회색 칸/.test(grayLegend), `회색 ${grayCells}칸 · ${grayLegend.slice(0, 50)}`);
+  const coloredCells = await js(win, `(()=>{ try{
+    return accumDensityLayer.getLayers().filter(l=>l.options&&l.options.fillColor!=='#7d8798').length;
+  }catch(_){ return -1; } })()`);
+  check('누적 지도에서 이슈 몫이 구역 색 점 위에 회색으로 겹쳐 그려지고 안내가 뜬다',
+    grayCells > 0 && coloredCells > grayCells && /회색 점/.test(grayLegend),
+    `회색 ${grayCells} + 구역색 ${coloredCells}칸 · ${grayLegend.slice(0, 40)}`);
   await shot(win, '17-accum-issue-gray');
 
   await js(win, `switchTab('stats')`);

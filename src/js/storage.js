@@ -222,14 +222,17 @@
       const [imports, sources] = await Promise.all([impReq, srcReq]);
       const byId = new Map(imports.map(i => [i.id, i]));
       const all = new Map();
+      const sourcesByKey = new Map();
       sources.forEach(s => {
         const bit = global.IssueFilter.maskBitOf(byId.get(s.importId));
         all.set(s.key, (all.get(s.key) || 0) | bit);
+        if (!sourcesByKey.has(s.key)) sourcesByKey.set(s.key, []);
+        sourcesByKey.get(s.key).push(s.importId);
       });
       // 이슈 없는 출처(NON_ISSUE=1)도 그대로 둔다 — 0("출처 기록이 아예 없는 예전 데이터")과
       // 1("이슈 없는 파일에서 왔다")은 뜻이 다르고, 날짜 요약의 조건 칸에 그대로 저장되기 때문에
       // SQLite 의 ISSUE_MASK_SQL 과 값이 같아야 한다.
-      issueIndexCache = { byId, byKey: all };
+      issueIndexCache = { byId, byKey: all, sourcesByKey };
       return issueIndexCache;
     }
 
@@ -305,8 +308,9 @@
         const index = await issueIndex();
         const withIssue = rows.map(r => ({ ...r, issueMask: maskOf(index, r.key) }));
         const sources = new Map();
-        const srcRows = await sourcesForKeys(rows.map(r => r.key));
-        srcRows.forEach(s => sources.set(s.importId, (sources.get(s.importId) || 0) + 1));
+        rows.forEach(r => (index.sourcesByKey.get(r.key) || []).forEach(importId => {
+          sources.set(importId, (sources.get(importId) || 0) + 1);
+        }));
         payload = {
           date, count: rows.length, ...global.buildDaySummaryFromPoints(withIssue, config),
           importSources: [...sources.entries()].sort((a, b) => a[0] - b[0]).map(([importId, recordCount]) => ({ importId, recordCount })),
@@ -1036,15 +1040,16 @@
         });
       },
 
-      // options: {issueOnly, issueStatus, search} — database.js listImports 와 같은 의미
+      // options: {issueOnly, issueStatus, search, withRelatedRecords} — database.js listImports 와 같은 의미
       async listImports(limit, options) {
         const o = options || {};
         const db = await ready();
         const t = db.transaction(['imports'], 'readonly');
         const rows = await reqp(t.objectStore('imports').getAll());
-        const counts = await sourceCountsByImport();
+        // 파일별 레코드 수는 필요할 때만 센다(목록을 그릴 때마다 출처 전체를 훑지 않게)
+        const counts = o.withRelatedRecords ? await sourceCountsByImport() : null;
         return rows
-          .map(r => normalizeImportRecord(r, counts.get(r.id) || 0))
+          .map(r => normalizeImportRecord(r, counts ? (counts.get(r.id) || 0) : null))
           .filter(r => (!o.issueOnly || r.hasIssue)
             && (!o.issueStatus || (r.hasIssue && r.issueStatus === o.issueStatus))
             && (!o.search || `${r.filename} ${r.issueNote}`.toLowerCase().includes(String(o.search).toLowerCase())))

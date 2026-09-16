@@ -175,7 +175,7 @@ function currentClassificationSignature(){
 // 수집 시간 기준 막대 + "N분 · M개". 값이 있는 칸만, 정해진 순서로.
 // issueSecByValue: 축 값 → 이슈 파일에서 온 수집 시간(초). 주면 그 몫을 막대 안에 회색으로 덧그린다
 // (누적 지도의 회색 칸과 같은 색). 안 주면 예전처럼 한 가지 색 막대만 그린다.
-function conditionDistRowsHTML(rows,dim,issueSecByValue){
+function conditionDistRowsHTML(rows,dim,issueSecByValue,barColor){
   if(!rows.length) return '<div class="dc-empty">데이터 없음</div>';
   const maxSec=Math.max(1,...rows.map(r=>r.collectionSec));
   return rows.map(r=>{
@@ -186,7 +186,7 @@ function conditionDistRowsHTML(rows,dim,issueSecByValue){
     return `<div class="dist-row cond-row" data-dim="${dim}" data-value="${escapeHtml(r[dim])}"${
       issueSec?` title="이슈 데이터 ${fmtNum(Math.round(issueSec/60))}분 포함"`:''}>
       <span class="dist-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-      <span class="dist-bar-wrap"><span class="dist-bar" style="width:${pct}%">${
+      <span class="dist-bar-wrap"><span class="dist-bar" style="width:${pct}%;${barColor?`background:${barColor};`:''}">${
         issueSec?`<span class="dist-bar-issue" style="width:${issuePct}%"></span>`:''
       }</span></span>
       <span class="dist-count cond-count"><b>${fmtNum(r.collectionMinutes)}분</b> · ${fmtNum(r.recordCount)}개</span>

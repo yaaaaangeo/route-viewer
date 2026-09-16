@@ -194,8 +194,10 @@ async function loadIssueShare(baseFilter){
   if(currentIssueFilter()==='clean') return empty;
   const filter={...baseFilter,issueFilter:'issue_all'};
   try{
-    const [overview,place,road,weather,timeOfDay]=await Promise.all([
-      RouteDB.getOverview(filter),
+    // 이슈 기록이 한 건도 없으면 나머지 분포는 볼 것도 없다 — 질의 네 번을 아낀다
+    const overview=await RouteDB.getOverview(filter);
+    if(!overview.points) return empty;
+    const [place,road,weather,timeOfDay]=await Promise.all([
       RouteDB.getDistribution('place',filter),
       RouteDB.getDistribution('road',filter),
       RouteDB.getDistribution('weather',filter),
@@ -277,6 +279,9 @@ async function renderStatsView(){
     return;
   }
 
+  // 이슈 몫 조회도 같이 시작한다 — 기다리는 시간이 겹쳐서 화면이 두 배로 느려지지 않는다
+  const issueSharePromise=loadIssueShare(statsBaseFilter());
+
   // 나머지 분포는 한 번에 조회 (구역/차량은 위 overview 에서 이미 받았다)
   const [placeDist,roadDist,weatherDist,timeDist]=await Promise.all([
     RouteDB.getDistribution('place',filter),
@@ -286,9 +291,9 @@ async function renderStatsView(){
   ]);
   if(token!==statsRenderToken) return;
 
-  // 같은 조건에서 "이슈 파일에서 온 기록"만 한 번 더 세서 막대 안에 회색으로 겹쳐 그린다.
-  // '이슈 없음'을 보고 있으면 회색이 나올 데이터가 없으므로 아예 조회하지 않는다.
-  const issueShare=await loadIssueShare(statsBaseFilter());
+  // 같은 조건에서 "이슈 파일에서 온 기록"만 한 번 더 센 값 — 막대 안에 회색으로 겹쳐 그린다.
+  // '이슈 없음'을 보고 있으면 회색이 나올 데이터가 없으므로 아예 조회하지 않는다(loadIssueShare).
+  const issueShare=await issueSharePromise;
   if(token!==statsRenderToken) return;
 
   const total=overview.points;
@@ -322,14 +327,14 @@ async function renderStatsView(){
   try{ summaries=await RouteDB.listDateSummaries(); }
   catch(err){ console.warn('[경로뷰어] 날짜 요약 조회 실패:',err); }
   if(token!==statsRenderToken) return;
-  cardsHTML.push(...conditionStatsCardsHTML(summaries,filter));
+  cardsHTML.push(...conditionStatsCardsHTML(summaries,filter,barColor));
 
   regionGridEl.innerHTML=statsMode==='region'?cardsHTML.join(''):'';
   vehicleGridEl.innerHTML=statsMode==='vehicle'?cardsHTML.join(''):'';
 }
 
 // 통계 탭의 조건 카드들. filter 는 statsFilter()({zone} 또는 {vehicleLike}) — 기록 수 카드들과 같은 조건.
-function conditionStatsCardsHTML(summaries,filter){
+function conditionStatsCardsHTML(summaries,filter,barColor){
   const signature=currentClassificationSignature();
   const agg=groupBy=>ConditionStats.aggregate(summaries,{filter,groupBy,signature});
   // 이슈 파일에서 온 수집 시간만 따로 — 막대 안에 회색으로 겹쳐 그린다
@@ -346,12 +351,13 @@ function conditionStatsCardsHTML(summaries,filter){
   if(traffic.staleDates>0){
     cards.push(`<div class="dist-card cond-stale-card" style="grid-column:1/-1;"><div class="ir-note warn" style="margin:0;">분류 기준이 바뀐 뒤 아직 다시 분류하지 않은 날짜가 ${fmtNum(traffic.staleDates)}일 있어요. 아래 교통 시간대·조도 분포에는 그 날짜가 예전 기준으로 섞여 있어요 — [설정] 탭에서 재분류해 주세요.</div></div>`);
   }
+  // 막대 색은 위쪽 분포 카드와 같은 규칙 — 지역/차량을 고르면 그 색, 전체면 기본 색
   const card=(title,rows,dim,issueMap)=>{
     const issueTotal=[...(issueMap||new Map()).values()].reduce((a,v)=>a+v,0);
     const note=issueTotal
       ? `<div class="dc-issue-note"><span class="dc-issue-swatch"></span>회색 = 이슈로 표시한 파일에서 온 수집 시간 ${fmtNum(Math.round(issueTotal/60))}분</div>`
       : '';
-    return `<div class="dist-card cond-card" data-axis="${dim}"><div class="dc-title">${title}</div>${conditionDistRowsHTML(rows,dim,issueMap)}${note}</div>`;
+    return `<div class="dist-card cond-card" data-axis="${dim}"><div class="dc-title">${title}</div>${conditionDistRowsHTML(rows,dim,issueMap,barColor)}${note}</div>`;
   };
   cards.push(card('교통 시간대 · 수집 시간 / 기록 수',traffic.rows,'trafficPeriod',issueSec(['trafficPeriod'])));
   cards.push(card('조도 조건 · 수집 시간 / 기록 수',light.rows,'lightCondition',issueSec(['lightCondition'])));
