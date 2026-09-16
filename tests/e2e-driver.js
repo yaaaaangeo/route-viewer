@@ -987,6 +987,26 @@ async function main(win, dbFilePath) {
     JSON.stringify(toggled));
   await shot(win, '16-issue-admin');
 
+  section('신규 — 추천 주행 · 주행 계획');
+  await js(win, `switchTab('recommend')`);
+  await sleep(1200);
+  const planText = await js(win, `document.getElementById('rec-plan').innerText.replace(/\s+/g,' ')`);
+  check('추천 탭에 주행 계획이 뜬다(운행 시간 · 타임라인)',
+    /주행 계획/.test(planText) && /운행 시작/.test(planText)
+    && (await js(win, `document.querySelectorAll('#rec-plan .plan-table tbody tr').length`)) >= 5,
+    planText.slice(0, 90));
+  const earlier = await js(win, `(()=>{
+    onPlanInput('baselineStartTime','09:00');
+    onPlanInput('startTime','08:00');
+    const p=recPlanResult;
+    return {diff:p.comparison.collectMinutesDiff, first:p.lanes[0].blocks[0].from+' '+p.lanes[0].blocks[0].zone,
+      cond:p.lanes[0].blocks[0].conditionLabel, added:p.comparison.newConditions.map(c=>c.label).slice(0,3)};
+  })()`);
+  check('1시간 일찍 시작하면 어디부터 도는지와 무엇이 새로 잡히는지 보여준다',
+    earlier.diff === 60 && /^08:00 /.test(earlier.first) && earlier.added.length > 0,
+    `${earlier.first}(${earlier.cond}) · +${earlier.diff}분 · ${earlier.added.join(', ')}`);
+  await shot(win, '18-drive-plan');
+
   section('Test 4 — 앱 재실행 (창을 다시 로드해도 남아있는지)');
   const beforeReload = await js(win, `(async()=>await RouteDB.stats())()`);
   await new Promise(resolve => {

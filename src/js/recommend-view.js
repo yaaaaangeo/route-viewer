@@ -99,7 +99,7 @@ async function renderRecommendView(){
     issueFilter:recommendationIssueFilter(),
   });
   recStates=inputs.states||{};
-  recCache={key,result,appSettings:inputs.settings};
+  recCache={key,result,appSettings:inputs.settings,zones:inputs.zones};
   renderRecommendationResult();
   return result;
 }
@@ -125,6 +125,7 @@ function renderRecommendationResult(){
   const statusEl=document.getElementById('rec-status');
   if(statusEl){ statusEl.style.display='none'; statusEl.textContent=''; }
   renderRecommendationSummary(res);
+  renderDrivePlan();
   renderRecommendationFilters(res);
   const view=currentRecommendationView();
   renderRecommendationList(res,view);
@@ -493,4 +494,183 @@ async function restoreRecommendation(id){
   try{ recStates=await RouteDB.setRecommendationState(id,null); }
   catch(err){ showError('추천 상태를 되돌리지 못했어요. ('+((err&&err.message)||err)+')'); }
   renderRecommendationResult();
+}
+
+// ══════════════════════════════════════════════════════════
+//  주행 계획 — "그 시간에 나가면 어디부터 어떻게 돌까"
+//
+//  추천 카드가 "무엇이 부족한가"라면, 여기는 그걸 하루 일정으로 바꾼 것이다.
+//  운행 시간을 바꿔 보면(예: 9시 → 8시 시작) 무엇이 새로 잡히는지 바로 비교해서 보여준다.
+//  계산은 recommendation.js 의 buildDrivePlan 이 하고(순수 함수), 여기서는 입력과 표시만 한다.
+// ══════════════════════════════════════════════════════════
+const REC_PLAN_LS_KEY='rv.drivePlanForm';
+
+function defaultPlanForm(){
+  const d=Recommendation.PLAN_DEFAULTS;
+  return {
+    startTime:d.startTime, endTime:d.endTime,
+    baselineStartTime:d.baselineStartTime, baselineEndTime:d.baselineEndTime,
+    weekdayType:'weekday', vehicleCount:1, zones:[],
+  };
+}
+
+let recPlanForm=(function(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(REC_PLAN_LS_KEY)||'null');
+    return saved&&typeof saved==='object'?{...defaultPlanForm(),...saved}:defaultPlanForm();
+  }catch(_){ return defaultPlanForm(); }
+})();
+let recPlanResult=null;
+
+function savePlanForm(){
+  try{ localStorage.setItem(REC_PLAN_LS_KEY,JSON.stringify(recPlanForm)); }catch(_){ /* 무시 */ }
+}
+
+function onPlanInput(name,value){
+  if(name==='vehicleCount') recPlanForm.vehicleCount=Math.max(1,Math.min(8,Number(value)||1));
+  else recPlanForm[name]=String(value||'');
+  savePlanForm();
+  renderDrivePlan();
+}
+
+function togglePlanZone(zone,on){
+  const set=new Set(recPlanForm.zones||[]);
+  if(on) set.add(zone); else set.delete(zone);
+  recPlanForm.zones=[...set];
+  savePlanForm();
+  renderDrivePlan();
+}
+
+// 프리셋 — 사용자가 가장 자주 묻는 "한 시간 일찍/늦게"를 한 번에
+function applyPlanPreset(kind){
+  const d=Recommendation.PLAN_DEFAULTS;
+  if(kind==='default'){ recPlanForm.startTime=d.startTime; recPlanForm.endTime=d.endTime; }
+  else if(kind==='earlier'){ recPlanForm.startTime=shiftClock(recPlanForm.baselineStartTime||d.startTime,-60); recPlanForm.endTime=recPlanForm.baselineEndTime||d.endTime; }
+  else if(kind==='later'){ recPlanForm.startTime=recPlanForm.baselineStartTime||d.startTime; recPlanForm.endTime=shiftClock(recPlanForm.baselineEndTime||d.endTime,60); }
+  else if(kind==='wider'){ recPlanForm.startTime=shiftClock(recPlanForm.baselineStartTime||d.startTime,-60); recPlanForm.endTime=shiftClock(recPlanForm.baselineEndTime||d.endTime,60); }
+  savePlanForm();
+  renderDrivePlan();
+}
+
+function shiftClock(hhmm,deltaMinutes){
+  const m=/^(\d{1,2}):(\d{2})$/.exec(String(hhmm||''));
+  if(!m) return hhmm;
+  const total=Math.max(0,Math.min(1440,Number(m[1])*60+Number(m[2])+deltaMinutes));
+  const p=n=>String(n).padStart(2,'0');
+  return `${p(Math.floor(total/60))}:${p(total%60)}`;
+}
+
+function renderDrivePlan(){
+  const el=document.getElementById('rec-plan');
+  if(!el) return;
+  const res=recCache.result;
+  if(!res||res.empty){ el.innerHTML=''; recPlanResult=null; return; }
+  const plan=Recommendation.buildDrivePlan({
+    result:res, zones:recCache.zones||[], settings:recCache.appSettings||{},
+    plan:{...recPlanForm},
+  });
+  recPlanResult=plan;
+
+  const zonesAvailable=res.zones.map(z=>z.zone);
+  const picked=new Set((recPlanForm.zones||[]).filter(z=>zonesAvailable.includes(z)));
+  const zoneChips=zonesAvailable.map(z=>`
+    <label class="plan-zone${picked.size===0||picked.has(z)?' on':''}">
+      <input type="checkbox" ${picked.has(z)?'checked':''} onchange="togglePlanZone('${recEsc(z)}',this.checked)"/>
+      <span>${recEsc(z)}</span>
+    </label>`).join('');
+
+  const form=`
+    <div class="plan-form">
+      <label class="rec-filter"><span>요일</span>
+        <select onchange="onPlanInput('weekdayType',this.value)">
+          ${TimeConditions.WEEKDAY_TYPE_IDS.map(id=>optionHTML(id,TimeConditions.WEEKDAY_TYPE_LABELS[id],recPlanForm.weekdayType)).join('')}
+        </select></label>
+      <label class="rec-filter"><span>운행 시작</span>
+        <input type="time" value="${recEsc(recPlanForm.startTime)}" onchange="onPlanInput('startTime',this.value)"/></label>
+      <label class="rec-filter"><span>운행 종료</span>
+        <input type="time" value="${recEsc(recPlanForm.endTime)}" onchange="onPlanInput('endTime',this.value)"/></label>
+      <label class="rec-filter"><span>차량</span>
+        <input type="number" min="1" max="8" value="${recPlanForm.vehicleCount}" onchange="onPlanInput('vehicleCount',this.value)"/></label>
+      <span class="plan-presets">
+        <button class="btn ghost" type="button" onclick="applyPlanPreset('earlier')">1시간 일찍 시작</button>
+        <button class="btn ghost" type="button" onclick="applyPlanPreset('later')">1시간 늦게 종료</button>
+        <button class="btn ghost" type="button" onclick="applyPlanPreset('wider')">앞뒤 1시간씩</button>
+        <button class="btn ghost" type="button" onclick="applyPlanPreset('default')">기본으로</button>
+      </span>
+    </div>
+    <div class="plan-form">
+      <label class="rec-filter"><span>비교 기준(지금 운행)</span>
+        <input type="time" value="${recEsc(recPlanForm.baselineStartTime)}" onchange="onPlanInput('baselineStartTime',this.value)"/></label>
+      <label class="rec-filter"><span>~</span>
+        <input type="time" value="${recEsc(recPlanForm.baselineEndTime)}" onchange="onPlanInput('baselineEndTime',this.value)"/></label>
+      <span class="plan-zones">${zoneChips}<span class="plan-zone-hint">아무것도 고르지 않으면 활성 구역 전부</span></span>
+    </div>`;
+
+  if(!plan.ok){
+    el.innerHTML=`<div class="rec-section-title">주행 계획</div>${form}
+      <div class="ir-note warn">${plan.errors.map(recEsc).join('<br/>')}</div>`;
+    return;
+  }
+
+  const lanes=plan.lanes.map(lane=>`
+    <div class="plan-lane">
+      ${plan.lanes.length>1?`<div class="plan-lane-title">차량 ${lane.vehicleIndex}</div>`:''}
+      <div class="rec-table-wrap">
+        <table class="rec-table plan-table">
+          <thead><tr><th>시각</th><th>구역</th><th>조건</th><th>수집(분)</th><th>이동(분)</th><th>이유</th></tr></thead>
+          <tbody>
+            ${lane.blocks.map(b=>`
+              <tr${b.travelMinutes?' class="plan-move"':''}>
+                <td class="mono">${recEsc(b.from)}~${recEsc(b.to)}</td>
+                <td><b>${recEsc(b.zone)}</b></td>
+                <td>${conditionBadgesHTML({trafficPeriod:b.trafficPeriod,lightCondition:b.lightCondition},['trafficPeriod','lightCondition'].filter(k=>b[k]))}</td>
+                <td class="mono">${fmtNum(b.collectMinutes)}</td>
+                <td class="mono">${b.travelMinutes?fmtNum(b.travelMinutes):'—'}</td>
+                <td class="plan-reason">${recEsc(b.reason)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`).join('');
+
+  const byZone=Object.entries(plan.totals.byZone).sort((a,b)=>b[1]-a[1])
+    .map(([z,m])=>`${recEsc(z)} ${fmtNum(m)}분`).join(' · ')||'—';
+  const cmp=plan.comparison;
+  const diffText=cmp
+    ? (cmp.collectMinutesDiff>0
+        ? `지금(${recEsc(cmp.baselineWindow.start)}~${recEsc(cmp.baselineWindow.end)})보다 <b class="plan-gain">${fmtNum(cmp.collectMinutesDiff)}분</b> 더 모읍니다.`
+        : cmp.collectMinutesDiff<0
+          ? `지금(${recEsc(cmp.baselineWindow.start)}~${recEsc(cmp.baselineWindow.end)})보다 <b class="rec-bad">${fmtNum(-cmp.collectMinutesDiff)}분</b> 덜 모읍니다.`
+          : `지금 운행 시간과 총 수집 시간은 같습니다.`)
+    : '지금 운행 시간과 같은 조건이라 비교할 것이 없어요(비교 기준을 바꿔 보세요).';
+  const newList=cmp&&cmp.newConditions.length
+    ? `<ul class="plan-diff-list">${cmp.newConditions.slice(0,6).map(c=>`
+        <li><b>${recEsc(c.label)}</b> +${fmtNum(c.addedMinutes)}분${
+          c.shortfallMinutes!=null?` <span class="rec-cond">(이 조건 부족 ${fmtNum(c.shortfallMinutes)}분 중 ${fmtNum(c.coversMinutes||0)}분을 메웁니다)`:''}</span></li>`).join('')}</ul>`
+    : '';
+  const lostList=cmp&&cmp.lostConditions.length
+    ? `<div class="plan-lost">대신 빠지는 시간: ${cmp.lostConditions.slice(0,4).map(c=>`${recEsc(c.label)} ${fmtNum(c.lostMinutes)}분`).join(' · ')}</div>`
+    : '';
+
+  el.innerHTML=`
+    <div class="rec-section-title">주행 계획 <span class="ds-hint">운행 시간을 바꿔 보고 "어디부터 어떻게 돌지"를 받아보세요</span></div>
+    ${form}
+    <div class="plan-summary">
+      <div class="plan-summary-head">
+        <span class="mono">${recEsc(plan.date)} (${recEsc(plan.weekdayLabel)}) · ${recEsc(plan.window.start)}~${recEsc(plan.window.end)}</span>
+        ${plan.sun?`<span class="mono plan-sun">일출 ${recEsc(plan.sun.sunrise)} · 일몰 ${recEsc(plan.sun.sunset)}</span>`:''}
+        <span class="mono">예상 수집 ${fmtNum(plan.totals.collectMinutes)}분${plan.totals.travelMinutes?` · 이동 ${fmtNum(plan.totals.travelMinutes)}분`:''}</span>
+      </div>
+      <div class="plan-summary-zones">구역별 ${byZone}</div>
+      <div class="plan-diff">${diffText}${newList}${lostList}</div>
+    </div>
+    ${lanes}
+    <details class="rec-llm plan-limits">
+      <summary>이 계획을 어떻게 만들었나 · 한계</summary>
+      <ul>
+        <li>운행 시간을 교통 시간대·일출/일몰 경계로 자르고, 블록마다 그 조건에서 가장 부족한 구역을 고릅니다(추천 점수와 같은 규칙).</li>
+        <li>한 조건의 부족분을 채우면 다음으로 부족한 곳으로 옮깁니다. 구역을 옮기면 이동 시간만큼 수집이 줄어드는 것을 감안합니다.</li>
+        ${plan.limitations.map(l=>`<li>${recEsc(l)}</li>`).join('')}
+      </ul>
+    </details>`;
 }

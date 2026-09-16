@@ -25,6 +25,11 @@
   // issueMask: 그 기록이 어느 Import 파일에서 왔는지 요약한 비트(issue-filter.js) —
   // 이슈 데이터를 나눠 보려면 칸도 나눠 둬야 한다(레코드는 어떤 필터에서도 한 번만 센다)
   const CELL_DIMENSIONS = Object.freeze(['zone', 'vehicle', 'weekdayType', 'trafficPeriod', 'lightCondition', 'weather', 'issueMask']);
+
+  // 통계 탭의 분포 카드(장소·도로종류·날씨·파일 원본 시간대)를 위한 칸.
+  // 조건 칸(conditionCells)은 수집 시간 규칙 때문에 축을 늘리기 부담스러워서 따로 둔다.
+  // 하루치 조합은 보통 수십 줄이라, 이 값만 있으면 통계 탭이 원본 기록을 한 번도 읽지 않는다.
+  const DIST_DIMENSIONS = Object.freeze(['zone', 'vehicle', 'place', 'road', 'weather', 'timeOfDay', 'issueMask']);
   const DIMENSION_LABELS = Object.freeze({
     zone: '구역', vehicle: '차량', weekdayType: '요일', trafficPeriod: '교통', lightCondition: '조도', weather: '날씨', issueMask: '데이터 상태',
   });
@@ -100,7 +105,26 @@
       for (const d of CELL_DIMENSIONS) { if (a[d] < b[d]) return -1; if (a[d] > b[d]) return 1; }
       return 0;
     });
-    return { classificationSignature: TC.classificationSignature(cfg), conditionCells };
+
+    // 분포 칸 — 기록의 원본 값(장소·도로종류·날씨·파일의 시간대 열)을 조합별로 센다
+    const dist = new Map();
+    for (const r of rows || []) {
+      if (!r) continue;
+      const cell = {
+        zone: str(r.zone), vehicle: str(r.vehicle), place: str(r.place), road: str(r.road),
+        weather: str(r.weather), timeOfDay: str(r.timeOfDay), issueMask: Number(r.issueMask) || 0,
+      };
+      const key = DIST_DIMENSIONS.map(d => cell[d]).join('\u0001');
+      const acc = dist.get(key);
+      if (acc) acc.recordCount++;
+      else dist.set(key, { ...cell, recordCount: 1 });
+    }
+    const distCells = [...dist.values()].sort((a, b) => {
+      for (const d of DIST_DIMENSIONS) { if (a[d] < b[d]) return -1; if (a[d] > b[d]) return 1; }
+      return 0;
+    });
+
+    return { classificationSignature: TC.classificationSignature(cfg), conditionCells, distCells };
   }
 
   // 날짜 요약 하나를 데이터 상태(이슈) 필터로 걸러 본 값 — 달력 칸·수집 현황이 쓴다.
@@ -128,6 +152,62 @@
       collectionSec,
       driveSpanSec: (recordCount && !partial) ? summary.driveSpanSec : 0,
       issueFiltered: true, partial, fullCount: total,
+    };
+  }
+
+  // 날짜 요약들 → 통계 탭이 필요한 분포 한 벌.
+  // options.filter: {zone, vehicle, vehicleLike, fromDate, toDate, issueFilter}
+  // options.withIssueShare: 이슈 파일에서 온 기록만 따로 센 같은 분포도 같이(막대의 회색 몫)
+  // options.withIssueOverview: 전체/이슈 없음/이슈 데이터 기록 수(통계 탭 위 이슈 현황)
+  // → { points, days, zones, vehicles, place, road, weather, timeOfDay, issue, issueCounts }
+  function aggregateDistributions(summaries, options) {
+    const o = options || {};
+    const f = o.filter || {};
+    const mk = () => ({ zone: {}, vehicle: {}, place: {}, road: {}, weather: {}, timeOfDay: {} });
+    const all = mk();
+    const issue = o.withIssueShare ? mk() : null;
+    const counts = { all: 0, clean: 0, issue_all: 0 };
+    const dates = new Set();
+    let points = 0, issuePoints = 0, unlinked = 0, missingDates = 0;
+    const bump = (acc, cell, n) => {
+      ['zone', 'vehicle', 'place', 'road', 'weather', 'timeOfDay'].forEach(d => {
+        const v = cell[d];
+        if (v) acc[d][v] = (acc[d][v] || 0) + n;
+      });
+    };
+    for (const s of summaries || []) {
+      if (!s || !summaryMatchesDate(s.date, f)) continue;
+      if (!Array.isArray(s.distCells)) { missingDates++; continue; }
+      let dateHasRows = false;
+      for (const cell of s.distCells) {
+        // 이슈 필터·구역·차량 조건은 조건 칸과 같은 규칙으로 판정한다(issue-filter.js / cellMatches)
+        if (!cellMatches(cell, f)) continue;
+        const n = cell.recordCount || 0;
+        if (!n) continue;
+        dateHasRows = true;
+        points += n;
+        bump(all, cell, n);
+        if (issue && IF.maskMatches(cell.issueMask, 'issue_all')) { issuePoints += n; bump(issue, cell, n); }
+        if (o.withIssueOverview) {
+          counts.all += n;
+          if (IF.maskMatches(cell.issueMask, 'clean')) counts.clean += n;
+          if (IF.maskMatches(cell.issueMask, 'issue_all')) counts.issue_all += n;
+          if (!cell.issueMask) unlinked += n;
+        }
+      }
+      if (dateHasRows) dates.add(s.date);
+    }
+    const desc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+    const shape = (acc, n) => ({
+      points: n, zones: desc(acc.zone), vehicles: desc(acc.vehicle), place: desc(acc.place),
+      road: desc(acc.road), weather: desc(acc.weather), timeOfDay: desc(acc.timeOfDay),
+    });
+    return {
+      ...shape(all, points), days: dates.size,
+      issue: issue ? shape(issue, issuePoints) : null,
+      issueCounts: o.withIssueOverview ? { counts, unlinked } : null,
+      // 아직 분포 칸이 없는(예전 형식) 날짜 수 — 있으면 저장소가 원본 기록으로 세야 한다
+      missingDates,
     };
   }
 
@@ -305,6 +385,8 @@
 
   return {
     CELL_DIMENSIONS,
+    DIST_DIMENSIONS,
+    aggregateDistributions,
     filterDaySummary,
     DIMENSION_LABELS,
     DIMENSION_ORDERS,

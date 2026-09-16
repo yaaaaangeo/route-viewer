@@ -299,6 +299,92 @@ section('F. LLM 전달 구조 · 이유 문장');
     R.priorityOf(87.4).id === 'very_high' && R.priorityOf(60).id === 'high' && R.priorityOf(59.9).id === 'medium' && R.priorityOf(39.9).id === 'low');
 }
 
+  // ══════════════════════════════════════════════════════
+  section('G. 주행 계획 — 그 시간에 나가면 어디부터 어떻게 돌까');
+  // ══════════════════════════════════════════════════════
+  {
+    const zones = ZONES;
+    // 강남만 평일 10시~17시에 모은 상태 — 출근 피크(07~10)와 판교가 비어 있다
+    const summaries = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-07', '2026-09-08', '2026-09-09']
+      .map(date => daySummary(date, rows(date, { start: '10:00:00', count: 481, step: 30 })));
+    const res = build(summaries);
+
+    const plan = R.buildDrivePlan({ result: res, zones, settings: {}, plan: { startTime: '08:00', endTime: '18:00' } });
+    check('1. 운행 시간을 교통 시간대·조도 경계로 잘라 블록을 만든다', plan.ok && plan.lanes[0].blocks.length >= 5,
+      plan.ok ? `${plan.lanes[0].blocks.length}블록` : (plan.errors || []).join(' '));
+    check('   블록이 운행 시간을 빈틈없이 덮는다(겹치지도 않는다)', (() => {
+      const b = plan.lanes[0].blocks;
+      if (b[0].from !== '08:00' || b[b.length - 1].to !== '18:00') return false;
+      for (let i = 1; i < b.length; i++) if (b[i - 1].to !== b[i].from) return false;
+      return true;
+    })(), `${plan.lanes[0].blocks[0].from} ~ ${plan.lanes[0].blocks[plan.lanes[0].blocks.length - 1].to}`);
+    check('   블록마다 그 시각의 교통 시간대·조도 조건이 붙는다',
+      plan.lanes[0].blocks.every(b => b.trafficPeriod && b.conditionLabel)
+      && plan.lanes[0].blocks[0].trafficPeriod === 'morning_peak',
+      plan.lanes[0].blocks[0].conditionLabel);
+    check('   8시 블록은 비어 있는 조건(출근 피크)이라 추천 점수가 높다',
+      plan.lanes[0].blocks[0].score >= 60, `${plan.lanes[0].blocks[0].score}점`);
+
+    check('2. 한 조건을 채우면 다음으로 부족한 곳으로 옮긴다(하루 종일 한 칸에 머물지 않는다)',
+      new Set(plan.lanes[0].blocks.map(b => `${b.zone}|${b.trafficPeriod}`)).size > 1,
+      [...new Set(plan.lanes[0].blocks.map(b => b.zone + ' ' + b.trafficPeriod))].join(' → '));
+    check('   남은 부족분은 블록을 지날수록 줄어든다',
+      (() => {
+        const first = plan.lanes[0].blocks.find(b => b.remainingBefore > 0);
+        const later = plan.lanes[0].blocks.filter(b => b.zone === first.zone && b.trafficPeriod === first.trafficPeriod);
+        return later.length < 2 || later[1].remainingBefore < later[0].remainingBefore;
+      })());
+
+    const ganAm = R.buildDrivePlan({ result: res, zones, settings: {}, plan: { startTime: '08:00', endTime: '18:00', zones: ['강남'] } });
+    check('3. 구역을 골라 계획할 수 있다(오늘은 강남만)',
+      ganAm.ok && ganAm.zones.join(',') === '강남' && ganAm.lanes[0].blocks.every(b => b.zone === '강남'));
+
+    const compared = R.buildDrivePlan({
+      result: res, zones, settings: {},
+      plan: { startTime: '08:00', endTime: '18:00', baselineStartTime: '09:00', baselineEndTime: '18:00' },
+    });
+    check('4. 지금 운행 시간과 비교해서 무엇이 새로 잡히는지 알려준다',
+      compared.comparison && compared.comparison.collectMinutesDiff === 60
+      && compared.comparison.newConditions.length > 0,
+      `수집 ${compared.comparison.collectMinutesDiff}분 · 새 조건 ${compared.comparison.newConditions.map(c => c.label).join(', ')}`);
+    check('   새로 잡히는 조건에 "부족분을 얼마나 메우는지"가 붙는다',
+      compared.comparison.newConditions.every(c => c.coversMinutes == null || c.coversMinutes <= c.shortfallMinutes),
+      compared.comparison.newConditions.map(c => `${c.label} ${c.coversMinutes}/${c.shortfallMinutes}분`).join(' · '));
+    check('   1시간 일찍 시작하면 그만큼 총 수집 시간이 늘어난다',
+      compared.totals.collectMinutes - compared.baseline.totals.collectMinutes === 60,
+      `${compared.baseline.totals.collectMinutes}분 → ${compared.totals.collectMinutes}분`);
+
+    const later = R.buildDrivePlan({
+      result: res, zones, settings: {},
+      plan: { startTime: '09:00', endTime: '19:00', baselineStartTime: '09:00', baselineEndTime: '18:00' },
+    });
+    check('5. 늦게까지 달리는 계획은 저녁·야간 조건이 새로 잡힌다',
+      later.comparison.newConditions.some(c => ['evening_peak', 'night'].includes(c.trafficPeriod)),
+      later.comparison.newConditions.map(c => c.label).join(' / '));
+
+    const two = R.buildDrivePlan({ result: res, zones, settings: {}, plan: { startTime: '08:00', endTime: '12:00', vehicleCount: 2 } });
+    check('6. 차량이 여러 대면 같은 시간에 서로 다른 구역으로 나눈다',
+      two.lanes.length === 2 && two.lanes[0].blocks.every((b, i) => b.zone !== two.lanes[1].blocks[i].zone),
+      two.lanes.map(l => `차량${l.vehicleIndex}: ${l.blocks[0].zone}`).join(' · '));
+
+    const noSun = R.buildDrivePlan({ result: res, zones: [{ name: '강남', active: true }], settings: {}, plan: { startTime: '08:00', endTime: '18:00' } });
+    check('7. 구역 좌표가 없으면 조도 없이 교통 시간대만으로 계획하고 그 사실을 밝힌다',
+      noSun.ok && noSun.limitations.some(l => /일출·일몰/.test(l)),
+      noSun.limitations.find(l => /일출·일몰/.test(l)) || '(없음)');
+
+    const bad = R.buildDrivePlan({ result: res, zones, settings: {}, plan: { startTime: '18:00', endTime: '09:00' } });
+    check('8. 시작이 종료보다 늦으면 계획을 세우지 않고 이유를 알려준다',
+      bad.ok === false && bad.errors.length > 0, (bad.errors || []).join(' '));
+
+    check('9. 계획은 이동 시간을 수집 시간에서 뺀다',
+      plan.lanes[0].blocks.every(b => b.collectMinutes === b.minutes - b.travelMinutes));
+    check('10. 같은 입력이면 같은 계획이 나온다(무작위 없음)',
+      JSON.stringify(R.buildDrivePlan({ result: res, zones, settings: {}, plan: { startTime: '08:00', endTime: '18:00' } }))
+      === JSON.stringify(plan));
+    check('11. 한계(이동 시간 어림·날씨 미예측)를 함께 알려준다',
+      plan.limitations.some(l => /직선 거리/.test(l)) && plan.limitations.some(l => /날씨는 예측하지 않습니다/.test(l)));
+  }
+
 console.log('\n' + '─'.repeat(60));
 console.log(`  통과 ${passed} / 실패 ${failed}`);
 if (failures.length) failures.forEach(f => console.log('   - ' + f));

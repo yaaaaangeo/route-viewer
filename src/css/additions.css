@@ -478,3 +478,29 @@
 .dist-bar-issue{position:absolute;right:0;top:0;bottom:0;background:#7d8798;border-radius:0 4px 4px 0;}
 .dc-issue-note{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--text-faint);margin-top:8px;}
 .dc-issue-swatch{display:inline-block;width:18px;height:8px;border-radius:3px;background:#7d8798;flex:none;}
+
+/* ── 주행 계획 ────────────────────────────────────────── */
+.plan-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;}
+.plan-form input[type=time],.plan-form input[type=number]{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:5px 8px;color:var(--text);font-size:11.5px;font-family:'JetBrains Mono',monospace;}
+.plan-form input[type=number]{width:62px;}
+.plan-presets{display:flex;gap:6px;flex-wrap:wrap;}
+.plan-presets .btn{padding:5px 10px;font-size:11px;}
+.plan-zones{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.plan-zone{display:inline-flex;align-items:center;gap:4px;font-size:11px;border:1px solid var(--line);border-radius:6px;padding:3px 8px;cursor:pointer;color:var(--text-dim);}
+.plan-zone.on{color:var(--text);border-color:var(--teal-dim);}
+.plan-zone-hint{font-size:10.5px;color:var(--text-faint);}
+.plan-summary{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:10px;display:flex;flex-direction:column;gap:6px;}
+.plan-summary-head{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;}
+.plan-sun{color:var(--text-dim);}
+.plan-summary-zones{font-size:11.5px;color:var(--text-dim);}
+.plan-diff{font-size:12px;line-height:1.6;}
+.plan-gain{color:var(--green);}
+.plan-diff-list{margin:5px 0 0;padding-left:18px;font-size:11.5px;color:var(--text-dim);}
+.plan-diff-list b{color:var(--text);}
+.plan-lost{font-size:11px;color:var(--amber);margin-top:4px;}
+.plan-lane{margin-bottom:10px;}
+.plan-lane-title{font-size:11.5px;font-weight:700;margin-bottom:5px;}
+.plan-table td{vertical-align:middle;}
+.plan-table tr.plan-move td{border-top:1px dashed var(--line);}
+.plan-reason{color:var(--text-dim);font-size:10.5px;}
+.plan-limits{margin-top:4px;}

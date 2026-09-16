@@ -594,7 +594,7 @@ class RouteDatabase {
   _rebuildDateSummary(date, classification) {
     const rows = this.db.all(
       `SELECT date, time, zone, vehicle, weather, speed, latitude AS lat, longitude AS lng,
-              issue_mask AS issueMask
+              place, road, time_of_day AS timeOfDay, issue_mask AS issueMask
          FROM driving_records WHERE date = ? ORDER BY timestamp, id`,
       [date]
     );
@@ -761,9 +761,60 @@ class RouteDatabase {
   //  따로 물어보면 8만 건을 여섯 번 훑는다. 그래서 화면은 묶음 API 하나만 부르고, 저장소가
   //  자기 방식대로(여기서는 SQL, 거기서는 스캔 한 번) 답한다.
   // ══════════════════════════════════════════════════════
-  // 통계 탭 — 요약 + 장소/도로/날씨/시간대 분포, options.withIssueShare 면 그중 이슈 몫도 함께.
-  // 이슈 몫은 같은 GROUP BY 안에서 조건부 SUM 으로 세기 때문에 쿼리가 두 배로 늘지 않는다.
+  // 통계 탭 — 날짜 요약의 분포 칸(distCells)만 더한다. 원본 기록은 한 건도 읽지 않는다.
+  // 분포 칸이 없는 예전 요약이 섞여 있으면(요약 재생성 전) 그 날짜만 원본으로 세서 채운다.
   getStatsBundle(filter = {}, options = {}) {
+    const fromSummaries = ConditionStats.aggregateDistributions(this.listDateSummaries(), {
+      filter, withIssueShare: !!options.withIssueShare, withIssueOverview: !!options.withIssueOverview,
+    });
+    if (!fromSummaries.missingDates) return this._statsBundleFrom(fromSummaries, options);
+    return this._statsBundleFromRecords(filter, options);
+  }
+
+  // 분포 칸 한 벌 → 화면이 받는 모양
+  _statsBundleFrom(agg, options) {
+    const shape = src => ({
+      points: src.points, zones: src.zones, vehicles: src.vehicles, place: src.place,
+      road: src.road, weather: src.weather, timeOfDay: src.timeOfDay,
+      timeBuckets: [],   // 파일 원본 시간대가 있으면 그걸 쓰고, 없을 때만 시각 묶음이 필요하다
+    });
+    const out = { ...shape(agg), days: agg.days, issue: agg.issue ? shape(agg.issue) : null };
+    if (options.withIssueOverview && agg.issueCounts) {
+      out.issueOverview = {
+        ...IssueFilter.summarizeImports(this.listImports(100000, {})),
+        recordCounts: agg.issueCounts.counts,
+        openRecordCount: (this.db.get(
+          `SELECT COUNT(*) AS n FROM driving_records WHERE (issue_mask & ${IssueFilter.MASK.OPEN}) <> 0`
+        ) || { n: 0 }).n,
+        unlinkedRecords: agg.issueCounts.unlinked,
+      };
+    } else {
+      out.issueOverview = null;
+    }
+    // 파일에 '시간대' 열이 없던 옛 기록만 있으면 시각을 4시간 묶음으로 보여준다
+    if (!out.timeOfDay.length) out.timeBuckets = this._timeBuckets(options.filterForBuckets || {});
+    return out;
+  }
+
+  _timeBuckets(filter) {
+    const { clause, params } = this._filterSql(filter);
+    const rows = this.db.all(
+      `SELECT substr(time, 1, 2) AS hh, COUNT(*) AS n FROM driving_records ${clause}
+       ${clause ? 'AND' : 'WHERE'} time <> '' GROUP BY hh`, params);
+    const counts = {};
+    rows.forEach(r => {
+      const h = parseInt(r.hh, 10);
+      if (isNaN(h) || h < 0 || h > 23) return;
+      const start = Math.floor(h / 4) * 4;
+      const pad = n => String(n).padStart(2, '0');
+      const k = `${pad(start)}-${pad(start + 4)}시`;
+      counts[k] = (counts[k] || 0) + r.n;
+    });
+    return TIME_BUCKET_ORDER.filter(k => counts[k]).map(k => [k, counts[k]]);
+  }
+
+  // 요약이 아직 새 형식이 아닐 때만 쓰는 예전 경로(원본 기록 집계)
+  _statsBundleFromRecords(filter = {}, options = {}) {
     const { clause, params } = this._filterSql(filter);
     const withIssue = !!options.withIssueShare && this.hasIssueImports();
     const issueSum = withIssue ? `, SUM(CASE WHEN ${ISSUE_RECORD_SQL} THEN 1 ELSE 0 END) AS issueN` : '';

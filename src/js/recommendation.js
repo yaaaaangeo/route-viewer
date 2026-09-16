@@ -927,6 +927,335 @@
     return r;
   }
 
+  // ══════════════════════════════════════════════════════
+  //  8) 주행 계획 — "그 시간에 나가면 어디부터 어떻게 돌까"
+  //
+  //  추천 카드가 "무엇이 부족한가"를 말한다면, 주행 계획은 그 답을 하루 일정으로 바꾼다.
+  //    · 운행 시간(예: 08:00~18:00)을 교통 시간대·조도 경계로 잘라 시간 블록을 만들고,
+  //    · 블록마다 그 조건에서 가장 부족한 구역을 고르고(추천 점수를 그대로 쓴다),
+  //    · 구역을 옮기면 이동 시간만큼 수집이 줄어드는 것을 감안해 하루 경로를 정한다.
+  //    · 지금 운행 시간(기본 09:00~18:00)으로 같은 계산을 한 번 더 해서 무엇이 달라지는지 비교한다.
+  //
+  //  순위·수치는 전부 여기(통계·규칙)가 정한다. 이동 시간은 구역 중심 사이 직선 거리 ÷ 평균 속도
+  //  로 잡은 어림값이고(실제 도로·신호 미반영), 날씨는 예측하지 않는다.
+  // ══════════════════════════════════════════════════════
+  const PLAN_DEFAULTS = Object.freeze({
+    startTime: '09:00',
+    endTime: '18:00',
+    baselineStartTime: '09:00',
+    baselineEndTime: '18:00',
+    maxBlockMinutes: 60,   // 한 블록이 이보다 길면 나눈다(구역을 바꿀 기회를 준다)
+    minBlockMinutes: 15,   // 이보다 짧은 꼬리는 앞 블록에 붙인다
+    travelSpeedKmh: 30,    // 시내 평균 — 구역 간 이동 시간 어림
+    vehicleCount: 1,
+  });
+
+  function planClock(value, fallback) {
+    const v = TC.parseClock(value, true);
+    return v == null ? TC.parseClock(fallback, true) : v;
+  }
+
+  // 운행 시간 안의 경계(교통 시간대 시작/끝 · 조도 구간 시작/끝)를 모아 블록으로 자른다
+  function planBlocks(startMin, endMin, periods, light, limits) {
+    const edges = new Set([startMin, endMin]);
+    periods.forEach(p => {
+      periodIntervals(p).forEach(([s, e]) => { edges.add(s); edges.add(e); });
+    });
+    if (light) {
+      Object.values(light.intervals).forEach(list => list.forEach(([s, e]) => { edges.add(s); edges.add(e); }));
+    }
+    const inside = [...edges].filter(v => v > startMin && v < endMin).sort((a, b) => a - b);
+    const cuts = [startMin, ...inside, endMin];
+    const blocks = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      let from = cuts[i];
+      const to = cuts[i + 1];
+      if (to - from <= 0) continue;
+      // 긴 구간은 maxBlockMinutes 로 쪼갠다
+      while (to - from > limits.maxBlockMinutes) {
+        blocks.push([from, from + limits.maxBlockMinutes]);
+        from += limits.maxBlockMinutes;
+      }
+      blocks.push([from, to]);
+    }
+    // 너무 짧은 꼬리는 앞 블록에 붙인다(5분짜리 줄이 늘어서 계획이 읽기 어려워지지 않게)
+    const merged = [];
+    blocks.forEach(b => {
+      const prev = merged[merged.length - 1];
+      if (prev && b[1] - b[0] < limits.minBlockMinutes && prev[1] === b[0]) prev[1] = b[1];
+      else merged.push([b[0], b[1]]);
+    });
+    return merged;
+  }
+
+  function lightConditionAt(light, minute) {
+    if (!light) return null;
+    for (const id of TC.LIGHT_CONDITION_IDS) {
+      if ((light.intervals[id] || []).some(([s, e]) => minute >= s && minute < e)) return id;
+    }
+    return null;
+  }
+
+  function trafficPeriodAt(periods, minute) {
+    for (const p of periods) {
+      if (periodIntervals(p).some(([s, e]) => minute >= s && minute < e)) return p.id;
+    }
+    return TC.UNKNOWN;
+  }
+
+  // 구역 사이 이동 시간(분) — 직선 거리 ÷ 평균 속도. 좌표가 없으면 null(모르면 0으로 두지 않고 밝힌다)
+  function travelMinutes(fromLoc, toLoc, speedKmh) {
+    if (!fromLoc || !toLoc) return null;
+    const km = haversineKm(fromLoc.lat, fromLoc.lng, toLoc.lat, toLoc.lng);
+    if (!Number.isFinite(km)) return null;
+    return Math.round((km / Math.max(5, speedKmh)) * 60);
+  }
+
+  function haversineKm(lat1, lng1, lat2, lng2) {
+    const R = 6371;
+    const toRad = d => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+
+  // 조건 한 칸(구역 × 요일 × 교통 시간대 × 조도)에 이 계획이 더 담을 수 있는 분.
+  // 목표를 이미 채운 칸에 하루 종일 머무르지 않도록, 남은 부족분까지만 제값으로 치고
+  // 그 뒤는 값을 크게 깎는다(0으로 두면 "갈 곳이 없다"가 되어 계획이 비어버린다).
+  const OVERFILL_VALUE_RATIO = 0.15;
+
+  // 운행 시간 하나에 대한 계획(차량 여러 대면 대수만큼 lane 을 만든다)
+  function planWindow(ctx, startMin, endMin) {
+    const { periods, light, limits, zoneNames, recByKey, locations, weekdayType } = ctx;
+    const blocks = planBlocks(startMin, endMin, periods, light, limits);
+    const conditions = blocks.map(([from, to]) => {
+      const mid = from + Math.max(1, Math.round((to - from) / 2));
+      return {
+        from, to, minutes: to - from,
+        trafficPeriod: trafficPeriodAt(periods, mid),
+        lightCondition: lightConditionAt(light, mid),
+      };
+    });
+    const recFor = (zone, cond) => recByKey.get([zone, weekdayType, cond.trafficPeriod, cond.lightCondition || 'any'].join('|'))
+      || recByKey.get([zone, weekdayType, cond.trafficPeriod, 'any'].join('|')) || null;
+
+    // 시간 순서대로 한 블록씩 정한다. 각 조건 칸의 "남은 부족분"을 장부로 들고 있어서,
+    // 한 칸을 채우고 나면 자연히 다음으로 부족한 곳으로 옮겨간다.
+    // 옮길지 말지는 "옮겨서 더 버는 값 vs 이동에 쓰는 수집 시간"으로 정한다(억지로 돌아다니지 않는다).
+    const remaining = new Map();
+    const remainingOf = (zone, cond) => {
+      const key = `${zone}|${cond.trafficPeriod}|${cond.lightCondition || 'any'}`;
+      if (!remaining.has(key)) {
+        const rec = recFor(zone, cond);
+        remaining.set(key, rec ? Math.max(0, rec.need.additionalMinutes) : 0);
+      }
+      return { key, minutes: remaining.get(key) };
+    };
+    const lanes = [];
+    const taken = conditions.map(() => new Set());
+    const zoneMinutes = new Map(zoneNames.map(n => [n, 0]));
+    const vehicles = Math.max(1, Math.min(8, Math.round(limits.vehicleCount || 1)));
+    for (let v = 0; v < vehicles; v++) {
+      let current = null;
+      const laneBlocks = conditions.map((cond, i) => {
+        const options = zoneNames.filter(z => !taken[i].has(z)).map(zone => {
+          const travel = (current && current !== zone)
+            ? (travelMinutes(locations.get(current), locations.get(zone), limits.travelSpeedKmh) || 0) : 0;
+          const collect = Math.max(0, cond.minutes - travel);
+          const rec = recFor(zone, cond);
+          const score = rec ? rec.score : 0;
+          const left = remainingOf(zone, cond).minutes;
+          const useful = Math.min(collect, left);
+          const overfill = collect - useful;
+          return {
+            zone, travel, collect, rec, score, left,
+            value: score * (useful + overfill * OVERFILL_VALUE_RATIO),
+          };
+        });
+        options.sort((a, b) =>
+          b.value - a.value
+          || (a.zone === current ? -1 : b.zone === current ? 1 : 0)   // 값이 같으면 있던 곳에 머문다
+          || b.left - a.left
+          || (zoneMinutes.get(a.zone) || 0) - (zoneMinutes.get(b.zone) || 0)
+          || (a.zone < b.zone ? -1 : 1));
+        const pick = options[0] || { zone: zoneNames[0], travel: 0, collect: cond.minutes, rec: null, score: 0, left: 0 };
+        const step = { zone: pick.zone, travel: current ? pick.travel : 0 };
+        const rec = pick.rec;
+        const travel = step.travel;
+        const collectMinutes = Math.max(0, cond.minutes - travel);
+        taken[i].add(step.zone);
+        current = step.zone;
+        zoneMinutes.set(step.zone, (zoneMinutes.get(step.zone) || 0) + collectMinutes);
+        const ledger = remainingOf(step.zone, cond);
+        remaining.set(ledger.key, Math.max(0, ledger.minutes - collectMinutes));
+        return {
+          from: TC.formatClock(cond.from), to: TC.formatClock(cond.to), minutes: cond.minutes,
+          trafficPeriod: cond.trafficPeriod, lightCondition: cond.lightCondition,
+          conditionLabel: [TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod], cond.lightCondition ? TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : null].filter(Boolean).join(' · '),
+          zone: step.zone,
+          travelMinutes: travel,
+          collectMinutes,
+          score: rec ? rec.score : null,
+          priority: rec ? rec.priority : null,
+          recommendationId: rec ? rec.id : null,
+          shortfallMinutes: rec ? rec.need.additionalMinutes : null,
+          remainingBefore: ledger.minutes,
+          reason: rec
+            ? `${TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod]}${cond.lightCondition ? ' · ' + TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : ''} 조건에서 ${step.zone}이(가) 가장 부족해요(추천 점수 ${rec.score}점 · 이 조건 남은 부족 ${ledger.minutes}분)`
+            : `${step.zone}의 이 조건 기록이 없어 비교할 근거가 없어요(점수 없음)`,
+        };
+      });
+      lanes.push({ vehicleIndex: v + 1, blocks: laneBlocks });
+    }
+    return { blocks: conditions, lanes };
+  }
+
+  function summarizeLanes(lanes) {
+    const byZone = {}, byPeriod = {}, byLight = {}, byCondition = {};
+    let collect = 0, travel = 0;
+    lanes.forEach(lane => lane.blocks.forEach(b => {
+      collect += b.collectMinutes;
+      travel += b.travelMinutes;
+      byZone[b.zone] = (byZone[b.zone] || 0) + b.collectMinutes;
+      byPeriod[b.trafficPeriod] = (byPeriod[b.trafficPeriod] || 0) + b.collectMinutes;
+      const lk = b.lightCondition || 'unknown';
+      byLight[lk] = (byLight[lk] || 0) + b.collectMinutes;
+      const ck = `${b.zone}|${b.trafficPeriod}|${b.lightCondition || 'any'}`;
+      byCondition[ck] = (byCondition[ck] || 0) + b.collectMinutes;
+    }));
+    return { collectMinutes: collect, travelMinutes: travel, byZone, byPeriod, byLight, byCondition };
+  }
+
+  function buildDrivePlan(input) {
+    const o = input || {};
+    const result = o.result;
+    const plan = { ...PLAN_DEFAULTS, ...(o.plan || {}) };
+    const errors = [];
+    if (!result || !Array.isArray(result.recommendations) || !result.recommendations.length) {
+      errors.push('추천을 먼저 계산해야 계획을 세울 수 있어요(기록이 없거나 활성 구역이 없어요).');
+    }
+    const startMin = TC.parseClock(plan.startTime, true);
+    const endMin = TC.parseClock(plan.endTime, true);
+    if (startMin == null) errors.push('시작 시각을 HH:MM 으로 적어주세요.');
+    if (endMin == null) errors.push('종료 시각을 HH:MM 으로 적어주세요.');
+    if (startMin != null && endMin != null && endMin - startMin < 30) errors.push('운행 시간이 30분보다는 길어야 계획을 세울 수 있어요.');
+    if (errors.length) return { ok: false, errors };
+
+    const cfg = TC.classificationConfig(o.settings || {});
+    const today = result.today;
+    const weekdayType = plan.weekdayType && TC.WEEKDAY_TYPE_IDS.includes(plan.weekdayType) ? plan.weekdayType : 'weekday';
+    const date = plan.date && TC.parseDate(plan.date) ? plan.date : nextDateOfType(today, weekdayType);
+    const rawZones = (o.zones || []).filter(z => z && z.name && z.active !== false);
+    const locations = new Map();
+    rawZones.forEach(z => { const loc = zoneLocation(z); if (loc) locations.set(z.name, loc); });
+    const allZoneNames = result.zones.map(z => z.zone);
+    // 계획에 넣을 구역을 고를 수 있다(예: 오늘은 강남만 돈다). 고른 게 없으면 활성 구역 전부.
+    const wanted = Array.isArray(plan.zones) ? plan.zones.filter(z => allZoneNames.includes(z)) : [];
+    const zoneNames = wanted.length ? wanted : allZoneNames;
+    const reference = zoneNames.map(n => locations.get(n)).find(Boolean) || null;
+    const light = reference ? lightIntervals(date, reference, cfg) : null;
+    const recByKey = new Map(result.recommendations.map(r => [r.id, r]));
+
+    const ctx = {
+      periods: cfg.trafficPeriods, light, zoneNames, recByKey, locations, weekdayType,
+      limits: {
+        maxBlockMinutes: Math.max(20, Math.min(240, Number(plan.maxBlockMinutes) || PLAN_DEFAULTS.maxBlockMinutes)),
+        minBlockMinutes: Math.max(5, Math.min(60, Number(plan.minBlockMinutes) || PLAN_DEFAULTS.minBlockMinutes)),
+        travelSpeedKmh: Math.max(5, Math.min(120, Number(plan.travelSpeedKmh) || PLAN_DEFAULTS.travelSpeedKmh)),
+        vehicleCount: plan.vehicleCount,
+      },
+    };
+
+    const planned = planWindow(ctx, startMin, endMin);
+    const plannedTotals = summarizeLanes(planned.lanes);
+
+    // 비교 기준(지금 운행 시간)으로 같은 계산을 한 번 더 — "한 시간 일찍 나가면 뭐가 달라지나"
+    const baseStart = planClock(plan.baselineStartTime, PLAN_DEFAULTS.baselineStartTime);
+    const baseEnd = planClock(plan.baselineEndTime, PLAN_DEFAULTS.baselineEndTime);
+    const sameWindow = baseStart === startMin && baseEnd === endMin;
+    const baseline = sameWindow ? null : planWindow(ctx, baseStart, baseEnd);
+    const baselineTotals = baseline ? summarizeLanes(baseline.lanes) : null;
+
+    const comparison = baselineTotals ? buildPlanComparison({
+      plannedTotals, baselineTotals, recByKey,
+      window: { start: TC.formatClock(startMin), end: TC.formatClock(endMin) },
+      baselineWindow: { start: TC.formatClock(baseStart), end: TC.formatClock(baseEnd) },
+    }) : null;
+
+    const limitations = [
+      '구역 사이 이동 시간은 구역 중심을 잇는 직선 거리 ÷ 평균 속도로 잡은 어림값입니다(실제 도로·신호·주차 시간은 반영하지 않습니다).',
+      '계획의 수집 시간은 "그 시간에 그 구역에 있으면 계속 기록된다"고 본 최대치입니다(신호 대기·휴식은 빼지 않았습니다).',
+      '날씨는 예측하지 않습니다 — 비 오는 날 우선 수집 같은 판단은 당일에 직접 하세요.',
+    ];
+    if (!reference) limitations.push('구역 좌표가 없어 일출·일몰(조도 조건)을 계산하지 못했습니다 — 교통 시간대만으로 계획했습니다.');
+    if (zoneNames.some(n => !locations.has(n))) {
+      limitations.push(`좌표가 없는 구역(${zoneNames.filter(n => !locations.has(n)).join(', ')})은 이동 시간을 0분으로 봤습니다.`);
+    }
+
+    return {
+      ok: true,
+      date,
+      weekdayType,
+      weekdayLabel: TC.WEEKDAY_TYPE_LABELS[weekdayType],
+      window: { start: TC.formatClock(startMin), end: TC.formatClock(endMin), minutes: endMin - startMin },
+      zones: zoneNames,
+      availableZones: allZoneNames,
+      baselineWindow: { start: TC.formatClock(baseStart), end: TC.formatClock(baseEnd), minutes: baseEnd - baseStart },
+      sun: light && light.sun && !light.sun.polar
+        ? { sunrise: TC.formatClock(light.sun.sunriseMinutes), sunset: TC.formatClock(light.sun.sunsetMinutes), place: reference }
+        : null,
+      vehicleCount: ctx.limits.vehicleCount,
+      travelSpeedKmh: ctx.limits.travelSpeedKmh,
+      lanes: planned.lanes,
+      totals: plannedTotals,
+      baseline: baseline ? { window: { start: TC.formatClock(baseStart), end: TC.formatClock(baseEnd) }, lanes: baseline.lanes, totals: baselineTotals } : null,
+      comparison,
+      limitations,
+    };
+  }
+
+  // 지금 운행 시간과 견줘서 "무엇이 새로 잡히고, 부족분을 얼마나 메우는지"
+  function buildPlanComparison({ plannedTotals, baselineTotals, recByKey, window, baselineWindow }) {
+    const newConditions = [];
+    Object.entries(plannedTotals.byCondition).forEach(([key, minutes]) => {
+      const before = baselineTotals.byCondition[key] || 0;
+      if (minutes - before <= 0) return;
+      const [zone, trafficPeriod, lightCondition] = key.split('|');
+      const rec = recByKey.get([zone, 'weekday', trafficPeriod, lightCondition].join('|'))
+        || recByKey.get([zone, 'weekend', trafficPeriod, lightCondition].join('|')) || null;
+      newConditions.push({
+        zone, trafficPeriod, lightCondition: lightCondition === 'any' ? null : lightCondition,
+        label: [zone, TC.TRAFFIC_PERIOD_LABELS[trafficPeriod], lightCondition === 'any' ? null : TC.LIGHT_CONDITION_LABELS[lightCondition]].filter(Boolean).join(' · '),
+        addedMinutes: minutes - before,
+        beforeMinutes: before,
+        score: rec ? rec.score : null,
+        shortfallMinutes: rec ? rec.need.additionalMinutes : null,
+        // 그 조건의 부족분 중 이번 계획이 메우는 몫(부족분을 넘어서 세지 않는다)
+        coversMinutes: rec ? Math.min(rec.need.additionalMinutes, minutes) : null,
+      });
+    });
+    newConditions.sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || b.addedMinutes - a.addedMinutes);
+    const lostConditions = [];
+    Object.entries(baselineTotals.byCondition).forEach(([key, minutes]) => {
+      const after = plannedTotals.byCondition[key] || 0;
+      if (minutes - after <= 0) return;
+      const [zone, trafficPeriod, lightCondition] = key.split('|');
+      lostConditions.push({
+        zone, trafficPeriod, lightCondition: lightCondition === 'any' ? null : lightCondition,
+        label: [zone, TC.TRAFFIC_PERIOD_LABELS[trafficPeriod], lightCondition === 'any' ? null : TC.LIGHT_CONDITION_LABELS[lightCondition]].filter(Boolean).join(' · '),
+        lostMinutes: minutes - after,
+      });
+    });
+    lostConditions.sort((a, b) => b.lostMinutes - a.lostMinutes);
+    return {
+      window, baselineWindow,
+      collectMinutesDiff: plannedTotals.collectMinutes - baselineTotals.collectMinutes,
+      travelMinutesDiff: plannedTotals.travelMinutes - baselineTotals.travelMinutes,
+      newConditions, lostConditions,
+      coversMinutes: newConditions.reduce((a, c) => a + (c.coversMinutes || 0), 0),
+    };
+  }
+
   // ── 정렬 · 필터 · 상태(숨김/제외/완료) ─────────────────
   const idCompare = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const SORTS = {
@@ -1067,6 +1396,8 @@
     calculateConfidence,
     generateRecommendationReason,
     buildRecommendations,
+    buildDrivePlan,
+    PLAN_DEFAULTS,
     sortRecommendations,
     filterRecommendations,
     applyRecommendationStates,

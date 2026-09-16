@@ -231,6 +231,26 @@ async function main() {
       && /추천 설정/.test(ui.html('rec-settings')) && /데이터 한계/.test(ui.html('rec-limitations'))
       && /보장하지 않습니다/.test(ui.html('rec-limitations')));
 
+    // ── 주행 계획 — "그 시간에 나가면 어디부터 어떻게 돌까" ──
+    const planHtml = () => ui.html('rec-plan');
+    check('주행 계획 영역이 그려진다(운행 시간 입력 · 타임라인 · 근거)',
+      /주행 계획/.test(planHtml()) && /운행 시작/.test(planHtml())
+      && /<table class="rec-table plan-table"/.test(planHtml()) && /이 계획을 어떻게 만들었나/.test(planHtml()),
+      planHtml().replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 110));
+    const planRows = () => (planHtml().match(/<tr/g) || []).length - 1;
+    check('   운행 시간을 시각 블록으로 잘라 구역을 배정한다', planRows() >= 5, `${planRows()}블록`);
+    ui.run("onPlanInput('startTime','08:00')");
+    ui.run("onPlanInput('baselineStartTime','09:00')");
+    const earlier = JSON.parse(ui.run('JSON.stringify({diff:recPlanResult.comparison.collectMinutesDiff,' +
+      'first:recPlanResult.lanes[0].blocks[0],new:recPlanResult.comparison.newConditions.map(c=>c.label)})'));
+    check('   1시간 일찍 시작하면 무엇이 새로 잡히는지 비교해서 보여준다',
+      earlier.diff === 60 && earlier.first.from === '08:00' && earlier.new.length > 0
+      && /지금\(09:00~18:00\)보다/.test(planHtml()),
+      `+${earlier.diff}분 · 08:00 ${earlier.first.zone}(${earlier.first.conditionLabel}) · 새 조건 ${earlier.new.join(', ')}`);
+    ui.run("applyPlanPreset('default')");
+    check('   프리셋으로 기본 운행 시간(09:00~18:00)으로 되돌린다',
+      ui.run('recPlanResult.window.start') === '09:00' && ui.run('recPlanResult.window.end') === '18:00');
+
     const firstId = ui.run('recCache.result.recommendations[0].id');
     await ui.run(`toggleRecommendationDetail(${JSON.stringify(firstId)})`);
     const detail = listHtml();

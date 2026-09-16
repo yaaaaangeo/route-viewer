@@ -773,7 +773,38 @@
       // 모양으로 답하지만, 그쪽은 색인이 있어서 쿼리를 나눠 던져도 빠르다.
       //
       // getStatsBundle: 통계 탭 — 요약 + 장소/도로/날씨/시간대 분포 + (원하면) 그중 이슈 몫
+      // 통계 탭 — 날짜 요약의 분포 칸(distCells)만 더한다. 원본 기록은 한 건도 읽지 않는다.
+      // 분포 칸이 없는 예전 요약이 섞여 있으면(요약 재생성 전) 그 날짜만 원본으로 세서 채운다.
       async getStatsBundle(filter, options) {
+        const o = options || {};
+        const summaries = await this.listDateSummaries();
+        const agg = global.ConditionStats.aggregateDistributions(summaries, {
+          filter, withIssueShare: !!o.withIssueShare, withIssueOverview: !!o.withIssueOverview,
+        });
+        if (!agg.missingDates) {
+          const shape = src => ({
+            points: src.points, zones: src.zones, vehicles: src.vehicles, place: src.place,
+            road: src.road, weather: src.weather, timeOfDay: src.timeOfDay, timeBuckets: [],
+          });
+          const out = { ...shape(agg), days: agg.days, issue: agg.issue ? shape(agg.issue) : null, issueOverview: null };
+          if (!out.timeOfDay.length) out.timeBuckets = await this.getTimeBucketDistribution(filter);
+          if (o.withIssueOverview && agg.issueCounts) {
+            const index = await issueIndex();
+            let openRecordCount = 0;
+            index.byKey.forEach(mask => { if (mask & global.IssueFilter.MASK.OPEN) openRecordCount++; });
+            out.issueOverview = {
+              ...global.IssueFilter.summarizeImports(await this.listImports(100000, {})),
+              recordCounts: agg.issueCounts.counts, openRecordCount,
+              unlinkedRecords: agg.issueCounts.unlinked, issueRecordKeys: index.byKey.size,
+            };
+          }
+          return out;
+        }
+        return this.statsBundleFromRecords(filter, o);
+      },
+
+      // 요약이 아직 새 형식이 아닐 때만 쓰는 예전 경로(전체 기록을 한 번 훑는다)
+      async statsBundleFromRecords(filter, options) {
         const o = options || {};
         const wantIssue = !!o.withIssueShare;
         const wantOverview = !!o.withIssueOverview;
