@@ -1744,12 +1744,26 @@ async function calculateCoverage(zoneName){
     if(result&&coverageCalcKey(zoneName)===key){
       coverageCache.set(key,{zone:zoneName,result});
       while(coverageCache.size>COVERAGE_CACHE_MAX) coverageCache.delete(coverageCache.keys().next().value);
+      saveCoverageSnapshotFor(zoneName,result);
     }
     return result;
   })();
   coverageInFlight.set(key,promise);
   try{ return await promise; }
   finally{ if(coverageInFlight.get(key)===promise) coverageInFlight.delete(key); }
+}
+
+// 추천 주행(recommend-view.js)이 쓰는 구역별 Coverage 요약을 저장한다. 전체 기간으로 계산한 결과만 —
+// 날짜 필터가 걸린 계산은 그 구역의 전체 Coverage 가 아니다. 도로·건물 데이터나 수동 셀을 못 읽은 임시
+// 결과(cacheable=false)는 provisional 로 표시해서 저장한다(추천 신뢰도에서 낮춤).
+// 저장소가 저장 시점의 데이터·경계·수동 셀 지문을 같이 적어서, 그 뒤 무엇이 바뀌면 추천에서 "오래됨"으로 뺀다.
+function saveCoverageSnapshotFor(zoneName,result){
+  if(!result||result.dateFrom||result.dateTo||!Array.isArray(result.cells)) return;
+  if(typeof RouteDB==='undefined'||typeof RouteDB.saveCoverageSnapshot!=='function') return;
+  let total=0,visited=0;
+  result.cells.forEach(c=>{ if(c.state!=='valid') return; total++; if(c.visits>0) visited++; });
+  Promise.resolve(RouteDB.saveCoverageSnapshot(zoneName,{total,visited,provisional:!result.cacheable,cellSizeM:coverageCellSizeM(),computedAt:new Date().toISOString()}))
+    .catch(err=>console.warn('[경로뷰어] Coverage 스냅샷 저장 실패:',err));
 }
 
 // 저장소에서 데이터가 바뀌었다는 알림(storage.js RouteDB.onChange) → 해당 캐시 무효화

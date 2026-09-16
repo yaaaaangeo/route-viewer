@@ -50,6 +50,11 @@ contextBridge.exposeInMainWorld('routeAPI', {
   // 교통 시간대·조도 분류 기준이 바뀐 뒤 날짜 요약 재분류 — 진행률은 getClassificationStatus 로 본다
   getClassificationStatus: () => call('db:getClassificationStatus'),
   reclassifySummaries: () => call('db:reclassifySummaries'),
+  // 추천 주행 — Coverage 스냅샷(누적 지도가 계산하면 저장) · 추천 상태(기간 제외·수집 완료 표시)
+  saveCoverageSnapshot: (zone, snap) => call('db:saveCoverageSnapshot', zone, snap),
+  listCoverageSnapshots: () => call('db:listCoverageSnapshots'),
+  listRecommendationStates: () => call('db:listRecommendationStates'),
+  setRecommendationState: (id, state) => call('db:setRecommendationState', id, state),
   getCellVisitCounts: (box, cellSizeM) => call('db:getCellVisitCounts', box, cellSizeM),
   getBackupHistory: () => call('db:getBackupHistory'),
   setBackupHistory: h => call('db:setBackupHistory', h),

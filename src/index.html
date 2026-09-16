@@ -68,6 +68,7 @@
     <button class="mode-tab" id="tab-calendar" onclick="switchTab('calendar')">달력</button>
     <button class="mode-tab" id="tab-accum" onclick="switchTab('accum')">누적 지도</button>
     <button class="mode-tab" id="tab-stats" onclick="switchTab('stats')">통계</button>
+    <button class="mode-tab" id="tab-recommend" onclick="switchTab('recommend')">추천 주행</button>
     <button class="mode-tab" id="tab-data" onclick="switchTab('data')">데이터 관리</button>
     <button class="mode-tab" id="tab-settings" onclick="switchTab('settings')">설정</button>
     <span style="flex:1;"></span>
@@ -196,6 +197,18 @@
       <div id="stats-vehicle-filter-group"></div>
       <div id="vehicle-dist-grid"></div>
     </div>
+  </div>
+
+  <!-- ── 추천 주행 — 계산은 js/recommendation.js(통계·규칙), 화면은 js/recommend-view.js ── -->
+  <div id="recommend-view">
+    <div id="rec-status" class="ir-note" style="display:none;margin:0;"></div>
+    <section id="rec-summary" class="rec-section" aria-label="추천 요약"></section>
+    <section id="rec-filters" class="rec-filters" aria-label="추천 필터와 정렬"></section>
+    <section id="rec-list" class="rec-list" aria-label="추천 카드 목록"></section>
+    <section id="rec-hidden" class="rec-section" style="display:none;" aria-label="숨김·제외·완료한 추천"></section>
+    <section id="rec-deficits" class="rec-section" aria-label="현재 데이터 부족 현황"></section>
+    <section id="rec-settings" class="rec-section" aria-label="추천 설정"></section>
+    <section id="rec-limitations" class="rec-section" aria-label="데이터 한계와 신뢰도 안내"></section>
   </div>
 
   <!-- ── 데이터 관리 — 삭제는 오직 여기서만 ────────────── -->
@@ -353,6 +366,8 @@
 <!-- 교통 시간대·조도·요일 분류 규칙(time-conditions)과 조건별 집계(condition-stats) — SQLite/IndexedDB/화면 공용 -->
 <script src="js/time-conditions.js"></script>
 <script src="js/condition-stats.js"></script>
+<!-- 추천 주행 엔진(통계·규칙 기반, 순수 함수) — SQLite/IndexedDB 설정 검증과 추천 탭이 함께 쓴다 -->
+<script src="js/recommendation.js"></script>
 <script src="js/core.js"></script>
 <!-- 강남/서초 HD map 도로 데이터 — <script> 태그로 로드해서 각각
      window.HDMAP_GANGNAM_ROADS / window.HDMAP_SEOCHO_ROADS에 담는다.
@@ -370,6 +385,7 @@
 <script src="js/map-capture.js"></script>
 <script src="js/accum.js"></script>
 <script src="js/statistics.js"></script>
+<script src="js/recommend-view.js"></script>
 <script src="js/replay.js"></script>
 <script src="js/importer.js"></script>
 <script src="js/backup.js"></script>

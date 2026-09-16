@@ -37,6 +37,7 @@ const API_METHODS = [
   'setZoneActive', 'getZoneManualCells', 'saveZoneManualCells', 'getSettings', 'setSettings',
   'getCellVisitCounts', 'getBackupHistory', 'setBackupHistory', 'buildBackupPayload',
   'restoreBackupPayload', 'rebuildAllSummaries', 'getClassificationStatus', 'reclassifySummaries',
+  'saveCoverageSnapshot', 'listCoverageSnapshots', 'listRecommendationStates', 'setRecommendationState',
 ];
 
 function createDesktopApi(db) {
@@ -98,6 +99,7 @@ function createStorageContext({ api, indexedDB, IDBKeyRange }) {
   load(ctx, 'src/js/collection-stats.js');
   load(ctx, 'src/js/time-conditions.js');
   load(ctx, 'src/js/condition-stats.js');
+  load(ctx, 'src/js/recommendation.js');
   load(ctx, 'src/js/storage.js');
   return ctx;
 }

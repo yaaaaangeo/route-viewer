@@ -126,6 +126,10 @@
       setSettings: partial => api.setSettings(partial),
       getClassificationStatus: () => api.getClassificationStatus(),
       reclassifySummaries: () => api.reclassifySummaries(),
+      saveCoverageSnapshot: (zone, snap) => api.saveCoverageSnapshot(zone, snap),
+      listCoverageSnapshots: () => api.listCoverageSnapshots(),
+      listRecommendationStates: () => api.listRecommendationStates(),
+      setRecommendationState: (id, state) => api.setRecommendationState(id, state),
       getCellVisitCounts: (box, cellSizeM) => api.getCellVisitCounts(box, cellSizeM),
       getBackupHistory: () => api.getBackupHistory(),
       setBackupHistory: h => api.setBackupHistory(h),
@@ -274,11 +278,13 @@
         trafficPeriods: classification.trafficPeriods,
         sunriseWindowMinutes: classification.sunriseWindowMinutes,
         sunsetWindowMinutes: classification.sunsetWindowMinutes,
+        recommendationSettings: global.Recommendation.effectiveRecommendationSettings(saved.recommendationSettings),
       };
     }
 
     async function writeSettings(partial) {
-      const patch = global.TimeConditions.normalizeClassificationPatch(partial); // 잘못된 분류 설정이면 여기서 던진다
+      // 잘못된 분류 설정·추천 설정(가중치 합계 등)이면 여기서 던진다 — database.js setSettings 와 같은 규칙
+      const patch = global.Recommendation.normalizeRecommendationPatch(global.TimeConditions.normalizeClassificationPatch(partial));
       const { coverageCellSizeM, ...merged } = { ...(await readSettings()), ...patch };
       await metaSet('app_settings', merged);
       return readSettings();
@@ -555,6 +561,52 @@
           running: !!reclassifyRun,
           progress: reclassifyRun && reclassifyProgress ? { ...reclassifyProgress } : null,
         };
+      },
+
+      // ── 추천 주행: Coverage 스냅샷 · 추천 상태 (database.js 와 같은 형식·같은 지문) ──
+      async saveCoverageSnapshot(zoneName, snapshot) {
+        const name = String(zoneName || '').trim();
+        if (!name) throw new Error('구역 이름이 없어요.');
+        const n = v => (Number.isInteger(v) && v >= 0 ? v : null);
+        const total = n(snapshot && snapshot.total), visited = n(snapshot && snapshot.visited);
+        if (total == null || visited == null || visited > total) throw new Error('Coverage 스냅샷 값이 올바르지 않아요.');
+        const all = { ...((await metaGet('coverage_snapshots', {})) || {}) };
+        const summaries = await this.listDateSummaries();
+        const zone = (await this.listZones()).find(z => z.name === name);
+        all[name] = {
+          zone: name, total, visited, unvisited: total - visited,
+          coveragePct: total ? (visited / total) * 100 : 0,
+          provisional: !!(snapshot && snapshot.provisional),
+          cellSizeM: snapshot && Number.isFinite(snapshot.cellSizeM) ? snapshot.cellSizeM : null,
+          computedAt: (snapshot && snapshot.computedAt) || new Date().toISOString(),
+          fingerprint: global.Recommendation.coverageFingerprint(summaries.map(s => ({ date: s.date, count: s.count })), zone),
+        };
+        await metaSet('coverage_snapshots', all);
+        return (await this.listCoverageSnapshots()).find(s => s.zone === name);
+      },
+
+      async listCoverageSnapshots() {
+        const all = (await metaGet('coverage_snapshots', {})) || {};
+        const summaries = (await this.listDateSummaries()).map(s => ({ date: s.date, count: s.count }));
+        const zones = await this.listZones();
+        const R = global.Recommendation;
+        return Object.values(all).sort((a, b) => (a.zone < b.zone ? -1 : a.zone > b.zone ? 1 : 0)).map(s => ({
+          ...s, ...R.coverageSnapshotFreshness(s, R.coverageFingerprint(summaries, zones.find(z => z.name === s.zone))),
+        }));
+      },
+
+      async listRecommendationStates() {
+        return { ...((await metaGet('recommendation_states', {})) || {}) };
+      },
+
+      async setRecommendationState(id, state) {
+        const key = String(id || '');
+        if (!key) throw new Error('추천 id 가 없어요.');
+        const all = await this.listRecommendationStates();
+        if (state == null) delete all[key];
+        else all[key] = normalizeRecommendationState(state);
+        await metaSet('recommendation_states', all);
+        return all;
       },
 
       // 이미 돌고 있으면 같은 작업을 돌려준다(중복 실행 방지)
@@ -930,8 +982,8 @@
           }
         }
         if (payload.settings && typeof payload.settings === 'object') {
-          // 잘못된 분류 설정은 그 값만 빼고 반영(database.js 와 같은 규칙)
-          await this.setSettings(global.TimeConditions.sanitizeClassificationSettings(payload.settings));
+          // 잘못된 분류·추천 설정은 그 값만 빼고 반영(database.js 와 같은 규칙)
+          await this.setSettings(global.Recommendation.sanitizeRecommendationSettings(global.TimeConditions.sanitizeClassificationSettings(payload.settings)));
         }
         if (Array.isArray(payload.backupHistory)) {
           const current = mode === 'replace' ? [] : await this.getBackupHistory();
@@ -942,6 +994,21 @@
         return { ...result, mode, reclassifiedDates: reclassified.rebuilt };
       },
     };
+  }
+
+  // database.js normalizeRecommendationState 와 같은 규칙
+  function normalizeRecommendationState(state) {
+    const status = state && state.status;
+    if (status === 'snoozed') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(state.until || ''))) throw new Error('추천 제외 기간(until)이 올바르지 않아요.');
+      return { status, until: state.until, markedAt: state.markedAt || new Date().toISOString() };
+    }
+    if (status === 'completed') {
+      const snap = state.snapshot || {};
+      const n = v => (Number.isFinite(v) && v >= 0 ? v : 0);
+      return { status, markedAt: state.markedAt || new Date().toISOString(), snapshot: { collectionSec: n(snap.collectionSec), visitCount: n(snap.visitCount) } };
+    }
+    throw new Error('알 수 없는 추천 상태예요.');
   }
 
   function stripInternal(r) {
@@ -985,6 +1052,7 @@
   const MUTATING_METHODS = new Set([
     'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveZone', 'setZoneActive',
     'saveZoneManualCells', 'setSettings', 'restoreBackupPayload', 'reclassifySummaries',
+    'saveCoverageSnapshot', 'setRecommendationState',
   ]);
 
   // 백엔드 메서드를 RouteDB 로 그대로 흘려보낸다
@@ -997,6 +1065,7 @@
     'setZoneActive', 'getZoneManualCells', 'saveZoneManualCells', 'getSettings', 'setSettings', 'getCellVisitCounts',
     'getBackupHistory', 'setBackupHistory', 'buildBackupPayload', 'restoreBackupPayload',
     'getClassificationStatus', 'reclassifySummaries',
+    'saveCoverageSnapshot', 'listCoverageSnapshots', 'listRecommendationStates', 'setRecommendationState',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

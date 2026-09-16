@@ -134,6 +134,7 @@ async function createAccumHarness() {
   load(ctx, 'src/js/collection-stats.js');
   load(ctx, 'src/js/time-conditions.js');
   load(ctx, 'src/js/condition-stats.js');
+  load(ctx, 'src/js/recommendation.js');
   load(ctx, 'src/js/storage.js');
   load(ctx, 'src/js/map-capture.js');
   load(ctx, 'src/js/accum.js');

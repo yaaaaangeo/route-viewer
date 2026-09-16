@@ -26,7 +26,7 @@ function setStorageBadge(text,title){
 //  모드 탭 — 화면만 바꿔주고, 데이터는 각 화면이 DB에서 읽는다.
 // ══════════════════════════════════════════════════════════
 function switchTab(tab){
-  ['upload','calendar','accum','stats','data','settings'].forEach(t=>{
+  ['upload','calendar','accum','stats','recommend','data','settings'].forEach(t=>{
     const btn=document.getElementById('tab-'+t);
     if(btn) btn.classList.toggle('active',tab===t);
   });
@@ -35,6 +35,7 @@ function switchTab(tab){
   document.getElementById('calendar-view').style.display='none';
   document.getElementById('accum-view').style.display='none';
   document.getElementById('stats-view').style.display='none';
+  document.getElementById('recommend-view').style.display='none';
   document.getElementById('data-view').style.display='none';
   document.getElementById('settings-view').style.display='none';
   document.getElementById('dropzone').style.display='none';
@@ -51,6 +52,10 @@ function switchTab(tab){
   }else if(tab==='stats'){
     document.getElementById('stats-view').style.display='flex';
     renderStatsView();
+  }else if(tab==='recommend'){
+    document.getElementById('recommend-view').style.display='flex';
+    // 입력(데이터·구역·설정 revision·날짜)이 그대로면 캐시된 추천을 다시 그리기만 한다(recommend-view.js)
+    renderRecommendView();
   }else if(tab==='data'){
     document.getElementById('data-view').style.display='flex';
     renderDataView();

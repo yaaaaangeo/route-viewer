@@ -33,6 +33,7 @@
   });
 
   const str = v => (v == null ? '' : String(v).trim());
+  const SLOW_SPEED_KMH = 10;
 
   // rows: 한 날짜의 기록 [{date,time,vehicle,zone,weather,lat,lng}] (순서 무관)
   // → { classificationSignature, conditionCells:[...] }
@@ -50,10 +51,19 @@
       const key = CELL_DIMENSIONS.map(d => cell[d]).join('');
       let acc = cells.get(key);
       if (!acc) {
-        acc = { ...cell, recordCount: 0, collectionSec: 0, firstTime: null, lastTime: null };
+        acc = { ...cell, recordCount: 0, collectionSec: 0, firstTime: null, lastTime: null, speedCount: 0, speedSumTenths: 0, stoppedCount: 0, slowCount: 0 };
         cells.set(key, acc);
       }
       acc.recordCount++;
+      // 차량속도(km/h) — 0.1km/h 단위 정수로 더한다(실수 합은 저장소마다 더하는 순서가 달라 끝자리가 흔들린다).
+      // 정차(0)와 저속(0 초과 10 미만)은 따로 센다. 정체 여부는 이 값만으로 단정하지 않는다(정차엔 대기·주차도 섞임).
+      const speed = parseFloat(r.speed);
+      if (Number.isFinite(speed) && speed >= 0) {
+        acc.speedCount++;
+        acc.speedSumTenths += Math.round(speed * 10);
+        if (speed === 0) acc.stoppedCount++;
+        else if (speed < SLOW_SPEED_KMH) acc.slowCount++;
+      }
       const sec = CS.timeToSec(r.time);
       if (sec != null) {
         const t = str(r.time);
@@ -140,6 +150,8 @@
   //                 (각 조건 축은 값 하나 또는 배열)
   // options.groupBy: CELL_DIMENSIONS 중 원하는 축들(없으면 전체 합계 한 줄)
   // options.signature: 현재 분류 서명 — 다르면 staleDates 로 센다(집계에는 그대로 포함)
+  // options.details: true 면 행마다 uniqueDays(고유 수집일) · vehicleSeconds/vehicleRecordCounts(차량별) ·
+  //                  speed(기록 수 · 평균 · 정차/저속 비율)를 더 붙인다(추천 엔진용)
   // → { rows:[{...축, recordCount, collectionSec, collectionMinutes, visitCount, lastVisitedAt}], totals, staleDates, dateCount }
   //   visitCount = 그 조합에 기록이 있는 (날짜, 차량) 수 · lastVisitedAt = 마지막 기록 시각(+09:00)
   function aggregate(summaries, options) {
@@ -162,12 +174,21 @@
         const key = groupBy.map(d => cell[d]).join('');
         let g = groups.get(key);
         if (!g) {
-          g = { dims: {}, recordCount: 0, collectionSec: 0, visits: new Set(), last: null };
+          g = { dims: {}, recordCount: 0, collectionSec: 0, visits: new Set(), last: null, dates: new Set(), vehicleSec: {}, vehicleRec: {}, speedCount: 0, speedSumTenths: 0, stoppedCount: 0, slowCount: 0 };
           groupBy.forEach(d => { g.dims[d] = cell[d]; });
           groups.set(key, g);
         }
         g.recordCount += cell.recordCount;
         g.collectionSec += cell.collectionSec;
+        if (o.details) {
+          g.dates.add(s.date);
+          g.vehicleSec[cell.vehicle] = (g.vehicleSec[cell.vehicle] || 0) + cell.collectionSec;
+          g.vehicleRec[cell.vehicle] = (g.vehicleRec[cell.vehicle] || 0) + cell.recordCount;
+          g.speedCount += cell.speedCount || 0;
+          g.speedSumTenths += cell.speedSumTenths || 0;
+          g.stoppedCount += cell.stoppedCount || 0;
+          g.slowCount += cell.slowCount || 0;
+        }
         const visit = `${s.date}|${cell.vehicle}`;
         g.visits.add(visit);
         totalVisits.add(visit);
@@ -180,14 +201,31 @@
       }
     }
 
-    const rows = sortRows([...groups.values()].map(g => ({
-      ...g.dims,
-      recordCount: g.recordCount,
-      collectionSec: g.collectionSec,
-      collectionMinutes: Math.round(g.collectionSec / 60),
-      visitCount: g.visits.size,
-      lastVisitedAt: g.last && /^\d{4}-\d{2}-\d{2}T/.test(g.last) ? g.last + tzSuffix : null,
-    })), groupBy);
+    const sortedObj = obj => Object.fromEntries(Object.keys(obj).sort().map(k => [k, obj[k]]));
+    const rows = sortRows([...groups.values()].map(g => {
+      const row = {
+        ...g.dims,
+        recordCount: g.recordCount,
+        collectionSec: g.collectionSec,
+        collectionMinutes: Math.round(g.collectionSec / 60),
+        visitCount: g.visits.size,
+        lastVisitedAt: g.last && /^\d{4}-\d{2}-\d{2}T/.test(g.last) ? g.last + tzSuffix : null,
+      };
+      if (o.details) {
+        row.uniqueDays = [...g.dates].filter(d => /^\d{4}-\d{2}-\d{2}$/.test(String(d))).length;
+        row.vehicleSeconds = sortedObj(g.vehicleSec);
+        row.vehicleRecordCounts = sortedObj(g.vehicleRec);
+        const moving = g.speedCount - g.stoppedCount;
+        row.speed = {
+          count: g.speedCount,
+          averageKmh: g.speedCount ? Math.round(g.speedSumTenths / g.speedCount) / 10 : null,
+          movingAverageKmh: moving > 0 ? Math.round(g.speedSumTenths / moving) / 10 : null,
+          stoppedRatio: g.speedCount ? Math.round((g.stoppedCount / g.speedCount) * 1000) / 1000 : null,
+          slowRatio: g.speedCount ? Math.round((g.slowCount / g.speedCount) * 1000) / 1000 : null,
+        };
+      }
+      return row;
+    }), groupBy);
     return {
       rows,
       totals: { ...totals, collectionMinutes: Math.round(totals.collectionSec / 60), visitCount: totalVisits.size },

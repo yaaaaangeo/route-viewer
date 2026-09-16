@@ -314,6 +314,10 @@ function registerIpc() {
   handle('db:setSettings', partial => openDatabase().setSettings(partial));
   handle('db:getClassificationStatus', () => openDatabase().getClassificationStatus());
   handle('db:reclassifySummaries', () => openDatabase().reclassifySummaries());
+  handle('db:saveCoverageSnapshot', (zone, snap) => openDatabase().saveCoverageSnapshot(zone, snap));
+  handle('db:listCoverageSnapshots', () => openDatabase().listCoverageSnapshots());
+  handle('db:listRecommendationStates', () => openDatabase().listRecommendationStates());
+  handle('db:setRecommendationState', (id, state) => openDatabase().setRecommendationState(id, state));
   handle('db:getCellVisitCounts', (box, cellSizeM) => openDatabase().getCellVisitCounts(box, cellSizeM));
   handle('db:getBackupHistory', () => openDatabase().getBackupHistory());
   handle('db:setBackupHistory', h => openDatabase().setBackupHistory(h));

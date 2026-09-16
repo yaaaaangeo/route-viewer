@@ -27,6 +27,7 @@ const CoverageGrid = require('../src/js/coverage-grid.js');
 const CollectionStats = require('../src/js/collection-stats.js');
 const TimeConditions = require('../src/js/time-conditions.js');
 const ConditionStats = require('../src/js/condition-stats.js');
+const Recommendation = require('../src/js/recommendation.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -481,7 +482,7 @@ class RouteDatabase {
   // 예전 요약 그대로이거나 새 요약이거나 둘 중 하나다. 원본 기록(driving_records)은 건드리지 않는다.
   _rebuildDateSummary(date, classification) {
     const rows = this.db.all(
-      `SELECT date, time, zone, vehicle, weather, latitude AS lat, longitude AS lng
+      `SELECT date, time, zone, vehicle, weather, speed, latitude AS lat, longitude AS lng
          FROM driving_records WHERE date = ? ORDER BY timestamp, id`,
       [date]
     );
@@ -939,16 +940,78 @@ class RouteDatabase {
       trafficPeriods: classification.trafficPeriods,
       sunriseWindowMinutes: classification.sunriseWindowMinutes,
       sunsetWindowMinutes: classification.sunsetWindowMinutes,
+      // 추천 주행 설정(가중치·목표 등) — 없거나 깨졌으면 기본값(recommendation.js)
+      recommendationSettings: Recommendation.effectiveRecommendationSettings(saved.recommendationSettings),
     };
   }
 
-  // 분류 설정은 저장 전에 검증한다 — 겹침·공백·형식 오류가 하나라도 있으면 아무것도 저장하지 않고
-  // 이유를 담은 Error 를 던진다. 저장만 하고 재분류는 하지 않는다(reclassifySummaries 가 따로 한다).
+  // 분류 설정·추천 설정은 저장 전에 검증한다 — 겹침·공백·형식 오류, 가중치 합계가 100%가 아님 등
+  // 하나라도 있으면 아무것도 저장하지 않고 이유를 담은 Error 를 던진다. 재분류·추천 재계산은 따로 한다.
   setSettings(partial) {
-    const patch = TimeConditions.normalizeClassificationPatch(partial);
+    const patch = Recommendation.normalizeRecommendationPatch(TimeConditions.normalizeClassificationPatch(partial));
     const { coverageCellSizeM, ...merged } = { ...this.getSettings(), ...patch };
     this.setMeta('app_settings', JSON.stringify(merged));
     return this.getSettings();
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  추천 주행 — Coverage 스냅샷 · 추천 상태
+  //
+  //  Coverage 는 도로 데이터(HD map/OSM)가 필요해 누적 지도 화면에서만 계산된다. 계산이 끝나면 화면이
+  //  구역별 요약(유효/방문/미방문 Cell)을 여기 저장하고, 추천은 이 스냅샷만 읽는다. 저장할 때 지금의
+  //  데이터·경계·수동 셀 지문을 같이 적어 두고, 읽을 때 지문이 다르면 fresh=false(추천 점수에서 제외).
+  //  추천 상태(기간 제외·수집 완료 표시)는 실제 주행 기록과 완전히 따로 저장한다 — 기록을 바꾸지 않는다.
+  // ══════════════════════════════════════════════════════
+  _jsonMeta(key, fallback) {
+    try { const v = JSON.parse(this.getMeta(key, 'null')); return v == null ? fallback : v; } catch (_) { return fallback; }
+  }
+
+  _coverageFingerprint(zoneName) {
+    const summaries = this.db.all('SELECT date, record_count AS count FROM date_summaries');
+    return Recommendation.coverageFingerprint(summaries, this.listZones().find(z => z.name === zoneName));
+  }
+
+  saveCoverageSnapshot(zoneName, snapshot) {
+    const name = String(zoneName || '').trim();
+    if (!name) throw new Error('구역 이름이 없어요.');
+    const n = v => (Number.isInteger(v) && v >= 0 ? v : null);
+    const total = n(snapshot && snapshot.total), visited = n(snapshot && snapshot.visited);
+    if (total == null || visited == null || visited > total) throw new Error('Coverage 스냅샷 값이 올바르지 않아요.');
+    const all = this._jsonMeta('coverage_snapshots', {});
+    all[name] = {
+      zone: name, total, visited, unvisited: total - visited,
+      coveragePct: total ? (visited / total) * 100 : 0,
+      provisional: !!(snapshot && snapshot.provisional),
+      cellSizeM: snapshot && Number.isFinite(snapshot.cellSizeM) ? snapshot.cellSizeM : null,
+      computedAt: (snapshot && snapshot.computedAt) || new Date().toISOString(),
+      fingerprint: this._coverageFingerprint(name),
+    };
+    this.setMeta('coverage_snapshots', JSON.stringify(all));
+    return this.listCoverageSnapshots().find(s => s.zone === name);
+  }
+
+  listCoverageSnapshots() {
+    const all = this._jsonMeta('coverage_snapshots', {});
+    const summaries = this.db.all('SELECT date, record_count AS count FROM date_summaries');
+    const zones = this.listZones();
+    return Object.values(all).sort((a, b) => (a.zone < b.zone ? -1 : a.zone > b.zone ? 1 : 0)).map(s => ({
+      ...s, ...Recommendation.coverageSnapshotFreshness(s, Recommendation.coverageFingerprint(summaries, zones.find(z => z.name === s.zone))),
+    }));
+  }
+
+  listRecommendationStates() {
+    return this._jsonMeta('recommendation_states', {});
+  }
+
+  // state: null(해제) | {status:'snoozed', until:'YYYY-MM-DD'} | {status:'completed', snapshot:{collectionSec, visitCount}}
+  setRecommendationState(id, state) {
+    const key = String(id || '');
+    if (!key) throw new Error('추천 id 가 없어요.');
+    const all = this.listRecommendationStates();
+    if (state == null) delete all[key];
+    else all[key] = normalizeRecommendationState(state);
+    this.setMeta('recommendation_states', JSON.stringify(all));
+    return all;
   }
 
   listImports(limit = 200) {
@@ -1152,8 +1215,8 @@ class RouteDatabase {
       });
     }
     if (payload.settings && typeof payload.settings === 'object') {
-      // 잘못된 분류 설정이 든 백업·서버 데이터는 그 값만 빼고(지금 설정 유지) 나머지를 반영한다
-      this.setSettings(TimeConditions.sanitizeClassificationSettings(payload.settings));
+      // 잘못된 분류·추천 설정이 든 백업·서버 데이터는 그 값만 빼고(지금 설정 유지) 나머지를 반영한다
+      this.setSettings(Recommendation.sanitizeRecommendationSettings(TimeConditions.sanitizeClassificationSettings(payload.settings)));
     }
     if (Array.isArray(payload.backupHistory)) {
       const merged = mode === 'replace'
@@ -1165,6 +1228,20 @@ class RouteDatabase {
     const reclassified = this.reclassifyStaleSummariesSync();
     return { ...result, mode, reclassifiedDates: reclassified.rebuilt };
   }
+}
+
+function normalizeRecommendationState(state) {
+  const status = state && state.status;
+  if (status === 'snoozed') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(state.until || ''))) throw new Error('추천 제외 기간(until)이 올바르지 않아요.');
+    return { status, until: state.until, markedAt: state.markedAt || new Date().toISOString() };
+  }
+  if (status === 'completed') {
+    const snap = state.snapshot || {};
+    const n = v => (Number.isFinite(v) && v >= 0 ? v : 0);
+    return { status, markedAt: state.markedAt || new Date().toISOString(), snapshot: { collectionSec: n(snap.collectionSec), visitCount: n(snap.visitCount) } };
+  }
+  throw new Error('알 수 없는 추천 상태예요.');
 }
 
 function parseManualCells(json) {
@@ -1267,4 +1344,4 @@ function dedupeHistory(history) {
     .slice(0, 10);
 }
 
-module.exports = { RouteDatabase, buildDaySummary, dedupeHistory, haversine, timeToSec };
+module.exports = { RouteDatabase, buildDaySummary, dedupeHistory, haversine, timeToSec, normalizeRecommendationState };

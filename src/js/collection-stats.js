@@ -32,9 +32,10 @@
   const COLLECTION_GAP_SEC = 90;
 
   // 날짜 요약 형식 버전 — 2: collectionSec 추가, 3: driveSpanSec 추가,
-  // 4: conditionCells(교통 시간대·조도·요일·날씨별 기록 수·수집 시간)·classificationSignature 추가.
+  // 4: conditionCells(교통 시간대·조도·요일·날씨별 기록 수·수집 시간)·classificationSignature 추가,
+  // 5: conditionCells 에 차량속도 통계(speedCount·speedSumTenths·stoppedCount·slowCount) 추가(추천 주행).
   // 예전 요약은 앱을 켤 때 한 번 다시 만든다.
-  const SUMMARY_VERSION = 4;
+  const SUMMARY_VERSION = 5;
 
   // 수집 목표 — 여기 한 곳에서만 관리한다(화면 표의 행도 이 목록으로 그린다)
   const COLLECTION_TARGETS = [

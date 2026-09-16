@@ -157,6 +157,31 @@ app.whenReady().then(async () => {
       console.log('  캡처 파일(브라우저 · Density): ' + d1.file);
     }
 
+    // ── 추천 주행 탭(브라우저 모드 · IndexedDB) ──
+    await js(`switchTab('recommend')`);
+    await sleep(1200);
+    const rec = await js(`(()=>{
+      const list=document.getElementById('rec-list');
+      const res=(typeof recCache!=='undefined'&&recCache.result)||null;
+      return {cards:(list.innerHTML.match(/data-rec-id=/g)||[]).length, candidates:res?res.candidateCount:0,
+        empty:res?res.empty:null, stats:typeof recommendStats!=='undefined'?{...recommendStats}:null,
+        firstId:res&&res.recommendations[0]?res.recommendations[0].id:null,
+        summary:document.getElementById('rec-summary').innerText.replace(/\s+/g,' ').slice(0,120)};
+    })()`);
+    check('추천 주행 탭이 실제 데이터로 카드를 그린다', rec.cards > 0 && rec.candidates > 0 && rec.empty === false,
+      `카드 ${rec.cards}개 · 후보 ${rec.candidates}개 · ${rec.summary}`);
+    const recDetail = await js(`(async()=>{ toggleRecommendationDetail(${JSON.stringify('PLACEHOLDER')}); return 1; })()`.replace('"PLACEHOLDER"', JSON.stringify(rec.firstId)));
+    const detailText = await js(`document.getElementById('rec-list').innerText`);
+    check('근거 보기 → 점수 검산표·적용된 Edge Case 규칙·신뢰도가 보인다',
+      /추천 근거 상세/.test(detailText) && /반영 점수/.test(detailText) && /적용된 Edge Case 규칙/.test(detailText) && /신뢰도/.test(detailText),
+      detailText.replace(/\s+/g, ' ').slice(detailText.indexOf('추천 근거 상세'), detailText.indexOf('추천 근거 상세') + 90));
+    const recCache2 = await js(`(()=>{ switchTab('stats'); switchTab('recommend'); return {...recommendStats}; })()`);
+    check('탭을 오가도 추천을 다시 계산하지 않는다(캐시)', recCache2.computations === rec.stats.computations && recCache2.cacheHits > rec.stats.cacheHits,
+      `계산 ${recCache2.computations}회 · 캐시 ${recCache2.cacheHits}회`);
+    await js(`switchTab('accum')`);
+    await sleep(400);
+    await waitIdle();
+
     // ── Coverage Map + 날짜 ──
     await js(`ZONE_POLYGONS['강남']=[[37.492,127.020],[37.535,127.020],[37.535,127.055],[37.492,127.055]]; saveZonePolygonsToStorage(); toggleCoverageGaps();`);
     await sleep(300);
