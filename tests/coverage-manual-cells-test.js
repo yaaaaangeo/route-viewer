@@ -337,10 +337,27 @@ async function cacheTests() {
   h.eval('showCoverageDepth=false');
   await h.eval('renderAccumView()');
   check('… 같은 화면 안의 다시 그리기(Depth 토글)는 임시 결과를 재사용(매번 다시 받지 않음)', h.calcCount() === n + 1);
+  // 미러가 전부 실패한 뒤에는 한동안 Overpass 를 아예 부르지 않는다 —
+  // 예전엔 미러 4개를 15초씩 기다리는 걸 탭에 들어올 때마다 반복해서 화면이 몇 분씩 멈췄다.
+  {
+    const fetchesBefore = h.fetchState.fetches;
+    await reenter();
+    check('지도 데이터 서버가 막혀 있으면 한동안 다시 부르지 않는다(탭마다 기다리지 않게)',
+      h.fetchState.fetches === fetchesBefore, `추가 호출 ${h.fetchState.fetches - fetchesBefore}회`);
+    check('… 왜 대체값으로 그렸는지 화면에 알려준다',
+      /지도\(도로·건물\) 데이터를 못 받아/.test(h.eval('defaultCoverageHint()')),
+      h.eval('defaultCoverageHint()').slice(-60));
+  }
+
   h.fetchState.fail = false;
+  // 미러가 전부 실패하면 한동안 다시 시도하지 않는다(탭에 들어올 때마다 수십 초씩 기다리지 않게).
+  // 여기서는 "사용자가 커버리지 갭 보기를 다시 눌렀다" = 지금 다시 시도로 보고 쿨다운을 푼다.
+  h.eval('resetOverpassCooldown()');
   await reenter();
   check('… 지도 데이터를 받을 수 있게 되면 다음 진입 때 다시 계산하고 그 결과는 캐시한다',
-    h.calcCount() === n + 2 && h.eval('coverageDirty') === false && h.eval('isZoneMapDataDegraded')('시흥') === false);
+    // +3 = 처음 실패 계산 · 쿨다운 확인용 재진입 계산 · 지금 성공 계산
+    h.calcCount() === n + 3 && h.eval('coverageDirty') === false && h.eval('isZoneMapDataDegraded')('시흥') === false,
+    `계산 ${h.calcCount() - n}회 · dirty=${h.eval('coverageDirty')}`);
 }
 
 async function main() {

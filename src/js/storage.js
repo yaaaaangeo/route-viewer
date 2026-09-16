@@ -103,6 +103,8 @@
       getRecordsByDate: d => api.getRecordsByDate(d),
       getOverview: f => api.getOverview(f || {}),
       getDensityCells: (f, c) => api.getDensityCells(f || {}, c),
+      getStatsBundle: (f, o) => api.getStatsBundle(f || {}, o || {}),
+      getAccumBundle: (f, c) => api.getAccumBundle(f || {}, c),
       getBounds: f => api.getBounds(f || {}),
       getVisitedCellKeys: b => api.getVisitedCellKeys(b),
       getDistribution: (col, f) => api.getDistribution(col, f || {}),
@@ -238,6 +240,17 @@
 
     const maskOf = (index, key) => (index && index.byKey.get(key)) || 0;
 
+    // 시각 → 4시간 묶음('08-12시'). 시각을 못 읽으면 null(어느 묶음에도 넣지 않는다)
+    const TIME_BUCKET_ORDER = ['00-04시', '04-08시', '08-12시', '12-16시', '16-20시', '20-24시'];
+    function timeBucketOf(time) {
+      const h = parseInt(String(time || '').split(':')[0], 10);
+      if (isNaN(h) || h < 0 || h > 23) return null;
+      const start = Math.floor(h / 4) * 4;
+      const p = n => String(n).padStart(2, '0');
+      return `${p(start)}-${p(start + 4)}시`;
+    }
+    const orderedBuckets = counts => TIME_BUCKET_ORDER.filter(k => counts[k]).map(k => [k, counts[k]]);
+
     // records 를 커서로 훑으면서 콜백에 하나씩 넘긴다(배열로 모으지 않음)
     async function scan(filter, onRecord) {
       const db = await ready();
@@ -342,7 +355,9 @@
 
     async function sourceCountsByImport() {
       const counts = new Map();
-      (await allSources()).forEach(s => counts.set(s.importId, (counts.get(s.importId) || 0) + 1));
+      // 색인(issueIndex)이 이미 "레코드 → 출처 Import" 를 들고 있다 — 저장소를 다시 읽지 않는다
+      const index = await issueIndex();
+      index.sourcesByKey.forEach(ids => ids.forEach(id => counts.set(id, (counts.get(id) || 0) + 1)));
       return counts;
     }
 
@@ -751,6 +766,113 @@
         return { points, days: dates.size, zones: desc(zones), vehicles: desc(vehicles) };
       },
 
+      // ── 화면 한 번에 필요한 집계를 "한 번의 스캔"으로 ────────────────────
+      // IndexedDB 에는 SQL 이 없어서 집계마다 전체 레코드를 커서로 훑는다. 통계 탭이 분포를
+      // 6번 따로 물어보면 8만 건을 6번 훑는다(실측 한 번에 약 0.4초 → 탭 하나에 몇 초).
+      // 그래서 화면이 필요한 값을 한 번에 모아 주는 묶음 API 를 둔다. SQLite 백엔드도 같은
+      // 모양으로 답하지만, 그쪽은 색인이 있어서 쿼리를 나눠 던져도 빠르다.
+      //
+      // getStatsBundle: 통계 탭 — 요약 + 장소/도로/날씨/시간대 분포 + (원하면) 그중 이슈 몫
+      async getStatsBundle(filter, options) {
+        const o = options || {};
+        const wantIssue = !!o.withIssueShare;
+        const wantOverview = !!o.withIssueOverview;
+        const index = (wantIssue || wantOverview) ? await issueIndex() : null;
+        const counts = { all: 0, clean: 0, issue_all: 0 };
+        let unlinked = 0;
+        const issueBits = global.IssueFilter.MASK.OPEN | global.IssueFilter.MASK.RESOLVED;
+        const dates = new Set();
+        const mk = () => ({ zone: {}, vehicle: {}, place: {}, road: {}, weather: {}, timeOfDay: {}, bucket: {} });
+        const all = mk();
+        const issue = wantIssue ? mk() : null;
+        let points = 0, issuePoints = 0;
+        const bump = (acc, r) => {
+          if (r.zone) acc.zone[r.zone] = (acc.zone[r.zone] || 0) + 1;
+          if (r.vehicle) acc.vehicle[r.vehicle] = (acc.vehicle[r.vehicle] || 0) + 1;
+          if (r.place) acc.place[r.place] = (acc.place[r.place] || 0) + 1;
+          if (r.road) acc.road[r.road] = (acc.road[r.road] || 0) + 1;
+          if (r.weather) acc.weather[r.weather] = (acc.weather[r.weather] || 0) + 1;
+          if (r.timeOfDay) acc.timeOfDay[r.timeOfDay] = (acc.timeOfDay[r.timeOfDay] || 0) + 1;
+          const k = timeBucketOf(r.time);
+          if (k) acc.bucket[k] = (acc.bucket[k] || 0) + 1;
+        };
+        await scan(filter, r => {
+          points++;
+          if (r.date) dates.add(r.date);
+          bump(all, r);
+          if (!index) return;
+          const mask = maskOf(index, r.key);
+          if (wantIssue && (mask & issueBits)) { issuePoints++; bump(issue, r); }
+          if (wantOverview) {
+            counts.all++;
+            if (global.IssueFilter.maskMatches(mask, 'clean')) counts.clean++;
+            if (global.IssueFilter.maskMatches(mask, 'issue_all')) counts.issue_all++;
+            if (!mask) unlinked++;
+          }
+        });
+        const desc = o2 => Object.entries(o2).sort((a, b) => b[1] - a[1]);
+        const shape = (acc, n) => ({
+          points: n, zones: desc(acc.zone), vehicles: desc(acc.vehicle),
+          place: desc(acc.place), road: desc(acc.road), weather: desc(acc.weather),
+          timeOfDay: desc(acc.timeOfDay), timeBuckets: orderedBuckets(acc.bucket),
+        });
+        return {
+          ...shape(all, points), days: dates.size,
+          issue: wantIssue ? shape(issue, issuePoints) : null,
+          // 이슈 현황(통계 탭 위쪽 표)까지 같은 스캔에서 만든다 — 따로 물어보면 8만 건을 한 번 더 훑는다
+          issueOverview: wantOverview ? await this.issueOverviewFrom(counts, unlinked, index) : null,
+        };
+      },
+
+      // 스캔에서 센 값 + Import 이력으로 이슈 현황을 만든다(getIssueOverview 와 같은 모양)
+      async issueOverviewFrom(counts, unlinked, index) {
+        const imports = await this.listImports(100000, {});
+        let openRecordCount = 0;
+        index.byKey.forEach(mask => { if (mask & global.IssueFilter.MASK.OPEN) openRecordCount++; });
+        return {
+          ...global.IssueFilter.summarizeImports(imports),
+          recordCounts: { ...counts }, openRecordCount,
+          unlinkedRecords: unlinked, issueRecordKeys: index.byKey.size,
+        };
+      },
+
+      // getAccumBundle: 누적 지도 — 요약 + 밀도 칸 + 지도 범위(예전엔 조회 세 번)
+      async getAccumBundle(filter, cell) {
+        cell = cell || 0.0007;
+        const grid = new Map();
+        const index = await issueIndex();
+        const issueBits = global.IssueFilter.MASK.OPEN | global.IssueFilter.MASK.RESOLVED;
+        const dates = new Set(), zones = {}, vehicles = {};
+        let points = 0, minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        await scan(filter, r => {
+          points++;
+          if (r.date) dates.add(r.date);
+          if (r.zone) zones[r.zone] = (zones[r.zone] || 0) + 1;
+          if (r.vehicle) vehicles[r.vehicle] = (vehicles[r.vehicle] || 0) + 1;
+          if (r.lat < minLat) minLat = r.lat;
+          if (r.lat > maxLat) maxLat = r.lat;
+          if (r.lng < minLng) minLng = r.lng;
+          if (r.lng > maxLng) maxLng = r.lng;
+          const key = Math.round(r.lat / cell) + '_' + Math.round(r.lng / cell);
+          let g = grid.get(key);
+          if (!g) { g = { latSum: 0, lngSum: 0, n: 0, issueN: 0, dates: new Set(), zones: {}, vehicles: {} }; grid.set(key, g); }
+          g.latSum += r.lat; g.lngSum += r.lng; g.n++;
+          if (maskOf(index, r.key) & issueBits) g.issueN++;
+          if (r.date) g.dates.add(r.date);
+          if (r.zone) g.zones[r.zone] = (g.zones[r.zone] || 0) + 1;
+          if (r.vehicle) g.vehicles[r.vehicle] = (g.vehicles[r.vehicle] || 0) + 1;
+        });
+        const desc = o => Object.entries(o).sort((a, b) => b[1] - a[1]);
+        return {
+          overview: { points, days: dates.size, zones: desc(zones), vehicles: desc(vehicles) },
+          cells: [...grid.values()].map(g => ({
+            lat: g.latSum / g.n, lng: g.lngSum / g.n, n: g.n, issueN: g.issueN,
+            dateCount: g.dates.size, zones: g.zones, vehicles: g.vehicles,
+          })),
+          bounds: points ? { minLat, maxLat, minLng, maxLng, count: points } : null,
+        };
+      },
+
       async getDensityCells(filter, cell) {
         cell = cell || 0.0007;
         const grid = new Map();
@@ -807,15 +929,10 @@
       async getTimeBucketDistribution(filter) {
         const counts = {};
         await scan(filter, r => {
-          const h = parseInt(String(r.time || '').split(':')[0], 10);
-          if (isNaN(h) || h < 0 || h > 23) return;
-          const start = Math.floor(h / 4) * 4;
-          const p = n => String(n).padStart(2, '0');
-          const k = `${p(start)}-${p(start + 4)}시`;
-          counts[k] = (counts[k] || 0) + 1;
+          const k = timeBucketOf(r.time);
+          if (k) counts[k] = (counts[k] || 0) + 1;
         });
-        const ORDER = ['00-04시', '04-08시', '08-12시', '12-16시', '16-20시', '20-24시'];
-        return ORDER.filter(k => counts[k]).map(k => [k, counts[k]]);
+        return orderedBuckets(counts);
       },
 
       async deleteDate(date) {
@@ -1182,22 +1299,18 @@
       },
 
       async getIssueOverview(filter) {
-        const imports = await this.listImports(100000, {});
-        const base = global.IssueFilter.summarizeImports(imports);
-        const counts = {};
-        for (const f of global.IssueFilter.ISSUE_FILTERS) {
-          let n = 0;
-          await scan({ ...(filter || {}), issueFilter: f }, () => { n++; });
-          counts[f] = n;
-        }
         const index = await issueIndex();
+        // 필터마다 따로 훑지 않는다 — 한 번 훑으면서 레코드의 마스크로 셋 다 센다
+        const counts = { all: 0, clean: 0, issue_all: 0 };
         let unlinked = 0;
-        const linked = new Set((await allSources()).map(s => s.key));
-        await scan(null, r => { if (!linked.has(r.key)) unlinked++; });
-        // 확인 필요 상태 파일에서 온 기록 수 — 필터가 아니라 참고 수치(database.js 와 같은 뜻)
-        let openRecordCount = 0;
-        index.byKey.forEach(mask => { if (mask & global.IssueFilter.MASK.OPEN) openRecordCount++; });
-        return { ...base, recordCounts: counts, openRecordCount, unlinkedRecords: unlinked, issueRecordKeys: index.byKey.size };
+        await scan(filter, r => {
+          const mask = maskOf(index, r.key);
+          counts.all++;
+          if (global.IssueFilter.maskMatches(mask, 'clean')) counts.clean++;
+          if (global.IssueFilter.maskMatches(mask, 'issue_all')) counts.issue_all++;
+          if (!mask) unlinked++;
+        });
+        return this.issueOverviewFrom(counts, unlinked, index);
       },
 
       async findImportByFileHash(hash) {
@@ -1366,6 +1479,7 @@
     'getClassificationStatus', 'reclassifySummaries',
     'saveCoverageSnapshot', 'listCoverageSnapshots', 'listRecommendationStates', 'setRecommendationState',
     'getImport', 'updateImportIssue', 'listDateImports', 'getIssueOverview', 'restoreImports',
+    'getStatsBundle', 'getAccumBundle',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

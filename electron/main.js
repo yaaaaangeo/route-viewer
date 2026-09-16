@@ -291,6 +291,8 @@ function registerIpc() {
   handle('db:getRecordsByDate', date => openDatabase().getRecordsByDate(date));
   handle('db:getOverview', filter => openDatabase().getOverview(filter));
   handle('db:getDensityCells', (filter, cell) => openDatabase().getDensityCells(filter, cell));
+  handle('db:getStatsBundle', (filter, options) => openDatabase().getStatsBundle(filter, options));
+  handle('db:getAccumBundle', (filter, cell) => openDatabase().getAccumBundle(filter, cell));
   handle('db:getBounds', filter => openDatabase().getBounds(filter));
   handle('db:getVisitedCellKeys', box => openDatabase().getVisitedCellKeys(box));
   handle('db:getDistribution', (col, filter) => openDatabase().getDistribution(col, filter));

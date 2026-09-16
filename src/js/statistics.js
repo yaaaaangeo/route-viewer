@@ -86,25 +86,6 @@ function normalizeVehicleEntries(entries){
   return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
 }
 
-// 시각(HH:MM:SS)을 4시간 단위 구간으로 묶는다 (00-04시, 04-08시, ... 20-24시)
-const TIME_BUCKET_ORDER=['00-04시','04-08시','08-12시','12-16시','16-20시','20-24시'];
-function timeBucket4h(timeStr){
-  if(!timeStr) return '';
-  const h=parseInt(String(timeStr).split(':')[0],10);
-  if(isNaN(h)||h<0||h>23) return '';
-  const start=Math.floor(h/4)*4;
-  const p=n=>String(n).padStart(2,'0');
-  return `${p(start)}-${p(start+4)}시`;
-}
-// '시간대' 열이 비어있는 옛 파일 대비 — 시각을 4시간 구간으로 묶은 분포로 대체
-async function buildTimeOfDayDistribution(filter){
-  const named=await RouteDB.getDistribution('timeOfDay',filter);
-  if(named.length) return named;
-  const buckets=await RouteDB.getTimeBucketDistribution(filter);
-  return TIME_BUCKET_ORDER.filter(k=>buckets.some(b=>b[0]===k))
-    .map(k=>[k,buckets.find(b=>b[0]===k)[1]]);
-}
-
 // showPct=false면 퍼센트 없이 개수만 표시 (특정 구역 하나로 필터된 상태에서는
 // 예를 들어 "구역: 강남 100%" 처럼 당연한 숫자가 나와 의미가 없기 때문)
 // 이슈로 표시한 파일에서 온 기록은 같은 막대 안에 회색으로 덧그린다(누적 지도의 회색 칸과 같은 색).
@@ -187,32 +168,18 @@ function statsBaseFilter(){
   return statsVehicleFilter==='all' ? {} : {vehicleLike:statsVehicleFilter};
 }
 
-// 항목별 "이슈 파일에서 온 기록 수" — 막대 안 회색 몫에 쓴다.
-// '이슈 없음'을 보고 있으면 회색이 나올 수 없으니 조회 자체를 건너뛴다(빈 Map).
-async function loadIssueShare(baseFilter){
+// 묶음 결과의 이슈 몫 → 항목 이름으로 찾는 Map (막대 안 회색 부분에 쓴다).
+// 이슈 몫이 없으면(이슈 파일이 없거나 '이슈 없음'을 보는 중) 전부 null 이라 회색을 그리지 않는다.
+function issueShareMaps(issue){
   const empty={zone:null,vehicle:null,place:null,road:null,weather:null,timeOfDay:null};
-  if(currentIssueFilter()==='clean') return empty;
-  const filter={...baseFilter,issueFilter:'issue_all'};
-  try{
-    // 이슈 기록이 한 건도 없으면 나머지 분포는 볼 것도 없다 — 질의 네 번을 아낀다
-    const overview=await RouteDB.getOverview(filter);
-    if(!overview.points) return empty;
-    const [place,road,weather,timeOfDay]=await Promise.all([
-      RouteDB.getDistribution('place',filter),
-      RouteDB.getDistribution('road',filter),
-      RouteDB.getDistribution('weather',filter),
-      buildTimeOfDayDistribution(filter),
-    ]);
-    const toMap=entries=>new Map((entries||[]).map(([k,n])=>[k,n]));
-    return {
-      zone:toMap(overview.zones),
-      vehicle:toMap(normalizeVehicleEntries(overview.vehicles)),
-      place:toMap(place), road:toMap(road), weather:toMap(weather), timeOfDay:toMap(timeOfDay),
-    };
-  }catch(err){
-    console.warn('[경로뷰어] 이슈 데이터 몫 조회 실패:',err);
-    return empty;
-  }
+  if(!issue||!issue.points) return empty;
+  const toMap=entries=>new Map((entries||[]).map(([k,n])=>[k,n]));
+  return {
+    zone:toMap(issue.zones),
+    vehicle:toMap(normalizeVehicleEntries(issue.vehicles)),
+    place:toMap(issue.place), road:toMap(issue.road), weather:toMap(issue.weather),
+    timeOfDay:toMap(issue.timeOfDay.length?issue.timeOfDay:issue.timeBuckets),
+  };
 }
 
 let statsRenderToken=0;
@@ -251,9 +218,16 @@ async function renderStatsView(){
   statusEl.style.display='none';
 
   const filter=statsFilter();
-  const overview=await RouteDB.getOverview(filter);
+  // 요약·분포·이슈 몫을 한 번에 받는다. 브라우저 모드(IndexedDB)는 집계마다 전체 기록을
+  // 훑기 때문에, 예전처럼 여섯 번 따로 물어보면 8만 건을 여섯 번 훑어서 탭이 몇 초씩 걸렸다.
+  // '이슈 없음'을 보고 있으면 회색으로 그릴 이슈 몫이 없으니 그 계산은 건너뛴다.
+  const bundle=await RouteDB.getStatsBundle(filter,{
+    withIssueShare:currentIssueFilter()!=='clean',
+    withIssueOverview:true,
+  });
   if(token!==statsRenderToken) return;
-  renderIssueOverview(token);
+  const overview={points:bundle.points,days:bundle.days,zones:bundle.zones,vehicles:bundle.vehicles};
+  renderIssueOverview(bundle.issueOverview);
 
   const activeLabel=statsMode==='region'
     ? (statsZoneFilter==='all'?'전체':statsZoneFilter)
@@ -279,22 +253,11 @@ async function renderStatsView(){
     return;
   }
 
-  // 이슈 몫 조회도 같이 시작한다 — 기다리는 시간이 겹쳐서 화면이 두 배로 느려지지 않는다
-  const issueSharePromise=loadIssueShare(statsBaseFilter());
-
-  // 나머지 분포는 한 번에 조회 (구역/차량은 위 overview 에서 이미 받았다)
-  const [placeDist,roadDist,weatherDist,timeDist]=await Promise.all([
-    RouteDB.getDistribution('place',filter),
-    RouteDB.getDistribution('road',filter),
-    RouteDB.getDistribution('weather',filter),
-    buildTimeOfDayDistribution(filter),
-  ]);
-  if(token!==statsRenderToken) return;
-
-  // 같은 조건에서 "이슈 파일에서 온 기록"만 한 번 더 센 값 — 막대 안에 회색으로 겹쳐 그린다.
-  // '이슈 없음'을 보고 있으면 회색이 나올 데이터가 없으므로 아예 조회하지 않는다(loadIssueShare).
-  const issueShare=await issueSharePromise;
-  if(token!==statsRenderToken) return;
+  const placeDist=bundle.place, roadDist=bundle.road, weatherDist=bundle.weather;
+  // 파일에 '시간대' 열이 있으면 그 값 그대로, 없으면 시각을 4시간 묶음으로
+  const timeDist=bundle.timeOfDay.length?bundle.timeOfDay:bundle.timeBuckets;
+  // 막대 안에 회색으로 겹쳐 그릴 "이슈 파일에서 온 기록" 몫(항목 이름 → 개수)
+  const issueShare=issueShareMaps(bundle.issue);
 
   const total=overview.points;
   const showPct=statsMode==='vehicle'||statsZoneFilter==='all';
@@ -407,18 +370,11 @@ function conditionMatrixCardHTML(summaries,filter,rowDim,colDim,signature){
 //  "이슈 데이터"는 이슈 파일에서 온 기록이고, 한 기록이 정상 파일에서도 왔다면
 //  '이슈 없음'과 '이슈 데이터' 양쪽에 모두 들어간다 — 합이 전체보다 클 수 있다.
 // ══════════════════════════════════════════════════════════
-async function renderIssueOverview(token){
+// ov: getStatsBundle 이 같은 스캔에서 만들어 준 이슈 현황(따로 조회하지 않는다)
+function renderIssueOverview(ov){
   const box=document.getElementById('stats-issue-overview');
   if(!box) return;
-  let ov=null;
-  try{
-    ov=await RouteDB.getIssueOverview(statsBaseFilter());
-  }catch(err){
-    console.warn('[경로뷰어] 이슈 현황 조회 실패:',err);
-    box.innerHTML='';
-    return;
-  }
-  if(token!==undefined&&token!==statsRenderToken) return;
+  if(!ov){ box.innerHTML=''; return; }
   const counts=ov.recordCounts||{};
   const pct=n=>counts.all?`${(n/counts.all*100).toFixed(1)}%`:'—';
   const row=(label,key,note)=>`

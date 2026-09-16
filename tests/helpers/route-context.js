@@ -39,6 +39,7 @@ const API_METHODS = [
   'restoreBackupPayload', 'rebuildAllSummaries', 'getClassificationStatus', 'reclassifySummaries',
   'saveCoverageSnapshot', 'listCoverageSnapshots', 'listRecommendationStates', 'setRecommendationState',
   'getImport', 'updateImportIssue', 'listDateImports', 'getIssueOverview', 'restoreImports', 'listImportRecordKeys',
+  'getStatsBundle', 'getAccumBundle',
 ];
 
 function createDesktopApi(db) {

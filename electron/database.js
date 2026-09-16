@@ -71,6 +71,9 @@ const ISSUE_MASK_RECOMPUTE = `COALESCE((
       FROM record_sources rs JOIN imports i ON i.id = rs.import_id
      WHERE rs.record_hash = driving_records.record_hash), 0)`;
 
+// 통계의 "파일 원본 시간대"를 4시간 묶음으로 보여줄 때 쓰는 순서(storage.js 와 같다)
+const TIME_BUCKET_ORDER = ['00-04시', '04-08시', '08-12시', '12-16시', '16-20시', '20-24시'];
+
 // 30초 주기로 찍혀야 할 기록에서 이상을 찾는 기준 (기존 route-viewer와 동일)
 const GAP_THRESHOLD_SEC = 90;
 const TELEPORT_SPEED_KMH = 150;
@@ -749,6 +752,68 @@ class RouteDatabase {
     const issueSql = issueFilterSql(filter.issueFilter, this.hasIssueImports());
     if (issueSql) where.push(issueSql);
     return { clause: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  화면 한 번에 필요한 집계를 묶어서 (storage.js 의 IndexedDB 백엔드와 같은 모양)
+  //
+  //  브라우저 모드는 SQL 이 없어서 집계마다 전체 레코드를 훑는다 — 통계 탭이 분포를 여섯 번
+  //  따로 물어보면 8만 건을 여섯 번 훑는다. 그래서 화면은 묶음 API 하나만 부르고, 저장소가
+  //  자기 방식대로(여기서는 SQL, 거기서는 스캔 한 번) 답한다.
+  // ══════════════════════════════════════════════════════
+  // 통계 탭 — 요약 + 장소/도로/날씨/시간대 분포, options.withIssueShare 면 그중 이슈 몫도 함께.
+  // 이슈 몫은 같은 GROUP BY 안에서 조건부 SUM 으로 세기 때문에 쿼리가 두 배로 늘지 않는다.
+  getStatsBundle(filter = {}, options = {}) {
+    const { clause, params } = this._filterSql(filter);
+    const withIssue = !!options.withIssueShare && this.hasIssueImports();
+    const issueSum = withIssue ? `, SUM(CASE WHEN ${ISSUE_RECORD_SQL} THEN 1 ELSE 0 END) AS issueN` : '';
+    const agg = this.db.get(
+      `SELECT COUNT(*) AS points, COUNT(DISTINCT date) AS days${issueSum} FROM driving_records ${clause}`, params
+    ) || { points: 0, days: 0, issueN: 0 };
+    const groupRows = column => this.db.all(
+      `SELECT ${column} AS k, COUNT(*) AS n${issueSum} FROM driving_records ${clause}
+       ${clause ? 'AND' : 'WHERE'} ${column} <> '' GROUP BY ${column} ORDER BY n DESC`, params
+    );
+    const buckets = this.db.all(
+      `SELECT substr(time, 1, 2) AS hh, COUNT(*) AS n${issueSum} FROM driving_records ${clause}
+       ${clause ? 'AND' : 'WHERE'} time <> '' GROUP BY hh`, params
+    );
+    const pick = (rows, key) => rows.map(r => [r.k, key ? (r[key] || 0) : r.n]).filter(e => e[1] > 0);
+    const bucketList = key => {
+      const counts = {};
+      buckets.forEach(r => {
+        const h = parseInt(r.hh, 10);
+        if (isNaN(h) || h < 0 || h > 23) return;
+        const start = Math.floor(h / 4) * 4;
+        const pad = n => String(n).padStart(2, '0');
+        const k = `${pad(start)}-${pad(start + 4)}시`;
+        counts[k] = (counts[k] || 0) + (key ? (r[key] || 0) : r.n);
+      });
+      return TIME_BUCKET_ORDER.filter(k => counts[k]).map(k => [k, counts[k]]);
+    };
+    const rows = {
+      zone: groupRows('zone'), vehicle: groupRows('vehicle'), place: groupRows('place'),
+      road: groupRows('road'), weather: groupRows('weather'), timeOfDay: groupRows('time_of_day'),
+    };
+    const shape = key => ({
+      points: key ? (agg.issueN || 0) : agg.points,
+      zones: pick(rows.zone, key), vehicles: pick(rows.vehicle, key),
+      place: pick(rows.place, key), road: pick(rows.road, key), weather: pick(rows.weather, key),
+      timeOfDay: pick(rows.timeOfDay, key), timeBuckets: bucketList(key),
+    });
+    return {
+      ...shape(null), days: agg.days, issue: withIssue ? shape('issueN') : null,
+      issueOverview: options.withIssueOverview ? this.getIssueOverview(filter) : null,
+    };
+  }
+
+  // 누적 지도 — 요약 + 밀도 칸 + 지도 범위(예전엔 조회 세 번)
+  getAccumBundle(filter = {}, cell = 0.0007) {
+    return {
+      overview: this.getOverview(filter),
+      cells: this.getDensityCells(filter, cell),
+      bounds: this.getBounds(filter),
+    };
   }
 
   // 누적지도/통계 상단 요약

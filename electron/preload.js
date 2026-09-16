@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('routeAPI', {
   getRecordsByDate: date => call('db:getRecordsByDate', date),
   getOverview: filter => call('db:getOverview', filter),
   getDensityCells: (filter, cell) => call('db:getDensityCells', filter, cell),
+  // 화면 한 번에 필요한 집계 묶음 — 브라우저 모드와 같은 모양으로 답한다
+  getStatsBundle: (filter, options) => call('db:getStatsBundle', filter, options),
+  getAccumBundle: (filter, cell) => call('db:getAccumBundle', filter, cell),
   getBounds: filter => call('db:getBounds', filter),
   getVisitedCellKeys: box => call('db:getVisitedCellKeys', box),
   getDistribution: (col, filter) => call('db:getDistribution', col, filter),

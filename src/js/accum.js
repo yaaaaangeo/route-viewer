@@ -410,7 +410,12 @@ function mergeManualCellEdits(committed,pending,latDeg,lngDeg){
 }
 
 function defaultCoverageHint(){
-  return '실선/점선 도형 = 직접 그린 구역 경계 · 빨간 칸 = 아직 한 번도 지나가지 않은 곳';
+  const base='실선/점선 도형 = 직접 그린 구역 경계 · 빨간 칸 = 아직 한 번도 지나가지 않은 곳';
+  const left=overpassCooldownMinutesLeft();
+  // 지도 데이터 서버가 막혀 있으면 왜 도로 판정 없이 빠르게 그려졌는지 알려준다
+  return left
+    ? `${base} · ⚠ 지도(도로·건물) 데이터를 못 받아 대체값으로 계산했어요 — ${left}분 뒤 자동으로 다시 시도해요(지금 다시 하려면 "밀도 지도로 보기" 후 "커버리지 갭 보기")`
+    : base;
 }
 
 function pendingManualEditCount(){
@@ -814,11 +819,42 @@ const OVERPASS_MIRRORS=[
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
+// ⚠ 여기가 "탭이 한참 걸리는" 가장 큰 원인이었다. 미러 4개를 15초씩 순서대로 기다리면
+// 연결이 막힌 네트워크에서는 한 번 계산에 최대 1분이 걸리고, 탭에 들어올 때마다 그걸 반복했다
+// (임시 결과는 탭에 다시 들어올 때 다시 시도하게 돼 있다).
+//   · 미러당 대기를 8초로 줄이고,
+//   · 전부 실패하면 10분 동안은 아예 시도하지 않는다(그동안은 도로·건물 없이 바로 계산).
+// 사용자가 "커버리지 갭 보기"를 직접 누르면 "지금 다시 해봐"로 보고 쿨다운을 푼다.
+const OVERPASS_TIMEOUT_MS=8000;
+const OVERPASS_COOLDOWN_MS=10*60*1000;
+const OVERPASS_COOLDOWN_LS_KEY='rv.overpassBlockedUntil';
+
+function overpassBlockedUntil(){
+  try{ return Number(localStorage.getItem(OVERPASS_COOLDOWN_LS_KEY))||0; }
+  catch(_){ return 0; }
+}
+function setOverpassBlockedUntil(ts){
+  try{
+    if(ts) localStorage.setItem(OVERPASS_COOLDOWN_LS_KEY,String(ts));
+    else localStorage.removeItem(OVERPASS_COOLDOWN_LS_KEY);
+  }catch(_){ /* 무시 */ }
+}
+// 사용자가 직접 다시 보겠다고 누르면 바로 다시 시도한다
+function resetOverpassCooldown(){ setOverpassBlockedUntil(0); }
+function overpassCooldownMinutesLeft(){
+  const left=overpassBlockedUntil()-Date.now();
+  return left>0?Math.ceil(left/60000):0;
+}
+
 async function runOverpassQuery(query){
+  const blockedFor=overpassCooldownMinutesLeft();
+  if(blockedFor){
+    throw new Error(`지도 데이터 서버에 연결하지 못해 ${blockedFor}분 뒤에 다시 시도해요(지금은 도로 데이터 없이 계산).`);
+  }
   let lastErr=null;
   for(const url of OVERPASS_MIRRORS){
     const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),15000);
+    const timer=setTimeout(()=>controller.abort(),OVERPASS_TIMEOUT_MS);
     try{
       const res=await fetch(url,{
         method:'POST',
@@ -827,7 +863,9 @@ async function runOverpassQuery(query){
         signal:controller.signal,
       });
       if(!res.ok) throw new Error('overpass HTTP '+res.status+' ('+url+')');
-      return await res.json();
+      const json=await res.json();
+      setOverpassBlockedUntil(0);   // 한 번이라도 되면 쿨다운 해제
+      return json;
     }catch(err){
       lastErr=err;
       console.warn('[route-viewer] overpass mirror failed, trying next:',url,err);
@@ -835,6 +873,7 @@ async function runOverpassQuery(query){
       clearTimeout(timer);
     }
   }
+  setOverpassBlockedUntil(Date.now()+OVERPASS_COOLDOWN_MS);
   throw lastErr;
 }
 
@@ -2386,6 +2425,8 @@ function initAccumMap(){
 
 function toggleCoverageGaps(){
   showCoverageGaps=!showCoverageGaps;
+  // 사용자가 직접 커버리지를 보겠다고 누른 것 — 지도 데이터 서버를 지금 다시 시도한다
+  if(showCoverageGaps) resetOverpassCooldown();
   if(!showCoverageGaps){ showCoverageDepth=false; boundaryEditOpen=false; cellEditMode=null; exitVertexEditMode(); }
   const btn=document.getElementById('coverage-toggle-btn');
   btn.classList.toggle('active',showCoverageGaps);
@@ -2536,15 +2577,19 @@ async function renderAccumViewInner(token){
   coverageStats.renders++;
   const viewKey=accumViewKey();
 
-  let overview;
+  // 요약·밀도 칸·지도 범위를 한 번에 받는다. 브라우저 모드(IndexedDB)는 집계마다 전체 기록을
+  // 훑기 때문에 따로 세 번 물어보면 그만큼 세 배로 기다린다(커버리지 갭 모드에서는 칸을 안 쓰지만,
+  // 같은 스캔에서 나온 값이라 따로 더 드는 비용이 없다).
+  let bundle;
   try{
-    overview=await RouteDB.getOverview(accumFilter());
+    bundle=await RouteDB.getAccumBundle(accumFilter(),ACCUM_CELL);
   }catch(err){
     console.warn('[경로뷰어] 누적 지도 집계 실패:',err);
     showError('누적 지도를 계산하지 못했어요. ('+err.message+')');
     return;
   }
   if(token!==accumRenderToken) return;
+  const overview=bundle.overview;
 
   const totalStats=await RouteDB.stats();
   if(token!==accumRenderToken) return;
@@ -2607,8 +2652,7 @@ async function renderAccumViewInner(token){
   resetCoverageCellLayerCache();
   hideCoveragePanels();
 
-  const cells=await RouteDB.getDensityCells(accumFilter(),ACCUM_CELL);
-  if(token!==accumRenderToken) return;
+  const cells=bundle.cells;
 
   if(cells.length){
     const maxN=Math.max(...cells.map(c=>c.n),1);
@@ -2642,8 +2686,7 @@ async function renderAccumViewInner(token){
   }
 
   // 구역을 선택했으면 그 구역 중심으로, 아니면 필터된 전체 범위로 화면 맞춤
-  const bounds=await RouteDB.getBounds(accumFilter());
-  if(token!==accumRenderToken) return;
+  const bounds=bundle.bounds;
   if(bounds){
     accumMap.fitBounds(
       L.latLngBounds([[bounds.minLat,bounds.minLng],[bounds.maxLat,bounds.maxLng]]),
