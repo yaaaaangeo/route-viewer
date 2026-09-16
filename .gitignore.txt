@@ -1,7 +1,5 @@
 build/
 database/
-백업/
-주행기록/
 .vscode/
 .claude/
 node_modules/
