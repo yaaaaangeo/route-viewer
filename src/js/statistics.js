@@ -107,23 +107,38 @@ async function buildTimeOfDayDistribution(filter){
 
 // showPct=false면 퍼센트 없이 개수만 표시 (특정 구역 하나로 필터된 상태에서는
 // 예를 들어 "구역: 강남 100%" 처럼 당연한 숫자가 나와 의미가 없기 때문)
-function distCardHTML(title,entries,total,showPct,barColor){
+// 이슈로 표시한 파일에서 온 기록은 같은 막대 안에 회색으로 덧그린다(누적 지도의 회색 칸과 같은 색).
+// issueCounts: 항목 이름 → 이슈 기록 수(Map). 없으면 예전처럼 한 가지 색 막대만 그린다.
+const ISSUE_BAR_COLOR='#7d8798';
+
+function distCardHTML(title,entries,total,showPct,barColor,issueCounts){
   if(!entries.length){
     return `<div class="dist-card"><div class="dc-title">${title}</div><div class="dc-empty">데이터 없음</div></div>`;
   }
   const maxCount=entries[0][1];
   const colorStyle=barColor?`background:${barColor};`:'';
+  let issueTotal=0;
   const rows=entries.map(([label,count])=>{
     const barPct=Math.round(count/maxCount*100);
+    const issueN=Math.min(count,(issueCounts&&issueCounts.get(label))||0);
+    issueTotal+=issueN;
+    // 회색 몫은 그 막대 안에서의 비율이다(막대 길이 자체는 전체 기록 수 기준 그대로)
+    const issuePct=count?Math.round(issueN/count*100):0;
     const countLabel=showPct?`${count}개 (${total?Math.round(count/total*100):0}%)`:`${count}개`;
+    const issueTitle=issueN?` · 이슈 데이터 ${fmtNum(issueN)}개`:'';
     return `
       <div class="dist-row">
         <span class="dist-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-        <span class="dist-bar-wrap"><span class="dist-bar" style="width:${barPct}%;${colorStyle}"></span></span>
+        <span class="dist-bar-wrap" title="${escapeHtml(label)} ${countLabel}${issueTitle}"><span class="dist-bar" style="width:${barPct}%;${colorStyle}">${
+          issueN?`<span class="dist-bar-issue" style="width:${issuePct}%"></span>`:''
+        }</span></span>
         <span class="dist-count">${countLabel}</span>
       </div>`;
   }).join('');
-  return `<div class="dist-card"><div class="dc-title">${title}</div>${rows}</div>`;
+  const note=issueTotal
+    ? `<div class="dc-issue-note"><span class="dc-issue-swatch"></span>회색 = 이슈로 표시한 파일에서 온 기록 ${fmtNum(issueTotal)}개</div>`
+    : '';
+  return `<div class="dist-card"><div class="dc-title">${title}</div>${rows}${note}</div>`;
 }
 
 const DONUT_COLORS=['#4fd8c7','#f5a623','#8b7cf6','#ff6b6b','#5fd88a','#7d8798'];
@@ -170,6 +185,32 @@ function statsBaseFilter(){
   }
   // 차량 필터는 '토레스 3호' 로 고르고 데이터에는 '토레스 3호차' 로 들어있다
   return statsVehicleFilter==='all' ? {} : {vehicleLike:statsVehicleFilter};
+}
+
+// 항목별 "이슈 파일에서 온 기록 수" — 막대 안 회색 몫에 쓴다.
+// '이슈 없음'을 보고 있으면 회색이 나올 수 없으니 조회 자체를 건너뛴다(빈 Map).
+async function loadIssueShare(baseFilter){
+  const empty={zone:null,vehicle:null,place:null,road:null,weather:null,timeOfDay:null};
+  if(currentIssueFilter()==='clean') return empty;
+  const filter={...baseFilter,issueFilter:'issue_all'};
+  try{
+    const [overview,place,road,weather,timeOfDay]=await Promise.all([
+      RouteDB.getOverview(filter),
+      RouteDB.getDistribution('place',filter),
+      RouteDB.getDistribution('road',filter),
+      RouteDB.getDistribution('weather',filter),
+      buildTimeOfDayDistribution(filter),
+    ]);
+    const toMap=entries=>new Map((entries||[]).map(([k,n])=>[k,n]));
+    return {
+      zone:toMap(overview.zones),
+      vehicle:toMap(normalizeVehicleEntries(overview.vehicles)),
+      place:toMap(place), road:toMap(road), weather:toMap(weather), timeOfDay:toMap(timeOfDay),
+    };
+  }catch(err){
+    console.warn('[경로뷰어] 이슈 데이터 몫 조회 실패:',err);
+    return empty;
+  }
 }
 
 let statsRenderToken=0;
@@ -245,6 +286,11 @@ async function renderStatsView(){
   ]);
   if(token!==statsRenderToken) return;
 
+  // 같은 조건에서 "이슈 파일에서 온 기록"만 한 번 더 세서 막대 안에 회색으로 겹쳐 그린다.
+  // '이슈 없음'을 보고 있으면 회색이 나올 데이터가 없으므로 아예 조회하지 않는다.
+  const issueShare=await loadIssueShare(statsBaseFilter());
+  if(token!==statsRenderToken) return;
+
   const total=overview.points;
   const showPct=statsMode==='vehicle'||statsZoneFilter==='all';
   const barColor=statsMode==='region'
@@ -257,19 +303,19 @@ async function renderStatsView(){
       cardsHTML.push(donutCardHTML('구역',zoneDist,total,
         (label,i)=>ZONE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
     }
-    cardsHTML.push(distCardHTML('차량',vehicleDist,total,showPct,barColor));
+    cardsHTML.push(distCardHTML('차량',vehicleDist,total,showPct,barColor,issueShare.vehicle));
   }else{
     if(statsVehicleFilter==='all'){
       cardsHTML.push(donutCardHTML('차량',vehicleDist,total,
         (label,i)=>VEHICLE_COLORS[label]||DONUT_COLORS[i%DONUT_COLORS.length]));
     }
-    cardsHTML.push(distCardHTML('구역',zoneDist,total,true,barColor));
+    cardsHTML.push(distCardHTML('구역',zoneDist,total,true,barColor,issueShare.zone));
   }
-  cardsHTML.push(distCardHTML('장소',placeDist,total,showPct,barColor));
-  cardsHTML.push(distCardHTML('도로종류',roadDist,total,showPct,barColor));
-  cardsHTML.push(distCardHTML('날씨',weatherDist,total,showPct,barColor));
+  cardsHTML.push(distCardHTML('장소',placeDist,total,showPct,barColor,issueShare.place));
+  cardsHTML.push(distCardHTML('도로종류',roadDist,total,showPct,barColor,issueShare.road));
+  cardsHTML.push(distCardHTML('날씨',weatherDist,total,showPct,barColor,issueShare.weather));
   // 파일의 '시간대' 열 원본(nav-app이 넣은 주간/일몰) — 아래 교통 시간대·조도 조건과는 다른, 그대로 보존하는 값
-  cardsHTML.push(distCardHTML('파일 원본 시간대',timeDist,total,showPct,barColor));
+  cardsHTML.push(distCardHTML('파일 원본 시간대',timeDist,total,showPct,barColor,issueShare.timeOfDay));
 
   // ── 교통 시간대 · 조도 조건 · 요일 — 날짜 요약의 조건 칸을 더한다(SQLite/IndexedDB 같은 함수) ──
   let summaries=[];
@@ -286,6 +332,13 @@ async function renderStatsView(){
 function conditionStatsCardsHTML(summaries,filter){
   const signature=currentClassificationSignature();
   const agg=groupBy=>ConditionStats.aggregate(summaries,{filter,groupBy,signature});
+  // 이슈 파일에서 온 수집 시간만 따로 — 막대 안에 회색으로 겹쳐 그린다
+  // ('이슈 없음'을 보고 있으면 회색이 나올 데이터가 없으므로 계산하지 않는다)
+  const issueSec=groupBy=>{
+    if(currentIssueFilter()==='clean') return null;
+    const rows=ConditionStats.aggregate(summaries,{filter:{...filter,issueFilter:'issue_all'},groupBy,signature}).rows;
+    return new Map(rows.map(r=>[r[groupBy[0]],r.collectionSec]));
+  };
   const traffic=agg(['trafficPeriod']);
   const light=agg(['lightCondition']);
   const weekday=agg(['weekdayType']);
@@ -293,10 +346,16 @@ function conditionStatsCardsHTML(summaries,filter){
   if(traffic.staleDates>0){
     cards.push(`<div class="dist-card cond-stale-card" style="grid-column:1/-1;"><div class="ir-note warn" style="margin:0;">분류 기준이 바뀐 뒤 아직 다시 분류하지 않은 날짜가 ${fmtNum(traffic.staleDates)}일 있어요. 아래 교통 시간대·조도 분포에는 그 날짜가 예전 기준으로 섞여 있어요 — [설정] 탭에서 재분류해 주세요.</div></div>`);
   }
-  const card=(title,rows,dim)=>`<div class="dist-card cond-card" data-axis="${dim}"><div class="dc-title">${title}</div>${conditionDistRowsHTML(rows,dim)}</div>`;
-  cards.push(card('교통 시간대 · 수집 시간 / 기록 수',traffic.rows,'trafficPeriod'));
-  cards.push(card('조도 조건 · 수집 시간 / 기록 수',light.rows,'lightCondition'));
-  cards.push(card('평일 · 주말 · 수집 시간 / 기록 수',weekday.rows,'weekdayType'));
+  const card=(title,rows,dim,issueMap)=>{
+    const issueTotal=[...(issueMap||new Map()).values()].reduce((a,v)=>a+v,0);
+    const note=issueTotal
+      ? `<div class="dc-issue-note"><span class="dc-issue-swatch"></span>회색 = 이슈로 표시한 파일에서 온 수집 시간 ${fmtNum(Math.round(issueTotal/60))}분</div>`
+      : '';
+    return `<div class="dist-card cond-card" data-axis="${dim}"><div class="dc-title">${title}</div>${conditionDistRowsHTML(rows,dim,issueMap)}${note}</div>`;
+  };
+  cards.push(card('교통 시간대 · 수집 시간 / 기록 수',traffic.rows,'trafficPeriod',issueSec(['trafficPeriod'])));
+  cards.push(card('조도 조건 · 수집 시간 / 기록 수',light.rows,'lightCondition',issueSec(['lightCondition'])));
+  cards.push(card('평일 · 주말 · 수집 시간 / 기록 수',weekday.rows,'weekdayType',issueSec(['weekdayType'])));
   cards.push(`<div class="dist-card cond-card"><div class="dc-title">분류 기준</div><div class="cond-note">교통 시간대는 고정 시각 구간(설정 탭에서 수정), 조도 조건은 날짜·GPS로 계산한 일출·일몰 ±${currentClassificationConfig().sunriseWindowMinutes}/${currentClassificationConfig().sunsetWindowMinutes}분 기준이에요. 수집 시간은 90초 넘는 GPS 공백을 뺀 유효 수집 시간이에요.</div></div>`);
 
   // 구역별(지역 모드) / 차량별(차량 모드) × 교통 시간대 · 조도 조건 — 수집 분
@@ -372,14 +431,13 @@ async function renderIssueOverview(token){
           <tbody>
             ${row('전체 데이터','all','이슈 여부와 상관없이 저장된 모든 기록')}
             ${row('이슈 없는 데이터','clean','확인 필요 이슈 파일에서만 온 기록을 뺀 값')}
-            ${row('이슈 데이터','issue_all','이슈로 표시한 파일에서 온 기록')}
-            ${row('확인 필요','issue_open','아직 확인하지 않은 이슈 파일에서 온 기록')}
-            ${row('확인 완료','issue_resolved','확인을 마친 이슈 파일에서 온 기록')}
+            ${row('이슈 데이터','issue_all',`이슈로 표시한 파일에서 온 기록 — 아래 막대와 누적 지도에서 회색${ov.openRecordCount?` (그중 확인 필요 ${fmtNum(ov.openRecordCount)}개)`:''}`)}
           </tbody>
         </table>
       </div>
       <div class="cond-note">${escapeHtml(issueFilterBasis())} · 지금 보고 있는 분포는 <b>${escapeHtml(issueFilterLabel())}</b> 기준이에요.
-        한 기록이 이슈 파일과 정상 파일 양쪽에서 왔을 수 있어서 상태별 합은 전체보다 클 수 있어요.${
+        아래 막대의 <span class="dc-issue-swatch" style="vertical-align:middle;"></span> 회색 부분이 이슈 데이터 몫이에요(누적 지도의 회색 칸과 같은 뜻).
+        한 기록이 이슈 파일과 정상 파일 양쪽에서 왔을 수 있어서 '이슈 없음'과 '이슈 데이터'의 합은 전체보다 클 수 있어요.${
         ov.unlinkedRecords?` 출처 기록이 없는 예전 데이터 ${fmtNum(ov.unlinkedRecords)}개는 어떤 이슈에도 묶이지 않고 '이슈 없는 데이터'에 남아요.`:''}
         ${ov.conflictCount?`동기화 중 이슈가 겹쳐 최신 값으로 정리된 파일이 ${fmtNum(ov.conflictCount)}개 있어요([데이터 관리] 탭에서 확인).`:''}</div>
     </div>`;

@@ -913,17 +913,17 @@ async function main(win, dbFilePath) {
     for (const f of IssueFilter.ISSUE_FILTERS) out[f]=(await RouteDB.getOverview({issueFilter:f})).points;
     return out;
   })()`);
-  check('데이터 상태별 기록 수가 갈린다(전체 > 이슈 없음 · 확인 필요 > 0)',
-    issueCounts.all > issueCounts.clean && issueCounts.issue_open > 0 && issueCounts.issue_resolved === 0,
-    JSON.stringify(issueCounts));
+  check('데이터 상태별 기록 수가 갈린다(전체 > 이슈 없음 · 이슈만 > 0)',
+    issueCounts.all > issueCounts.clean && issueCounts.issue_all > 0
+    && Object.keys(issueCounts).length === 3, JSON.stringify(issueCounts));
 
   await js(win, `switchTab('calendar')`);
   await sleep(400);
   check('이슈가 있는 날짜에 "확인 필요" 배지가 붙는다',
     (await js(win, `document.querySelectorAll('#cal-grid .cal-issue-badge .issue-badge.open').length`)) >= 1,
     '배지 ' + await js(win, `document.querySelectorAll('#cal-grid .cal-issue-badge').length`) + '개');
-  check('달력 위에 데이터 상태 필터 버튼 5개가 있다',
-    (await js(win, `document.querySelectorAll('#issue-filter-group .zone-btn').length`)) === 5);
+  check('달력 위에 데이터 상태 필터 버튼 3개가 있다(전체 · 이슈 없음 · 이슈만)',
+    (await js(win, `[...document.querySelectorAll('#issue-filter-group .zone-btn')].map(b=>b.textContent).join('/')`)) === '전체/이슈 없음/이슈만');
   const cleanView = await js(win, `(()=>{ setIssueFilter('clean');
     const hidden=document.querySelectorAll('#cal-grid .cal-cell.issue-hidden').length;
     const basis=document.getElementById('cp-issue-basis').textContent;
@@ -941,14 +941,28 @@ async function main(win, dbFilePath) {
   check('일자 요약에 이슈사항(파일·메모·상태)이 나온다',
     /이슈사항/.test(dayIssue) && /GPS 가 튀는 구간이 있어요/.test(dayIssue), dayIssue.slice(0, 110));
 
+  await js(win, `switchTab('accum')`);
+  await sleep(2500);
+  const grayCells = await js(win, `(()=>{ try{
+    return accumDensityLayer.getLayers().filter(l=>l.options&&l.options.fillColor==='#7d8798').length;
+  }catch(_){ return -1; } })()`);
+  const grayLegend = await js(win, `document.getElementById('accum-issue-legend').innerText`);
+  check('누적 지도에서 이슈 데이터가 섞인 칸이 회색으로 그려지고 안내가 뜬다',
+    grayCells > 0 && /회색 칸/.test(grayLegend), `회색 ${grayCells}칸 · ${grayLegend.slice(0, 50)}`);
+  await shot(win, '17-accum-issue-gray');
+
   await js(win, `switchTab('stats')`);
   await sleep(800);
   const issueOverviewText = await js(win, `document.getElementById('stats-issue-overview').innerText.replace(/\s+/g,' ')`);
   check('통계에 이슈 현황 · 전체/이슈 없음/이슈 데이터 비교표가 나온다',
-    ['이슈 현황', '전체 데이터', '이슈 없는 데이터', '이슈 데이터', '확인 필요', '확인 완료']
-      .every(k => issueOverviewText.includes(k)), issueOverviewText.slice(0, 120));
+    ['이슈 현황', '전체 데이터', '이슈 없는 데이터', '이슈 데이터'].every(k => issueOverviewText.includes(k))
+    && !/확인 필요 이슈만|확인 완료 이슈만/.test(issueOverviewText), issueOverviewText.slice(0, 120));
   check('통계에도 같은 데이터 상태 필터 버튼이 있다',
-    (await js(win, `document.querySelectorAll('#stats-issue-filter .zone-btn').length`)) === 5);
+    (await js(win, `document.querySelectorAll('#stats-issue-filter .zone-btn').length`)) === 3);
+  const grayBars = await js(win, `document.querySelectorAll('#dist-grid .dist-bar-issue').length`);
+  const grayNote = await js(win, `document.querySelectorAll('#dist-grid .dc-issue-note').length`);
+  check('통계 막대에 이슈 데이터 몫이 회색으로 겹쳐 그려지고 안내가 붙는다',
+    grayBars > 0 && grayNote > 0, `회색 막대 ${grayBars}개 · 안내 ${grayNote}개`);
 
   await js(win, `switchTab('data')`);
   await sleep(700);

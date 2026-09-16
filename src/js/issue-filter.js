@@ -18,8 +18,9 @@
 //                    정상 파일이나 확인 완료 파일에서도 왔다면 남긴다(정상 출처가 있으므로).
 //                    출처 기록이 없는 예전 데이터도 남긴다 — 지도에서 갑자기 사라지면 안 되므로.
 //    issue_all       이슈가 등록된 파일에서 온 레코드(정상 파일에도 있어도 포함 — 영향 확인용)
-//    issue_open      확인 필요 이슈 파일에서 온 레코드
-//    issue_resolved  확인 완료 이슈 파일에서 온 레코드
+//
+//  확인 필요(open)/확인 완료(resolved)는 이슈의 처리 상태일 뿐 따로 보는 필터가 아니다.
+//  상태는 달력 배지·일자 요약·데이터 관리에서 보고 바꾼다.
 //
 //  레코드는 어떤 필터에서도 한 번만 센다(여러 Import 에 연결돼 있어도 중복 집계하지 않는다).
 //  SQLite(electron/database.js)는 같은 의미를 EXISTS SQL 로, IndexedDB(src/js/storage.js)는 같은 의미를
@@ -41,18 +42,25 @@
   const ISSUE_STATUSES = Object.freeze(['open', 'resolved']);
   const ISSUE_STATUS_LABELS = Object.freeze({ open: '확인 필요', resolved: '확인 완료' });
 
-  const ISSUE_FILTERS = Object.freeze(['all', 'clean', 'issue_all', 'issue_open', 'issue_resolved']);
+  // 필터는 셋뿐이다. '확인 필요'·'확인 완료'는 이슈의 처리 상태이지 따로 볼 데이터 묶음이 아니다 —
+  // 상태별로 나눠 놓으면 '이슈 없음'·'이슈만'과 뜻이 겹쳐서 어느 걸 보고 있는지 헷갈린다.
+  // 상태는 달력 배지·데이터 관리 목록에서 확인하고 바꾼다.
+  const ISSUE_FILTERS = Object.freeze(['all', 'clean', 'issue_all']);
   const ISSUE_FILTER_LABELS = Object.freeze({
     all: '전체 데이터', clean: '이슈 없는 데이터', issue_all: '이슈 데이터만',
-    issue_open: '확인 필요 이슈만', issue_resolved: '확인 완료 이슈만',
   });
   // 화면 버튼처럼 짧게 쓰는 이름
   const ISSUE_FILTER_SHORT_LABELS = Object.freeze({
-    all: '전체', clean: '이슈 없음', issue_all: '이슈만', issue_open: '확인 필요', issue_resolved: '확인 완료',
+    all: '전체', clean: '이슈 없음', issue_all: '이슈만',
   });
+  // 예전에 저장해 둔 값(확인 필요만/확인 완료만)은 '이슈만'으로 본다 — 화면이 빈 목록으로 뜨지 않게
+  const LEGACY_FILTER_ALIASES = Object.freeze({ issue_open: 'issue_all', issue_resolved: 'issue_all' });
 
   function isIssueFilter(v) { return ISSUE_FILTERS.includes(v); }
-  function normalizeFilter(v) { return isIssueFilter(v) ? v : 'all'; }
+  function normalizeFilter(v) {
+    if (isIssueFilter(v)) return v;
+    return LEGACY_FILTER_ALIASES[v] || 'all';
+  }
   function filterLabel(v) { return ISSUE_FILTER_LABELS[normalizeFilter(v)]; }
   function statusLabel(status) { return ISSUE_STATUS_LABELS[status] || '이슈 없음'; }
 
@@ -74,8 +82,6 @@
     switch (normalizeFilter(filter)) {
       case 'clean': return m === 0 || (m & (MASK.NON_ISSUE | MASK.RESOLVED)) !== 0;
       case 'issue_all': return (m & (MASK.OPEN | MASK.RESOLVED)) !== 0;
-      case 'issue_open': return (m & MASK.OPEN) !== 0;
-      case 'issue_resolved': return (m & MASK.RESOLVED) !== 0;
       default: return true;
     }
   }
@@ -166,6 +172,7 @@
     ISSUE_FILTERS,
     ISSUE_FILTER_LABELS,
     ISSUE_FILTER_SHORT_LABELS,
+    LEGACY_FILTER_ALIASES,
     isIssueFilter,
     normalizeFilter,
     filterLabel,

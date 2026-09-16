@@ -173,15 +173,22 @@ function currentClassificationSignature(){
 
 // 축 하나(교통/조도/요일)의 분포 — rows 는 ConditionStats.aggregate(...).rows (그 축 하나로 묶은 것)
 // 수집 시간 기준 막대 + "N분 · M개". 값이 있는 칸만, 정해진 순서로.
-function conditionDistRowsHTML(rows,dim){
+// issueSecByValue: 축 값 → 이슈 파일에서 온 수집 시간(초). 주면 그 몫을 막대 안에 회색으로 덧그린다
+// (누적 지도의 회색 칸과 같은 색). 안 주면 예전처럼 한 가지 색 막대만 그린다.
+function conditionDistRowsHTML(rows,dim,issueSecByValue){
   if(!rows.length) return '<div class="dc-empty">데이터 없음</div>';
   const maxSec=Math.max(1,...rows.map(r=>r.collectionSec));
   return rows.map(r=>{
     const label=ConditionStats.dimensionValueLabel(dim,r[dim]);
     const pct=Math.round(r.collectionSec/maxSec*100);
-    return `<div class="dist-row cond-row" data-dim="${dim}" data-value="${escapeHtml(r[dim])}">
+    const issueSec=Math.min(r.collectionSec,(issueSecByValue&&issueSecByValue.get(r[dim]))||0);
+    const issuePct=r.collectionSec?Math.round(issueSec/r.collectionSec*100):0;
+    return `<div class="dist-row cond-row" data-dim="${dim}" data-value="${escapeHtml(r[dim])}"${
+      issueSec?` title="이슈 데이터 ${fmtNum(Math.round(issueSec/60))}분 포함"`:''}>
       <span class="dist-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-      <span class="dist-bar-wrap"><span class="dist-bar" style="width:${pct}%"></span></span>
+      <span class="dist-bar-wrap"><span class="dist-bar" style="width:${pct}%">${
+        issueSec?`<span class="dist-bar-issue" style="width:${issuePct}%"></span>`:''
+      }</span></span>
       <span class="dist-count cond-count"><b>${fmtNum(r.collectionMinutes)}분</b> · ${fmtNum(r.recordCount)}개</span>
     </div>`;
   }).join('');
@@ -259,8 +266,6 @@ function issueFilterBasis(v){
   switch(f){
     case 'clean': return '계산 기준: 확인 필요 이슈 파일에서만 온 데이터 제외';
     case 'issue_all': return '계산 기준: 이슈로 표시한 파일에서 온 데이터만';
-    case 'issue_open': return '계산 기준: 확인 필요 이슈 파일에서 온 데이터만';
-    case 'issue_resolved': return '계산 기준: 확인 완료 이슈 파일에서 온 데이터만';
     default: return '계산 기준: 전체 데이터(이슈 포함)';
   }
 }

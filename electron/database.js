@@ -44,7 +44,6 @@ const ISSUE_SOURCE_EXISTS = cond => `EXISTS (SELECT 1 FROM record_sources rs JOI
      WHERE rs.record_hash = driving_records.record_hash AND ${cond})`;
 const ISSUE_OPEN_COND = "i.has_issue = 1 AND i.issue_status = 'open'";
 const ISSUE_ANY_COND = 'i.has_issue = 1';
-const ISSUE_RESOLVED_COND = "i.has_issue = 1 AND i.issue_status = 'resolved'";
 const ISSUE_NON_OPEN_COND = "(i.has_issue = 0 OR i.issue_status <> 'open')";
 
 function issueFilterSql(filter) {
@@ -52,8 +51,6 @@ function issueFilterSql(filter) {
     // 확인 필요 이슈 파일에만 연결된 레코드를 뺀다(정상·확인 완료 출처가 있으면 남긴다, 출처 없는 예전 데이터도 남긴다)
     case 'clean': return `(NOT ${ISSUE_SOURCE_EXISTS(ISSUE_OPEN_COND)} OR ${ISSUE_SOURCE_EXISTS(ISSUE_NON_OPEN_COND)})`;
     case 'issue_all': return ISSUE_SOURCE_EXISTS(ISSUE_ANY_COND);
-    case 'issue_open': return ISSUE_SOURCE_EXISTS(ISSUE_OPEN_COND);
-    case 'issue_resolved': return ISSUE_SOURCE_EXISTS(ISSUE_RESOLVED_COND);
     default: return '';
   }
 }
@@ -735,7 +732,8 @@ class RouteDatabase {
               AVG(latitude)  AS lat,
               AVG(longitude) AS lng,
               COUNT(*)       AS n,
-              COUNT(DISTINCT date) AS dateCount
+              COUNT(DISTINCT date) AS dateCount,
+              SUM(CASE WHEN ${ISSUE_SOURCE_EXISTS(ISSUE_ANY_COND)} THEN 1 ELSE 0 END) AS issueN
          FROM driving_records ${clause}
         GROUP BY gy, gx`,
       params
@@ -743,7 +741,7 @@ class RouteDatabase {
     const byKey = new Map();
     for (const c of cells) {
       byKey.set(c.gy + '_' + c.gx, {
-        lat: c.lat, lng: c.lng, n: c.n, dateCount: c.dateCount, zones: {}, vehicles: {},
+        lat: c.lat, lng: c.lng, n: c.n, dateCount: c.dateCount, issueN: c.issueN || 0, zones: {}, vehicles: {},
       });
     }
     const zoneRows = this.db.all(
@@ -1195,10 +1193,14 @@ class RouteDatabase {
     };
     return {
       ...summary,
+      // 필터로 고를 수 있는 셋만 센다. 확인 필요/확인 완료는 "그 상태인 파일에서 온 기록"이라
+      // 필터가 아니라 참고 수치로만 둔다(파일 상태를 바꾸면 이슈만/이슈 없음 쪽이 달라진다).
       recordCounts: {
         all: count('all'), clean: count('clean'), issue_all: count('issue_all'),
-        issue_open: count('issue_open'), issue_resolved: count('issue_resolved'),
       },
+      openRecordCount: (this.db.get(
+        `SELECT COUNT(*) AS n FROM driving_records WHERE ${ISSUE_SOURCE_EXISTS(ISSUE_OPEN_COND)}`
+      ) || { n: 0 }).n,
       unlinkedRecords: (this.db.get(
         `SELECT COUNT(*) AS n FROM driving_records
           WHERE NOT EXISTS (SELECT 1 FROM record_sources rs WHERE rs.record_hash = driving_records.record_hash)`

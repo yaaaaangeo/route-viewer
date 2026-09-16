@@ -750,17 +750,21 @@
       async getDensityCells(filter, cell) {
         cell = cell || 0.0007;
         const grid = new Map();
+        // 칸마다 "이슈 파일에서 온 기록 수"도 센다 — 누적 지도가 그 칸을 회색으로 그린다(database.js 와 같은 값)
+        const index = await issueIndex();
+        const issueBits = global.IssueFilter.MASK.OPEN | global.IssueFilter.MASK.RESOLVED;
         await scan(filter, r => {
           const key = Math.round(r.lat / cell) + '_' + Math.round(r.lng / cell);
           let g = grid.get(key);
-          if (!g) { g = { latSum: 0, lngSum: 0, n: 0, dates: new Set(), zones: {}, vehicles: {} }; grid.set(key, g); }
+          if (!g) { g = { latSum: 0, lngSum: 0, n: 0, issueN: 0, dates: new Set(), zones: {}, vehicles: {} }; grid.set(key, g); }
           g.latSum += r.lat; g.lngSum += r.lng; g.n++;
+          if (maskOf(index, r.key) & issueBits) g.issueN++;
           if (r.date) g.dates.add(r.date);
           if (r.zone) g.zones[r.zone] = (g.zones[r.zone] || 0) + 1;
           if (r.vehicle) g.vehicles[r.vehicle] = (g.vehicles[r.vehicle] || 0) + 1;
         });
         return [...grid.values()].map(g => ({
-          lat: g.latSum / g.n, lng: g.lngSum / g.n, n: g.n,
+          lat: g.latSum / g.n, lng: g.lngSum / g.n, n: g.n, issueN: g.issueN,
           dateCount: g.dates.size, zones: g.zones, vehicles: g.vehicles,
         }));
       },
@@ -1185,7 +1189,10 @@
         let unlinked = 0;
         const linked = new Set((await allSources()).map(s => s.key));
         await scan(null, r => { if (!linked.has(r.key)) unlinked++; });
-        return { ...base, recordCounts: counts, unlinkedRecords: unlinked, issueRecordKeys: index.byKey.size };
+        // 확인 필요 상태 파일에서 온 기록 수 — 필터가 아니라 참고 수치(database.js 와 같은 뜻)
+        let openRecordCount = 0;
+        index.byKey.forEach(mask => { if (mask & global.IssueFilter.MASK.OPEN) openRecordCount++; });
+        return { ...base, recordCounts: counts, openRecordCount, unlinkedRecords: unlinked, issueRecordKeys: index.byKey.size };
       },
 
       async findImportByFileHash(hash) {

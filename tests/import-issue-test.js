@@ -3,7 +3,7 @@
 //
 //   A. 이슈 입력 검증(체크 시 메모 필수 · 200자 · 공백 정리)
 //   B. Import 저장 — 이슈 필드 · 파일별 독립 · 출처 관계(record_sources)
-//   C. 필터 의미(all/clean/issue_all/issue_open/issue_resolved) — 두 저장소가 같은 결론
+//   C. 필터 의미(all/clean/issue_all) — 두 저장소가 같은 결론 · 예전 값 호환
 //   D. 이슈 상태 변경(확인 필요 ↔ 확인 완료 · 메모 수정 · 이슈 해제)
 //   E. 날짜 요약 · 달력(조건 칸의 issueMask · importSources · 부분 필터)
 //   F. 누적 지도 Coverage 캐시 키에 데이터 상태 필터가 들어간다
@@ -26,7 +26,7 @@ const R = require('../src/js/recommendation.js');
 const { RouteDatabase } = require('../electron/database.js');
 const { createDesktopApi, createStorageContext } = require('./helpers/route-context');
 const { createFakeIndexedDB } = require('./helpers/fake-indexeddb');
-const { createAccumHarness, setupCoverageScene } = require('./helpers/accum-harness');
+const { createAccumHarness, setupCoverageScene, ZONES, pangyoDrive } = require('./helpers/accum-harness');
 
 const ROOT = path.join(__dirname, '..');
 let passed = 0, failed = 0;
@@ -144,10 +144,14 @@ async function main() {
   check('16. 이슈 없음(clean) — 정상 파일에서도 온 기록(r2)은 남긴다(r2,r3)',
     (await global.__sqliteScenario.RouteDB.getDistribution('zone', { issueFilter: 'clean' }))[0][1] === 2);
   check('17. 이슈만(issue_all) — 이슈 파일에서 온 기록(r1,r2,r4)', sqlCounts.issue_all === 3);
-  check('18. 확인 필요(issue_open) — 아직 확인하지 않은 파일에서 온 기록(r1,r2,r4)', sqlCounts.issue_open === 3);
-  check('19. 확인 완료(issue_resolved) — 지금은 없다(아직 아무것도 확인 완료가 아님)', sqlCounts.issue_resolved === 0);
+  check('18. 필터는 셋뿐이다 — 확인 필요/확인 완료는 이슈의 처리 상태이지 따로 보는 데이터가 아니다',
+    IF.ISSUE_FILTERS.length === 3 && !IF.ISSUE_FILTERS.includes('issue_open') && !IF.ISSUE_FILTERS.includes('issue_resolved'),
+    IF.ISSUE_FILTERS.join(', '));
+  check('19. 예전에 저장해 둔 확인 필요/확인 완료 값은 "이슈만"으로 본다(빈 화면이 되지 않게)',
+    IF.normalizeFilter('issue_open') === 'issue_all' && IF.normalizeFilter('issue_resolved') === 'issue_all'
+    && (await global.__sqliteScenario.RouteDB.getOverview({ issueFilter: 'issue_open' })).points === sqlCounts.issue_all);
   check('20. 한 레코드는 어떤 필터에서도 한 번만 센다(출처가 둘이어도 중복 집계 없음)',
-    sqlCounts.issue_open === 3 && sqlCounts.all === 4 && sqlCounts.clean + 2 === sqlCounts.all);
+    sqlCounts.all === 4 && sqlCounts.clean + 2 === sqlCounts.all);
   check('21. SQLite 와 IndexedDB 가 같은 결론을 낸다', JSON.stringify(sqlCounts) === JSON.stringify(idbCounts),
     `${JSON.stringify(sqlCounts)} / ${JSON.stringify(idbCounts)}`);
   check('22. 필터 판정 규칙은 issue-filter.js 한 곳에 있다(마스크 → 판정)',
@@ -170,14 +174,14 @@ async function main() {
     const c1 = await counts(RouteDB);
     if (kind === 'SQLite') {
       check('24. 확인 완료로 바꾸면 그 파일에서 온 데이터가 "이슈 없음" 쪽으로 옮겨간다',
-        c1.clean === 3 && c1.issue_open === 1 && c1.issue_resolved === 2, JSON.stringify(c1));
+        c1.clean === 3 && c1.all === 4 && c1.issue_all === 3, JSON.stringify(c1));
       check('25. 확인 완료로 바꿔도 이슈였다는 사실과 메모는 남는다',
         afterResolve.hasIssue === true && afterResolve.issueNote === before.issueNote);
       check('26. 이슈를 처음 적은 시각은 그대로 두고 수정 시각만 새로 찍는다',
         afterResolve.issueCreatedAt === before.issueCreatedAt && afterResolve.issueUpdatedAt !== before.issueUpdatedAt,
         `${afterResolve.issueCreatedAt} / ${afterResolve.issueUpdatedAt}`);
       const back = await RouteDB.updateImportIssue(A.id, { issueStatus: 'open' });
-      check('27. 확인 필요로 되돌릴 수 있다', back.issueStatus === 'open' && (await counts(RouteDB)).issue_open === 3);
+      check('27. 확인 필요로 되돌릴 수 있다', back.issueStatus === 'open' && (await counts(RouteDB)).clean === 2);
       const edited = await RouteDB.updateImportIssue(A.id, { issueNote: '  좌표가   30m 튑니다 ' });
       check('28. 메모만 고칠 수 있고, 저장할 때 공백을 정리한다', edited.issueNote === '좌표가 30m 튑니다');
       let rejected = false;
@@ -192,7 +196,7 @@ async function main() {
       await RouteDB.updateImportIssue(A.id, { hasIssue: true, issueNote: 'GPS 가 튀는 구간이 있어요', issueStatus: 'open' });
     } else {
       check('31. [IndexedDB] 상태 변경 결과도 SQLite 와 같다',
-        c1.clean === 3 && c1.issue_open === 1 && c1.issue_resolved === 2, JSON.stringify(c1));
+        c1.clean === 3 && c1.all === 4 && c1.issue_all === 3, JSON.stringify(c1));
       await RouteDB.updateImportIssue(A.id, { issueStatus: 'open' });
     }
   }
@@ -212,13 +216,14 @@ async function main() {
       && day.importSources.reduce((a, s) => a + s.recordCount, 0) === 5, JSON.stringify(day.importSources));
     const all = CSt.filterDaySummary(day, 'all');
     const clean = CSt.filterDaySummary(day, 'clean');
-    const open = CSt.filterDaySummary(day, 'issue_open');
+    const onlyIssue = CSt.filterDaySummary(day, 'issue_all');
     check('34. 하루 요약을 데이터 상태로 걸러 보면 기록 수가 정확히 나뉜다',
-      all.count === 4 && clean.count === 2 && open.count === 3, `all=${all.count} clean=${clean.count} open=${open.count}`);
+      all.count === 4 && clean.count === 2 && onlyIssue.count === 3,
+      `all=${all.count} clean=${clean.count} issue=${onlyIssue.count}`);
     check('35. 하루가 일부만 걸러지면 partial 로 알리고 주행 시간은 더하지 않는다(파일별로 쪼갤 수 없어서)',
       clean.partial === true && clean.driveSpanSec === 0 && all.partial === false);
     check('36. 그 필터에서 남는 기록이 없으면 0으로 알려준다(달력에서 흐리게 표시)',
-      CSt.filterDaySummary(day, 'issue_resolved').count === 0);
+      CSt.filterDaySummary({ ...day, conditionCells: day.conditionCells.filter(c => c.issueMask === IF.MASK.NON_ISSUE) }, 'issue_all').count === 0);
     const dateImports = await RouteDB.listDateImports('2026-09-01');
     check('37. 일자 요약의 이슈 목록에 파일별 이슈·기록 수가 함께 나온다',
       dateImports.length === 3 && dateImports[0].hasIssue === true && dateImports[0].recordCount === 2,
@@ -250,7 +255,7 @@ async function main() {
     const calcs = h.calcCount();
     const keyAll = h.eval("coverageCalcKey('판교')");
     const geomAll = h.eval("coverageGeometryKey('판교')");
-    h.setIssueFilter('issue_open');
+    h.setIssueFilter('issue_all');
     const keyIssue = h.eval("coverageCalcKey('판교')");
     const geomIssue = h.eval("coverageGeometryKey('판교')");
     check('40. 데이터 상태 필터가 바뀌면 Coverage 캐시 키도 바뀐다(옛 결과가 남지 않는다)',
@@ -258,8 +263,8 @@ async function main() {
     check('41. 구역 경계·도로/건물 같은 정적 계산 키는 그대로다(다시 받아오지 않는다)',
       geomAll === geomIssue);
     check('42. 조회 조건에도 같은 필터가 실린다(지도·통계·Coverage 가 따로 놀지 않는다)',
-      JSON.parse(JSON.stringify(h.eval('accumFilter()'))).issueFilter === 'issue_open'
-      && JSON.parse(JSON.stringify(h.eval('accumDateFilter()'))).issueFilter === 'issue_open');
+      JSON.parse(JSON.stringify(h.eval('accumFilter()'))).issueFilter === 'issue_all'
+      && JSON.parse(JSON.stringify(h.eval('accumDateFilter()'))).issueFilter === 'issue_all');
     await h.eval('renderAccumView()');
     await h.waitRendered();
     const afterIssue = h.calcCount();
@@ -279,7 +284,7 @@ async function main() {
     const ov = await RouteDB.getIssueOverview({});
     check('44. 통계의 이슈 현황 — 파일 수와 상태별 기록 수를 한 번에 준다',
       ov.importCount === 3 && ov.issueImportCount === 2 && ov.openCount === 2
-      && ov.recordCounts.all === 4 && ov.recordCounts.clean === 2 && ov.recordCounts.issue_open === 3,
+      && ov.recordCounts.all === 4 && ov.recordCounts.clean === 2 && ov.openRecordCount === 3,
       JSON.stringify(ov.recordCounts));
     const summaries = await RouteDB.listDateSummaries();
     const zones = await RouteDB.listZones();
@@ -316,7 +321,7 @@ async function main() {
     IF.ISSUE_FILTERS.forEach(f => { rCounts[f] = restored.getOverview({ issueFilter: f }).points; });
     check('48. 백업을 복원하면 이슈와 데이터 상태별 개수가 그대로 돌아온다',
       rImports.some(i => i.hasIssue && i.issueNote === 'GPS 가 튀는 구간이 있어요')
-      && rCounts.all === 3 && rCounts.clean === 2 && rCounts.issue_open === 2
+      && rCounts.all === 3 && rCounts.clean === 2 && rCounts.issue_all === 2
       && rImports.every(i => i.filename !== '(백업 복구)' || !i.relatedRecords), JSON.stringify(rCounts));
 
     // 같은 파일을 양쪽에서 다르게 고친 상황 — 최신 수정이 이긴다
@@ -400,7 +405,7 @@ async function main() {
     check('54. 출처 기록이 없는 예전 데이터는 전체·이슈 없음 화면에서 그대로 보인다',
       legacy.all === 3 && legacy.clean === 3, JSON.stringify(legacy));
     check('55. 이슈 화면에는 나오지 않는다(이슈라고 단정하지 않는다)',
-      legacy.issue_all === 0 && legacy.issue_open === 0 && legacy.issue_resolved === 0);
+      legacy.issue_all === 0 && db.getIssueOverview({}).openRecordCount === 0);
     const ov = db.getIssueOverview({});
     check('56. 출처 없는 기록이 몇 건인지 화면에 알려줄 수 있다', ov.unlinkedRecords === 3, `${ov.unlinkedRecords}건`);
     const oldBackup = { type: 'route-viewer-backup', version: 3, data: { '2026-09-01': FILE_B.records }, imports: [{ filename: '옛날.xlsx', importedAt: '2026-01-01T00:00:00.000Z', total: 2 }] };
@@ -412,6 +417,58 @@ async function main() {
     check('58. 날짜 요약의 조건 칸에는 "출처 없음(0)" 마스크가 들어간다',
       db.listDateSummaries().every(s => s.conditionCells.every(c => c.issueMask === 0)));
     db.close(); target.close();
+  }
+
+  // ══════════════════════════════════════════════════════
+  section('J. 이슈 데이터를 회색으로 — 누적 지도 칸 · 통계 막대');
+  // ══════════════════════════════════════════════════════
+  for (const kind of ['SQLite', 'IndexedDB']) {
+    const { RouteDB } = kind === 'SQLite' ? global.__sqliteScenario : global.__idbScenario;
+    const cells = await RouteDB.getDensityCells({}, 0.0007);
+    const issueCells = cells.filter(c => c.issueN > 0);
+    check(`59. [${kind}] 누적 지도 칸마다 이슈 파일에서 온 기록 수를 함께 준다(회색으로 그릴 칸)`,
+      cells.length > 0 && cells.every(c => Number.isFinite(c.issueN)) && issueCells.length > 0,
+      `${issueCells.length}/${cells.length}칸`);
+    const issueSum = cells.reduce((a, c) => a + c.issueN, 0);
+    const issueTotal = (await RouteDB.getOverview({ issueFilter: 'issue_all' })).points;
+    check(`60. [${kind}] 회색 칸의 이슈 기록 수 합이 "이슈만" 개수와 같다`,
+      issueSum === issueTotal, `${issueSum} = ${issueTotal}`);
+    const issueDist = await RouteDB.getDistribution('zone', { issueFilter: 'issue_all' });
+    const allDist = await RouteDB.getDistribution('zone', {});
+    check(`62. [${kind}] 통계 막대의 회색 몫(항목별 이슈 기록 수)은 전체 몫을 넘지 않는다`,
+      issueDist.length > 0 && issueDist.every(([k, n]) => {
+        const row = allDist.find(a => a[0] === k);
+        return row && n <= row[1];
+      }), issueDist.map(([k, n]) => `${k}:${n}`).join(' '));
+  }
+
+  {
+    // 실제 누적 지도(accum.js)가 그 칸을 회색 원으로 그리는지 — 지도·DOM 만 가짜인 harness
+    const h = await createAccumHarness();
+    await h.eval(`RouteDB.saveZonePolygons(${JSON.stringify(ZONES)})`);
+    await h.eval(`RouteDB.importRecords(${JSON.stringify(pangyoDrive('2026-08-20'))},{filename:'pangyo.xlsx'})`);
+    await h.eval(`RouteDB.importRecords(${JSON.stringify(pangyoDrive('2026-08-21'))},{filename:'pangyo-issue.xlsx',hasIssue:true,issueNote:'GPS 가 튀어요'})`);
+    await h.eval('loadZonePolygonsFromDb()');
+    await h.eval('refreshZoneCache()');
+    await h.eval('refreshSettingsCache()');
+    h.eval("accumZoneFilter='판교'; showCoverageGaps=false;");
+    const grayCount = async () => {
+      await h.eval('renderAccumView()');
+      await h.waitRendered();
+      return h.eval("accumDensityLayer.getLayers().filter(l=>l.options.fillColor==='#7d8798').length");
+    };
+    const grayAll = await grayCount();
+    const totalDots = h.eval('accumDensityLayer.getLayers().length');
+    check('61. 누적 지도가 이슈 데이터가 섞인 칸을 회색 원으로 그린다',
+      grayAll > 0 && grayAll === totalDots, `회색 ${grayAll} / 전체 ${totalDots}칸`);
+    const legend = h.el('accum-issue-legend').innerHTML;
+    check('   지도 아래에 "회색 = 이슈 데이터" 안내가 뜬다',
+      /회색 칸/.test(legend) && /이슈로 표시한 파일/.test(legend), legend.replace(/<[^>]+>/g, ' ').slice(0, 80));
+    h.setIssueFilter('clean');
+    const grayClean = await grayCount();
+    check('   "이슈 없음"으로 보면 회색 칸을 그리지 않는다(그 화면엔 표시할 이슈 데이터가 없다)',
+      grayClean === 0 && h.el('accum-issue-legend').style.display === 'none', `회색 ${grayClean}칸`);
+    h.db.close();
   }
 
   console.log('\n' + '─'.repeat(60));

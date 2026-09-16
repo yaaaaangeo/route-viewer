@@ -343,8 +343,6 @@
     all: '추천 계산 기준: 전체 데이터(이슈 포함)',
     clean: '추천 계산 기준: 확인 필요 이슈 데이터 제외',
     issue_all: '추천 계산 기준: 이슈로 표시한 데이터만',
-    issue_open: '추천 계산 기준: 확인 필요 이슈 데이터만',
-    issue_resolved: '추천 계산 기준: 확인 완료 이슈 데이터만',
   });
 
   function buildRecommendationFeatures(input) {
