@@ -232,3 +232,91 @@ function calShiftMonth(delta){
   calMonth=new Date(calMonth.getFullYear(),calMonth.getMonth()+delta,1);
   renderCalendarGrid();
 }
+
+// ══════════════════════════════════════════════════════════
+//  데이터 상태(이슈) 필터 — 달력 · 누적 지도 · 통계 · 데이터 관리 · 추천이 같이 쓴다
+//
+//  값의 의미는 화면마다 다시 정하지 않는다. 판정 규칙은 issue-filter.js 한 곳에 있고,
+//  SQLite 는 EXISTS SQL, IndexedDB 는 maskMatches(), 날짜 요약은 conditionCells 의
+//  issueMask 로 같은 결론을 낸다.
+//
+//  고른 값은 localStorage 에 남겨서 탭을 옮기거나 앱을 다시 켜도 유지된다.
+//  (데이터 자체가 아니라 "지금 무엇을 보고 있는지"라서 DB에 넣지 않는다)
+// ══════════════════════════════════════════════════════════
+const ISSUE_FILTER_LS_KEY='rv.issueFilter';
+let issueFilter=(function(){
+  try{ return IssueFilter.normalizeFilter(localStorage.getItem(ISSUE_FILTER_LS_KEY)); }
+  catch(_){ return 'all'; }
+})();
+
+function currentIssueFilter(){ return issueFilter; }
+function issueFilterActive(){ return issueFilter!=='all'; }
+function issueFilterLabel(v){ return IssueFilter.filterLabel(v===undefined?issueFilter:v); }
+
+// 화면 아래에 적는 "무엇을 기준으로 센 숫자인지" 한 줄
+function issueFilterBasis(v){
+  const f=IssueFilter.normalizeFilter(v===undefined?issueFilter:v);
+  switch(f){
+    case 'clean': return '계산 기준: 확인 필요 이슈 파일에서만 온 데이터 제외';
+    case 'issue_all': return '계산 기준: 이슈로 표시한 파일에서 온 데이터만';
+    case 'issue_open': return '계산 기준: 확인 필요 이슈 파일에서 온 데이터만';
+    case 'issue_resolved': return '계산 기준: 확인 완료 이슈 파일에서 온 데이터만';
+    default: return '계산 기준: 전체 데이터(이슈 포함)';
+  }
+}
+
+// 데이터 상태 필터 버튼 — 어느 화면에서 눌러도 같은 값이 바뀐다
+function renderIssueFilterButtons(containerId){
+  const el=document.getElementById(containerId);
+  if(!el) return;
+  el.innerHTML='';
+  const label=document.createElement('span');
+  label.className='issue-filter-label'; label.textContent='데이터 상태';
+  el.appendChild(label);
+  IssueFilter.ISSUE_FILTERS.forEach(v=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='zone-btn'; b.dataset.issue=v;
+    b.textContent=IssueFilter.ISSUE_FILTER_SHORT_LABELS[v];
+    b.title=IssueFilter.ISSUE_FILTER_LABELS[v];
+    b.addEventListener('click',()=>setIssueFilter(v));
+    el.appendChild(b);
+  });
+  styleIssueFilterButtons(containerId);
+}
+
+function styleIssueFilterButtons(containerId){
+  document.querySelectorAll('#'+containerId+' .zone-btn').forEach(b=>{
+    b.classList.toggle('active',b.dataset.issue===issueFilter);
+  });
+}
+
+// 필터가 바뀌면 지금 보고 있는 화면을 다시 그린다. Coverage 는 캐시 키에 이슈 필터가
+// 들어 있어서(coverageCalcKey) 키가 달라지면 알아서 다시 계산한다 — 여기서는 구역 경계·
+// 도로/건물 같은 정적 Geometry 캐시를 버리지 않는다.
+function setIssueFilter(value){
+  const next=IssueFilter.normalizeFilter(value);
+  if(next===issueFilter) return issueFilter;
+  issueFilter=next;
+  try{ localStorage.setItem(ISSUE_FILTER_LS_KEY,issueFilter); }catch(_){ /* 무시 */ }
+  ['issue-filter-group','accum-issue-filter','stats-issue-filter','data-issue-filter','rec-issue-filter']
+    .forEach(styleIssueFilterButtons);
+  refreshViewsForIssueFilter();
+  return issueFilter;
+}
+
+function refreshViewsForIssueFilter(){
+  if(typeof recomputeCollectionTotals==='function'){ recomputeCollectionTotals(); renderCollectionProgress(); }
+  const tab=typeof currentTab!=='undefined'?currentTab:null;
+  if(tab==='calendar'&&typeof renderCalendarGrid==='function'){ renderCalendarGrid(); updateCalStatus(); }
+  else if(tab==='accum'&&typeof renderAccumView==='function') renderAccumView();
+  else if(tab==='stats'&&typeof renderStatsView==='function') renderStatsView();
+  else if(tab==='recommend'&&typeof renderRecommendView==='function') renderRecommendView();
+  else if(tab==='data'&&typeof renderDataView==='function') renderDataView();
+}
+
+// 이슈 상태 배지 한 조각 (달력·데이터 관리·통계 공용)
+function issueBadgeHtml(status,text){
+  const cls=status==='resolved'?'resolved':'open';
+  const label=text||IssueFilter.statusLabel(status);
+  return `<span class="issue-badge ${cls}">${escapeHtml(label)}</span>`;
+}

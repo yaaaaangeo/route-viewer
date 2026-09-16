@@ -12,7 +12,7 @@
     "serve": "node server.js",
     "dist": "electron-builder --win nsis portable --publish never",
     "pack": "electron-builder --win --dir",
-    "test": "node tests/run-tests.js && node tests/coverage-grid-test.js && node tests/coverage-gap-healing-test.js && node tests/apartment-shinhyundai-test.js && node tests/apartment-eunma-test.js && node tests/hdmap-data-test.js && node tests/manual-cells-storage-test.js && node tests/coverage-manual-cells-test.js && node tests/accum-date-filter-test.js && node tests/map-capture-test.js && node tests/collection-progress-test.js && node tests/tile-proxy-test.js && node tests/time-conditions-test.js && node tests/time-conditions-storage-test.js && node tests/recommendation-test.js && node tests/recommendation-storage-test.js",
+    "test": "node tests/run-tests.js && node tests/coverage-grid-test.js && node tests/coverage-gap-healing-test.js && node tests/apartment-shinhyundai-test.js && node tests/apartment-eunma-test.js && node tests/hdmap-data-test.js && node tests/manual-cells-storage-test.js && node tests/coverage-manual-cells-test.js && node tests/accum-date-filter-test.js && node tests/map-capture-test.js && node tests/collection-progress-test.js && node tests/tile-proxy-test.js && node tests/time-conditions-test.js && node tests/time-conditions-storage-test.js && node tests/recommendation-test.js && node tests/recommendation-storage-test.js && node tests/import-issue-test.js",
     "test:e2e": "electron . --enable-logging",
     "test:browser-capture": "electron tests/browser-capture-e2e.js"
   },

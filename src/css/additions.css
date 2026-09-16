@@ -421,3 +421,51 @@
 .rec-bad{color:var(--red);}
 .rec-empty{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;font-size:12px;color:var(--text-dim);}
 .rec-empty-title{font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;}
+
+/* ── Import 이슈 기록 (저장 전 확인 창) ───────────────── */
+.imp-intro{font-size:11.5px;color:var(--text-dim);margin-bottom:10px;line-height:1.6;}
+.imp-list{display:flex;flex-direction:column;gap:9px;max-height:52vh;overflow:auto;}
+.imp-row{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;}
+.imp-row.bad{border-color:var(--red);}
+.imp-row-head{display:flex;align-items:center;gap:8px;}
+.imp-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.imp-seen{font-size:10px;color:var(--amber);border:1px solid rgba(245,166,35,.4);border-radius:4px;padding:1px 5px;white-space:nowrap;}
+.imp-meta{display:flex;gap:12px;flex-wrap:wrap;font-size:10.5px;color:var(--text-dim);}
+.imp-check{display:flex;align-items:center;gap:6px;font-size:11.5px;cursor:pointer;}
+.imp-note{width:100%;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:6px 9px;color:var(--text);font-size:11.5px;}
+.imp-note:disabled{opacity:.4;}
+.imp-err{display:none;font-size:11px;color:var(--red);}
+
+/* ── 이슈 배지·필터 (달력·통계·데이터 관리 공용) ──────── */
+.issue-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;border-radius:4px;padding:1px 5px;white-space:nowrap;}
+.issue-badge.open{color:var(--amber);background:rgba(245,166,35,.12);border:1px solid rgba(245,166,35,.4);}
+.issue-badge.resolved{color:var(--green);background:rgba(95,216,138,.1);border:1px solid rgba(95,216,138,.35);}
+.ir-issue{color:var(--amber);font-size:10.5px;}
+.issue-filter-group{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.issue-filter-label{font-size:11px;color:var(--text-dim);margin-right:2px;}
+.issue-note-text{font-size:11.5px;color:var(--text);word-break:break-all;}
+.issue-list{display:flex;flex-direction:column;gap:8px;}
+.issue-item{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px;display:flex;flex-direction:column;gap:5px;}
+.issue-item.open{border-left:3px solid var(--amber);}
+.issue-item.resolved{border-left:3px solid var(--green);}
+.issue-item-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.issue-item-meta{display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px;color:var(--text-dim);}
+.issue-item-actions{display:flex;gap:6px;flex-wrap:wrap;}
+.issue-item-actions .btn{padding:4px 10px;font-size:11px;}
+.issue-edit-row{display:flex;gap:6px;align-items:center;}
+.issue-edit-row input{flex:1;background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:5px 9px;color:var(--text);font-size:11.5px;}
+.cal-issue-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-left:3px;vertical-align:middle;}
+.cal-issue-dot.open{background:var(--amber);}
+.cal-issue-dot.resolved{background:var(--green);}
+.cal-issue-badge{display:flex;gap:3px;flex-wrap:wrap;}
+.cal-cell.issue-hidden{opacity:.35;}
+.ds-issues{margin-top:14px;display:flex;flex-direction:column;gap:8px;}
+#stats-issue-overview{display:grid;gap:12px;}
+#stats-issue-overview:empty{display:none;}
+.issue-compare tr.issue-row-active td{color:var(--teal);font-weight:600;}
+.issue-row-note{color:var(--text-dim);font-size:10.5px;}
+.dm-issue-summary{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--text-dim);margin-bottom:8px;}
+.dm-issue-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px;}
+.dm-issue-select,.dm-issue-search{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:5px 9px;color:var(--text);font-size:11.5px;}
+.dm-issue-search{min-width:220px;flex:1;}
+#data-issue-admin:empty{display:none;}

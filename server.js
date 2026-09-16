@@ -106,6 +106,73 @@ function mergeConfigList(existing, incoming) {
   return [...map.values()];
 }
 
+// Import 이력 합치기 — 같은 파일인지는 파일명|파일 지문|Import 시각으로 가린다.
+// 이슈(체크 여부·한 줄 메모·확인 상태)를 양쪽에서 따로 고쳤으면 issueUpdatedAt 이 최신인
+// 쪽을 쓴다. 메모를 섞어 붙이지 않고, 밀려난 값은 issueConflict 로 남겨서 나중에 사람이
+// 볼 수 있게 한다. recordKeys(그 파일에서 나온 GPS 레코드 키)는 양쪽을 합집합으로 모은다 —
+// 중복 제거 때문에 같은 레코드가 여러 파일에서 나올 수 있어서 한쪽만 남기면 출처가 끊긴다.
+function mergeImports(existingImports, incomingImports) {
+  const identity = im => [
+    (im && im.filename) || '',
+    (im && im.fileHash) || '',
+    (im && im.importedAt) || '',
+  ].join('|');
+  const issueOf = im => ({
+    hasIssue: !!(im && im.hasIssue),
+    issueNote: String((im && im.issueNote) || ''),
+    issueStatus: im && im.hasIssue ? (im.issueStatus === 'resolved' ? 'resolved' : 'open') : null,
+    issueCreatedAt: (im && im.issueCreatedAt) || null,
+    issueUpdatedAt: (im && im.issueUpdatedAt) || null,
+  });
+  const sameIssue = (a, b) => a.hasIssue === b.hasIssue && a.issueNote === b.issueNote
+    && (a.issueStatus || '') === (b.issueStatus || '');
+
+  const map = new Map();
+  let issueConflicts = 0;
+
+  const put = (im, isIncoming) => {
+    if (!im || typeof im !== 'object') return;
+    const key = identity(im);
+    const keys = Array.isArray(im.recordKeys) ? im.recordKeys : [];
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, { ...im, ...issueOf(im), recordKeys: [...new Set(keys)] });
+      return;
+    }
+    const merged = { ...prev, ...im };
+    merged.recordKeys = [...new Set([...(prev.recordKeys || []), ...keys])];
+    const mine = issueOf(prev);
+    const theirs = issueOf(im);
+    if (sameIssue(mine, theirs)) {
+      // 내용이 같으면 다툴 게 없다 — 시각만 최신으로, 처음 기록 시각은 가장 이른 것으로 맞춘다
+      Object.assign(merged, mine);
+      merged.issueUpdatedAt = (theirs.issueUpdatedAt || '') > (mine.issueUpdatedAt || '')
+        ? theirs.issueUpdatedAt : mine.issueUpdatedAt;
+      merged.issueCreatedAt = [mine.issueCreatedAt, theirs.issueCreatedAt].filter(Boolean).sort()[0] || null;
+      merged.issueConflict = prev.issueConflict || im.issueConflict || null;
+    } else {
+      const winner = (theirs.issueUpdatedAt || '') > (mine.issueUpdatedAt || '') ? theirs : mine;
+      const loser = winner === theirs ? mine : theirs;
+      Object.assign(merged, winner);
+      merged.issueCreatedAt = [mine.issueCreatedAt, theirs.issueCreatedAt].filter(Boolean).sort()[0] || null;
+      issueConflicts++;
+      merged.issueConflict = {
+        keptFrom: winner === theirs ? (isIncoming ? 'incoming' : 'server') : (isIncoming ? 'server' : 'incoming'),
+        detectedAt: new Date().toISOString(),
+        replaced: {
+          hasIssue: loser.hasIssue, issueNote: loser.issueNote,
+          issueStatus: loser.issueStatus, issueUpdatedAt: loser.issueUpdatedAt,
+        },
+      };
+    }
+    map.set(key, merged);
+  };
+
+  ((existingImports) || []).forEach(im => put(im, false));
+  ((incomingImports) || []).forEach(im => put(im, true));
+  return { imports: [...map.values()].slice(-500), issueConflicts };
+}
+
 function mergeSharedPayload(existing, incoming) {
   const seen = new Set();
   const mergedData = {};
@@ -146,16 +213,7 @@ function mergeSharedPayload(existing, incoming) {
     ...((existing && existing.backupHistory) || []),
   ]);
 
-  const importSeen = new Set();
-  const imports = [
-    ...((existing && existing.imports) || []),
-    ...(incoming.imports || []),
-  ].filter(im => {
-    const key = `${im && im.filename}|${im && im.importedAt}|${im && im.total}`;
-    if (importSeen.has(key)) return false;
-    importSeen.add(key);
-    return true;
-  }).slice(-500);
+  const { imports, issueConflicts } = mergeImports(existing && existing.imports, incoming.imports);
 
   return {
     payload: {
@@ -173,6 +231,7 @@ function mergeSharedPayload(existing, incoming) {
       total: incomingTotal,
       inserted: incomingInserted,
       duplicates: incomingTotal - incomingInserted,
+      issueConflicts,
     },
   };
 }
@@ -235,6 +294,8 @@ async function handleApi(req, res) {
       total: stats.total,
       inserted: stats.inserted,
       duplicates: stats.duplicates,
+      issueConflicts: stats.issueConflicts,
+      stats,
     });
     return;
   }

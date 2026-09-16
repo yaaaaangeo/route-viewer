@@ -95,7 +95,7 @@ async function sqliteRouteDB(db) {
 // 브라우저 모드 — 날짜 요약은 실제 core.js buildDaySummaryFromPoints 로 만든다
 async function idbRouteDB(fake) {
   const ctx = baseContext({ indexedDB: fake.indexedDB, IDBKeyRange: fake.IDBKeyRange, document: fakeDocument(), setInterval: () => 0 });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/recommendation.js', 'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js']
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js', 'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js']
     .forEach(f => load(ctx, f));
   await ctx.RouteDB.init();
   return { RouteDB: ctx.RouteDB, ctx };
@@ -477,7 +477,7 @@ async function main() {
       ACTIVE_ZONE_NAMES: [], ZONE_COLORS: {}, styleZoneButtons() {}, refreshZoneCache: async () => [],
       renderConsole() {}, switchTab() {}, openModal() {}, closeModal() {},
     });
-    ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/recommendation.js', 'src/js/core.js',
+    ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js', 'src/js/core.js',
       'src/js/coverage-grid.js', 'src/js/storage.js', 'src/js/calendar.js', 'src/js/statistics.js', 'src/js/settings.js'].forEach(f => load(ctx, f));
     // 설정 캐시는 accum.js 의 refreshSettingsCache — 그 함수만 실제 소스에서 잘라 쓴다(누적 지도 전체는 Leaflet이 필요)
     const acc = readSource('src/js/accum.js').match(/const DEFAULT_DEPTH_TIERS_JS=[\s\S]*?async function refreshSettingsCache\(\)\{[\s\S]*?\r?\n\}\r?\n/);

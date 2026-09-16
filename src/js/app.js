@@ -25,7 +25,10 @@ function setStorageBadge(text,title){
 // ══════════════════════════════════════════════════════════
 //  모드 탭 — 화면만 바꿔주고, 데이터는 각 화면이 DB에서 읽는다.
 // ══════════════════════════════════════════════════════════
+let currentTab='upload'; // 지금 보고 있는 탭 — 데이터 상태 필터가 바뀌었을 때 이 화면만 다시 그린다
+
 function switchTab(tab){
+  currentTab=tab;
   ['upload','calendar','accum','stats','recommend','data','settings'].forEach(t=>{
     const btn=document.getElementById('tab-'+t);
     if(btn) btn.classList.toggle('active',tab===t);

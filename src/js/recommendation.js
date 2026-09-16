@@ -26,11 +26,11 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'));
+    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'));
   } else {
-    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats);
+    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter);
   }
-}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS) {
+}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF) {
   'use strict';
 
   const RECOMMENDATION_VERSION = 1;
@@ -338,6 +338,15 @@
   //  1) 특징 — 날짜 요약의 조건 칸만 더한다(원본 GPS 기록을 읽지 않음)
   // ══════════════════════════════════════════════════════
   // input: { summaries, zones, settings(앱 설정 전체), coverageSnapshots, now, vehicle(필터, 선택) }
+  // 추천 결과 위에 적는 "무엇을 기준으로 센 숫자인지" — 화면마다 다시 쓰지 않는다
+  const ISSUE_BASIS_TEXT = Object.freeze({
+    all: '추천 계산 기준: 전체 데이터(이슈 포함)',
+    clean: '추천 계산 기준: 확인 필요 이슈 데이터 제외',
+    issue_all: '추천 계산 기준: 이슈로 표시한 데이터만',
+    issue_open: '추천 계산 기준: 확인 필요 이슈 데이터만',
+    issue_resolved: '추천 계산 기준: 확인 완료 이슈 데이터만',
+  });
+
   function buildRecommendationFeatures(input) {
     const o = input || {};
     const summaries = (o.summaries || []).filter(s => s && Array.isArray(s.conditionCells));
@@ -346,7 +355,11 @@
     const rec = effectiveRecommendationSettings(appSettings.recommendationSettings);
     const signature = TC.classificationSignature(classification);
     const vehicleFilter = o.vehicle ? String(o.vehicle) : '';
+    // 추천은 기본적으로 "확인 필요" 이슈 파일에서만 온 데이터를 빼고 센다(clean).
+    // 아직 확인하지 않은 데이터로 "여기는 이미 충분하다"고 판단하면 안 되기 때문이다.
+    const issueFilter = IF.normalizeFilter(o.issueFilter === undefined ? 'clean' : o.issueFilter);
     const filter = vehicleFilter ? { vehicleLike: vehicleFilter } : {};
+    if (issueFilter !== 'all') filter.issueFilter = issueFilter;
     const agg = groupBy => CSt.aggregate(summaries, { filter, groupBy, details: true, signature });
     const index = rows => new Map(rows.map(r => [keyOf(r), r]));
     const keyOf = r => [r.zone, r.weekdayType, r.trafficPeriod, r.lightCondition, r.weather].filter(v => v !== undefined).join('');
@@ -367,12 +380,14 @@
     } : { trafficPeriod: 0, lightCondition: 0, weekdayType: 0, zone: 0, weather: 0 };
 
     // 전체 데이터(차량 필터와 무관) — 차량 대수·수집 효율·품질 경고
-    const allRows = CSt.aggregate(summaries, { groupBy: ['vehicle', 'weather'], details: true }).rows;
+    const allRows = CSt.aggregate(summaries, { groupBy: ['vehicle', 'weather'], details: true, filter: issueFilter === 'all' ? {} : { issueFilter } }).rows;
     const fleet = [...new Set(allRows.map(r => r.vehicle).filter(Boolean))].sort();
     const weatherCategories = [...new Set(agg(['weather']).rows.map(r => r.weather).filter(Boolean))].sort();
     const weatherTotals = {};
     agg(['weather']).rows.forEach(r => { weatherTotals[r.weather] = r.collectionSec; });
-    const collection = CS.summarizeCollection(summaries);
+    const collection = CS.summarizeCollection(
+      issueFilter === 'all' ? summaries : summaries.map(s => CSt.filterDaySummary(s, issueFilter)).filter(s => s && s.count > 0)
+    );
     const efficiency = collection.totalSpanSec > 0 ? collection.totalSec / collection.totalSpanSec : null;
     let gaps = 0, teleports = 0, records = 0;
     summaries.forEach(s => { const q = s.quality || {}; gaps += q.gaps || 0; teleports += q.teleports || 0; records += s.count || 0; });
@@ -383,6 +398,10 @@
       .map(z => ({ name: z.name, location: zoneLocation(z) }));
     const zoneNames = new Set(zones.map(z => z.name));
     const snapshots = new Map((o.coverageSnapshots || []).filter(s => s && s.zone).map(s => [s.zone, s]));
+    // 이슈 데이터가 하나도 없으면 어떤 필터로 계산했든 결과가 같다 — 그럴 땐 굳이 다르다고 하지 않는다
+    const hasOpenIssueData = summaries.some(s => (s.conditionCells || []).some(c => (Number(c.issueMask) || 0) & IF.MASK.OPEN));
+    const coverageIssueMismatch = hasOpenIssueData
+      && [...snapshots.values()].some(s => IF.normalizeFilter(s.issueFilter || 'all') !== issueFilter);
     const zoneRows = index(agg(['zone']).rows);
     const dataZonesNotActive = [...zoneRows.values()].map(r => r.zone).filter(z => z && !zoneNames.has(z));
 
@@ -391,6 +410,8 @@
       today: kstDate(o.now),
       now: new Date(toMs(o.now)).toISOString(),
       vehicleFilter,
+      issueFilter,
+      coverageIssueMismatch,
       classification,
       signature,
       settings: rec,
@@ -707,6 +728,7 @@
     if (d.staleSummaryDates > 0) add('minor', `분류 기준이 바뀐 뒤 재분류하지 않은 날짜 ${d.staleSummaryDates}일`);
     if (deficit.scores.coverage == null) add('minor', `Coverage 계산값 없음(${deficit.details.coverage.current})`);
     else if (deficit.snapshot && deficit.snapshot.provisional) add('minor', 'Coverage 가 건물 데이터 없이 계산된 임시값');
+    if (features.coverageIssueMismatch) add('minor', `Coverage 는 다른 데이터 상태 필터로 계산된 값(추천 기준: ${IF.filterLabel(features.issueFilter)})`);
     if (!candidate.lightCondition) add('minor', '구역 위치가 없어 조도별 시간 계산 불가');
     const majors = reasons.filter(r => r.severity === 'major').length;
     const level = majors ? 'low' : (reasons.length ? 'medium' : 'high');
@@ -769,6 +791,8 @@
     limitations.push('어린이보호구역·아파트 인접 도로·교차로 정보가 없어 해당 Edge Case 규칙은 적용하지 않습니다.');
     limitations.push('Coverage 는 구역 단위 값만 있습니다(요일·시간대·조도별 Coverage 는 계산하지 않음).');
     limitations.push('날씨 예보와 연결돼 있지 않아 특정 날짜의 날씨는 예측하지 않습니다.');
+    limitations.push(`${ISSUE_BASIS_TEXT[features.issueFilter] || ISSUE_BASIS_TEXT.all} — 이슈 데이터를 포함/제외하면 부족 판단과 순위가 달라질 수 있습니다.`);
+    if (features.coverageIssueMismatch) limitations.push('Coverage 스냅샷은 누적 지도에서 다른 데이터 상태 필터로 계산된 값이라, 추천이 쓰는 기준과 다릅니다.');
     limitations.push('실제 Edge Case 이벤트 로그(검출·급정거·Cut-in 등)가 없어 모든 예상 Edge Case 는 조건 기반 추정(condition_only)입니다.');
     if (d.dataZonesNotActive.length) limitations.push(`활성 구역 목록에 없는 구역의 기록은 추천 후보에서 뺐습니다: ${d.dataZonesNotActive.join(', ')}`);
     if (d.recordCount > 0 && d.unknownRatios.zone > 0) limitations.push(`구역을 판정하지 못한 기록 ${round1(d.unknownRatios.zone * 100)}%는 구역별 추천에 쓰이지 않습니다.`);
@@ -779,6 +803,8 @@
       generatedAt: features.now,
       today: features.today,
       vehicleFilter: features.vehicleFilter,
+      issueFilter: features.issueFilter,
+      issueBasisText: ISSUE_BASIS_TEXT[features.issueFilter] || ISSUE_BASIS_TEXT.all,
       classificationSignature: features.signature,
       settings: features.settings,
       dataset: d,

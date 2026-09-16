@@ -52,6 +52,8 @@ async function renderDataView(){
   if(!dates.length){
     listEl.innerHTML='<div class="dm-empty">아직 저장된 주행 기록이 없어요.</div>';
     importsEl.innerHTML='';
+    const adminEl=document.getElementById('data-issue-admin');
+    if(adminEl) adminEl.innerHTML='';
     dangerEl.style.display='none';
     return;
   }
@@ -80,6 +82,8 @@ async function renderDataView(){
 
   dangerEl.style.display='flex';
 
+  await renderIssueAdmin();
+
   // Import 이력 (요구사항 8) — 원본/추가/중복/충돌, 차량, Import한 사람까지 남긴다
   let imports=[];
   try{ imports=await RouteDB.listImports(15); }catch(_){ imports=[]; }
@@ -89,12 +93,14 @@ async function renderDataView(){
          <div class="dm-import">
            <div class="dm-import-row1">
              <span class="dm-import-file" title="${escapeHtml(im.filename)}">${escapeHtml(im.filename||'—')}</span>
+             ${im.hasIssue?issueBadgeHtml(im.issueStatus):''}
              <span class="mono dm-import-nums">
                <span class="ir-add">+${fmtNum(im.inserted)}</span>
                ${im.duplicates?`<span class="ir-dup">중복 ${fmtNum(im.duplicates)}</span>`:''}
                ${im.conflicts?`<span class="ir-conflict">충돌 ${fmtNum(im.conflicts)}</span>`:''}
              </span>
            </div>
+           ${im.hasIssue?`<div class="issue-note-text">${escapeHtml(im.issueNote||'')}</div>`:''}
            <div class="dm-import-row2 mono">
              <span>${escapeHtml(im.dates||'')}</span>
              ${im.vehicle?`<span>${escapeHtml(im.vehicle)}</span>`:''}
@@ -199,4 +205,159 @@ function showToast(msg){
   el.classList.add('show');
   if(toastTimer) clearTimeout(toastTimer);
   toastTimer=setTimeout(()=>el.classList.remove('show'),3200);
+}
+
+// ══════════════════════════════════════════════════════════
+//  이슈 관리 (데이터 관리 탭)
+//
+//  Import 파일마다 이슈를 등록·수정하고, 확인 필요 ↔ 확인 완료를 바꾸고, 이슈 표시를
+//  지울 수 있다. 파일명·메모로 찾을 수 있고, "이슈만 보기"로 좁힐 수 있다.
+//  레코드 자체는 지우지 않는다 — 이슈는 어디까지나 그 데이터에 붙는 표시다.
+// ══════════════════════════════════════════════════════════
+let issueAdminOnlyIssues=false;
+let issueAdminStatus='';      // '' | 'open' | 'resolved'
+let issueAdminSearch='';
+let issueAdminEditingId=null;
+let issueAdminImports=[];
+let issueAdminOverview=null;
+
+async function renderIssueAdmin(){
+  const el=document.getElementById('data-issue-admin');
+  if(!el) return;
+  try{
+    issueAdminImports=await RouteDB.listImports(500,{
+      issueOnly:issueAdminOnlyIssues,
+      issueStatus:issueAdminStatus||undefined,
+      search:issueAdminSearch||undefined,
+    });
+    issueAdminOverview=await RouteDB.getIssueOverview({});
+  }catch(err){
+    console.warn('[경로뷰어] 이슈 관리 목록 조회 실패:',err);
+    el.innerHTML='';
+    return;
+  }
+  paintIssueAdmin();
+}
+
+function paintIssueAdmin(){
+  const el=document.getElementById('data-issue-admin');
+  if(!el) return;
+  const ov=issueAdminOverview||{};
+  const counts=ov.recordCounts||{};
+  const rows=(issueAdminImports||[]).map(im=>issueAdminRowHTML(im)).join('')
+    ||'<div class="dc-empty">조건에 맞는 Import 파일이 없어요.</div>';
+  el.innerHTML=`
+    <div class="stats-section-title">이슈 관리</div>
+    <div class="dm-issue-summary mono">
+      <span>이슈 파일 ${fmtNum(ov.issueImportCount||0)}개</span>
+      <span class="issue-badge open">확인 필요 ${fmtNum(ov.openCount||0)}</span>
+      <span class="issue-badge resolved">확인 완료 ${fmtNum(ov.resolvedCount||0)}</span>
+      <span>이슈 데이터 ${fmtNum(counts.issue_all||0)}개 / 전체 ${fmtNum(counts.all||0)}개</span>
+      ${ov.conflictCount?`<span class="rec-bad">동기화 충돌 정리 ${fmtNum(ov.conflictCount)}건</span>`:''}
+    </div>
+    <div class="dm-issue-controls">
+      <label class="imp-check"><input type="checkbox" ${issueAdminOnlyIssues?'checked':''} onchange="setIssueAdminOnly(this.checked)"/><span>이슈만 보기</span></label>
+      <select class="dm-issue-select" onchange="setIssueAdminStatus(this.value)">
+        <option value=""${issueAdminStatus===''?' selected':''}>상태 전체</option>
+        <option value="open"${issueAdminStatus==='open'?' selected':''}>확인 필요</option>
+        <option value="resolved"${issueAdminStatus==='resolved'?' selected':''}>확인 완료</option>
+      </select>
+      <input type="text" class="dm-issue-search" id="issue-admin-search" value="${escapeHtml(issueAdminSearch)}"
+             placeholder="파일명 · 이슈 메모 검색" oninput="setIssueAdminSearch(this.value)"/>
+    </div>
+    <div class="issue-list">${rows}</div>`;
+}
+
+function issueAdminRowHTML(im){
+  const editing=issueAdminEditingId===im.id;
+  const max=IssueFilter.ISSUE_NOTE_MAX;
+  const cls=im.hasIssue?(im.issueStatus==='resolved'?'resolved':'open'):'';
+  const conflict=im.issueConflict
+    ? `<div class="ir-note warn">동기화 때 이슈가 겹쳐서 ${escapeHtml(im.issueConflict.keptFrom==='local'?'이 기기':'받아온 쪽')} 값을 남겼어요. 밀려난 메모: ${escapeHtml((im.issueConflict.replaced&&im.issueConflict.replaced.issueNote)||'(없음)')}</div>`
+    : '';
+  const body=editing
+    ? `<div class="issue-edit-row">
+         <input type="text" id="issue-admin-input-${im.id}" maxlength="${max}" value="${escapeHtml(im.issueNote||'')}" placeholder="이슈 내용을 한 줄로 적어주세요 (최대 ${max}자)"/>
+         <button class="btn" type="button" onclick="saveIssueAdmin(${im.id})">저장</button>
+         <button class="btn ghost" type="button" onclick="cancelIssueAdminEdit()">취소</button>
+       </div>
+       <div class="imp-err" id="issue-admin-err-${im.id}"></div>`
+    : (im.hasIssue?`<div class="issue-note-text">${escapeHtml(im.issueNote||'')}</div>`:'');
+  const actions=editing?'':`
+    <div class="issue-item-actions">
+      <button class="btn ghost" type="button" onclick="startIssueAdminEdit(${im.id})">${im.hasIssue?'메모 수정':'이슈 등록'}</button>
+      ${im.hasIssue?`<button class="btn ghost" type="button" onclick="toggleIssueAdminStatus(${im.id})">${im.issueStatus==='resolved'?'확인 필요로 되돌리기':'확인 완료로 변경'}</button>`:''}
+      ${im.hasIssue?`<button class="btn ghost" type="button" onclick="clearIssueAdmin(${im.id})" title="이슈 표시만 지워요. GPS 기록은 그대로 남아요">이슈 해제</button>`:''}
+    </div>`;
+  return `
+    <div class="issue-item ${cls}">
+      <div class="issue-item-head">
+        <span class="imp-name" title="${escapeHtml(im.filename||'')}">${escapeHtml(im.filename||'(파일명 없음)')}</span>
+        ${im.hasIssue?issueBadgeHtml(im.issueStatus):'<span class="issue-badge resolved">이슈 없음</span>'}
+      </div>
+      <div class="issue-item-meta mono">
+        <span>${escapeHtml(im.dates||'')}</span>
+        ${im.vehicle?`<span>${escapeHtml(im.vehicle)}</span>`:''}
+        <span>기록 ${fmtNum(im.relatedRecords||0)}개</span>
+        <span>${escapeHtml(formatBackupTime(im.importedAt))}</span>
+        ${im.issueUpdatedAt?`<span>이슈 수정 ${escapeHtml(formatBackupTime(im.issueUpdatedAt))}</span>`:''}
+      </div>
+      ${body}${conflict}${actions}
+    </div>`;
+}
+
+function setIssueAdminOnly(on){ issueAdminOnlyIssues=!!on; issueAdminEditingId=null; renderIssueAdmin(); }
+function setIssueAdminStatus(value){ issueAdminStatus=value||''; issueAdminEditingId=null; renderIssueAdmin(); }
+
+let issueAdminSearchTimer=null;
+function setIssueAdminSearch(value){
+  issueAdminSearch=String(value||'');
+  if(issueAdminSearchTimer) clearTimeout(issueAdminSearchTimer);
+  // 글자를 칠 때마다 조회하면 목록이 깜빡인다 — 잠깐 멈출 때 한 번만 다시 읽는다
+  issueAdminSearchTimer=setTimeout(async()=>{
+    await renderIssueAdmin();
+    const box=document.getElementById('issue-admin-search');
+    if(box&&box.focus){ box.focus(); if(box.setSelectionRange) box.setSelectionRange(box.value.length,box.value.length); }
+  },250);
+}
+
+function startIssueAdminEdit(importId){ issueAdminEditingId=importId; paintIssueAdmin(); }
+function cancelIssueAdminEdit(){ issueAdminEditingId=null; paintIssueAdmin(); }
+
+async function saveIssueAdmin(importId){
+  const input=document.getElementById('issue-admin-input-'+importId);
+  const check=IssueFilter.validateIssueInput({hasIssue:true,issueNote:input?input.value:''});
+  if(!check.ok){
+    const err=document.getElementById('issue-admin-err-'+importId);
+    if(err){ err.textContent=check.errors[0]; err.style.display='block'; }
+    return;
+  }
+  const current=(issueAdminImports||[]).find(im=>im.id===importId);
+  await applyIssueAdminChange(importId,{
+    hasIssue:true, issueNote:check.value.issueNote,
+    issueStatus:(current&&current.hasIssue&&current.issueStatus)||'open',
+  });
+}
+
+async function toggleIssueAdminStatus(importId){
+  const im=(issueAdminImports||[]).find(x=>x.id===importId);
+  if(!im) return;
+  await applyIssueAdminChange(importId,{issueStatus:im.issueStatus==='resolved'?'open':'resolved'});
+}
+
+async function clearIssueAdmin(importId){
+  await applyIssueAdminChange(importId,{hasIssue:false,issueNote:''});
+}
+
+async function applyIssueAdminChange(importId,patch){
+  try{
+    await RouteDB.updateImportIssue(importId,patch);
+  }catch(err){
+    showError(`이슈를 저장하지 못했어요. (${(err&&err.message)||err})`);
+    return false;
+  }
+  issueAdminEditingId=null;
+  await refreshDateIndex();   // 이슈 마스크가 바뀌어 날짜 요약도 다시 만들어졌다
+  await renderIssueAdmin();
+  return true;
 }

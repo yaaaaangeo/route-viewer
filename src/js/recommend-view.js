@@ -27,7 +27,8 @@ const recommendStats={fetches:0,computations:0,renders:0,staleDiscards:0,cacheHi
 
 function onRecommendDataChanged(evt){
   const m=evt&&evt.method, args=(evt&&evt.args)||[];
-  if(m==='importRecords'||m==='deleteDate'||m==='deleteAll') recRevisions.data++;
+  // 이슈 상태가 바뀌면 같은 기록이라도 데이터 상태 필터에 걸리고 안 걸리고가 달라진다
+  if(m==='importRecords'||m==='deleteDate'||m==='deleteAll'||m==='updateImportIssue'||m==='restoreImports') recRevisions.data++;
   else if(m==='restoreBackupPayload'||m==='sync'){
     // 복원·동기화는 기록·구역·수동 셀·설정을 모두 바꿀 수 있다
     recRevisions.data++; recRevisions.zone++; recRevisions.manual++; recRevisions.classification++; recRevisions.settings++;
@@ -51,11 +52,20 @@ function recommendationCacheKey(){
     coverageSnapshotRevision:recRevisions.coverage, timeClassificationRevision:recRevisions.classification,
     recommendationSettingsRevision:recRevisions.settings,
     vehicle:recFilters.vehicle, today:Recommendation.kstDate(recommendationClock()),
+    issueFilter:recommendationIssueFilter(),
   });
 }
 
 // 탭에 들어올 때·필터(차량)를 바꿀 때 부른다. 입력이 같으면 캐시만 다시 그린다.
+// 추천은 공용 데이터 상태 필터를 따른다. 다만 공용 필터가 '전체'일 때는 확인 필요 이슈 데이터를
+// 뺀 기준으로 센다 — 아직 확인하지 않은 데이터로 "여기는 이미 충분하다"고 판단하면 안 되기 때문이다.
+// 이슈 데이터까지 넣어서 보고 싶으면 '이슈만'·'확인 필요' 필터를 고르면 된다.
+function recommendationIssueFilter(){
+  return issueFilterActive()?currentIssueFilter():'clean';
+}
+
 async function renderRecommendView(){
+  renderIssueFilterButtons('rec-issue-filter');
   const key=recommendationCacheKey();
   if(recCache.key===key&&recCache.result){
     recommendStats.cacheHits++;
@@ -86,6 +96,7 @@ async function renderRecommendView(){
   const result=Recommendation.buildRecommendations({
     summaries:inputs.summaries, zones:inputs.zones, settings:inputs.settings,
     coverageSnapshots:inputs.coverageSnapshots, now:recommendationClock(), vehicle:recFilters.vehicle,
+    issueFilter:recommendationIssueFilter(),
   });
   recStates=inputs.states||{};
   recCache={key,result,appSettings:inputs.settings};
@@ -146,7 +157,8 @@ function renderRecommendationSummary(res){
       <div class="stat-cell"><div class="k">보통 · 낮음</div><div class="v">${fmtNum(counts.medium)} · ${fmtNum(counts.low)}</div></div>
       <div class="stat-cell"><div class="k">1순위</div><div class="v rec-summary-top">${top?`${recEsc(top.zone)} · ${recEsc(top.conditionLabel)}`:'—'}</div></div>
     </div>
-    <div class="rec-kpis">${kpiRows}</div>`;
+    <div class="rec-kpis">${kpiRows}</div>
+    <div class="rec-disclaimer-inline">${recEsc(res.issueBasisText)}${res.issueFilter==='clean'?' (확인 완료 이슈와 이슈 없는 데이터는 포함)':''}</div>`;
 }
 
 function optionHTML(value,label,current){

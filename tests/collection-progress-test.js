@@ -53,12 +53,12 @@ function freshPath() { return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'r
 // 브라우저(IndexedDB) 저장소 — 날짜 요약은 실제 core.js의 buildDaySummaryFromPoints로 만든다
 function fakeDocument() {
   const els = new Map();
-  const make = () => ({ textContent: '', innerHTML: '', style: {}, className: '', children: [], appendChild(c) { this.children.push(c); }, classList: { add() {}, remove() {}, toggle() {} } });
+  const make = () => ({ textContent: '', innerHTML: '', style: {}, className: '', dataset: {}, title: '', children: [], appendChild(c) { this.children.push(c); }, addEventListener() {}, classList: { add() {}, remove() {}, toggle() {} } });
   return { getElementById: id => { if (!els.has(id)) els.set(id, make()); return els.get(id); }, createElement: make, querySelectorAll: () => [], querySelector: () => null, els };
 }
 async function createBrowserStorage(fake) {
   const ctx = baseContext({ indexedDB: fake.indexedDB, IDBKeyRange: fake.IDBKeyRange, document: fakeDocument(), setInterval: () => 0 });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/recommendation.js', 'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js'].forEach(f => load(ctx, f));
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js', 'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js'].forEach(f => load(ctx, f));
   await ctx.RouteDB.init();
   return ctx.RouteDB;
 }
@@ -287,7 +287,7 @@ async function calendarTests() {
     },
     clearError() {}, showError() {}, renderConsole() {}, switchTab() {},
   });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/core.js', 'src/js/calendar.js'].forEach(f => load(ctx, f));
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/core.js', 'src/js/calendar.js'].forEach(f => load(ctx, f));
   const run = code => vm.runInContext(code, ctx);
   const tableText = () => doc.getElementById('cp-body').innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 

@@ -158,6 +158,13 @@ function donutCardHTML(title,entries,total,colorFn){
 
 // 현재 탭/필터 상태를 DB 조회 조건으로
 function statsFilter(){
+  const filter=statsBaseFilter();
+  if(issueFilterActive()) filter.issueFilter=currentIssueFilter();
+  return filter;
+}
+
+// 데이터 상태 필터를 뺀 조건 — 이슈 비교표는 같은 구역·차량 조건에서 상태별로만 갈라 센다
+function statsBaseFilter(){
   if(statsMode==='region'){
     return statsZoneFilter==='all' ? {} : {zone:statsZoneFilter};
   }
@@ -178,6 +185,7 @@ async function renderStatsView(){
   renderFilterButtons('stats-vehicle-filter-group',ACTIVE_VEHICLE_NAMES.map(v=>({value:v,label:v})),'vehicle',setStatsVehicle);
   styleZoneButtons('stats-zone-filter-group',statsZoneFilter);
   styleVehicleButtons();
+  renderIssueFilterButtons('stats-issue-filter');
 
   let totalStats;
   try{
@@ -202,6 +210,7 @@ async function renderStatsView(){
   const filter=statsFilter();
   const overview=await RouteDB.getOverview(filter);
   if(token!==statsRenderToken) return;
+  renderIssueOverview(token);
 
   const activeLabel=statsMode==='region'
     ? (statsZoneFilter==='all'?'전체':statsZoneFilter)
@@ -324,4 +333,54 @@ function conditionMatrixCardHTML(summaries,filter,rowDim,colDim,signature){
     <div class="dc-title">${title}</div>
     <div class="cond-matrix-wrap"><table class="cond-matrix"><thead><tr><th scope="col">${rowDim==='zone'?'구역':'차량'}</th>${head}</tr></thead><tbody>${body}</tbody></table></div>
   </div>`;
+}
+
+// ══════════════════════════════════════════════════════════
+//  이슈 현황 · 전체 / 이슈 없음 / 이슈 데이터 비교
+//
+//  같은 구역·차량 조건에서 데이터 상태별 기록 수만 갈라 센다(getIssueOverview).
+//  "이슈 데이터"는 이슈 파일에서 온 기록이고, 한 기록이 정상 파일에서도 왔다면
+//  '이슈 없음'과 '이슈 데이터' 양쪽에 모두 들어간다 — 합이 전체보다 클 수 있다.
+// ══════════════════════════════════════════════════════════
+async function renderIssueOverview(token){
+  const box=document.getElementById('stats-issue-overview');
+  if(!box) return;
+  let ov=null;
+  try{
+    ov=await RouteDB.getIssueOverview(statsBaseFilter());
+  }catch(err){
+    console.warn('[경로뷰어] 이슈 현황 조회 실패:',err);
+    box.innerHTML='';
+    return;
+  }
+  if(token!==undefined&&token!==statsRenderToken) return;
+  const counts=ov.recordCounts||{};
+  const pct=n=>counts.all?`${(n/counts.all*100).toFixed(1)}%`:'—';
+  const row=(label,key,note)=>`
+    <tr${currentIssueFilter()===key?' class="issue-row-active"':''}>
+      <td>${escapeHtml(label)}</td>
+      <td class="mono">${fmtNum(counts[key]||0)}</td>
+      <td class="mono">${pct(counts[key]||0)}</td>
+      <td class="issue-row-note">${escapeHtml(note)}</td>
+    </tr>`;
+  box.innerHTML=`
+    <div class="dist-card" style="grid-column:1/-1;">
+      <div class="dc-title">이슈 현황 <span class="ds-hint">Import 파일 ${fmtNum(ov.importCount)}개 중 이슈 ${fmtNum(ov.issueImportCount)}개 · 확인 필요 ${fmtNum(ov.openCount)} · 확인 완료 ${fmtNum(ov.resolvedCount)}</span></div>
+      <div class="rec-table-wrap">
+        <table class="rec-table issue-compare">
+          <thead><tr><th>데이터 상태</th><th>기록 수</th><th>비율</th><th>설명</th></tr></thead>
+          <tbody>
+            ${row('전체 데이터','all','이슈 여부와 상관없이 저장된 모든 기록')}
+            ${row('이슈 없는 데이터','clean','확인 필요 이슈 파일에서만 온 기록을 뺀 값')}
+            ${row('이슈 데이터','issue_all','이슈로 표시한 파일에서 온 기록')}
+            ${row('확인 필요','issue_open','아직 확인하지 않은 이슈 파일에서 온 기록')}
+            ${row('확인 완료','issue_resolved','확인을 마친 이슈 파일에서 온 기록')}
+          </tbody>
+        </table>
+      </div>
+      <div class="cond-note">${escapeHtml(issueFilterBasis())} · 지금 보고 있는 분포는 <b>${escapeHtml(issueFilterLabel())}</b> 기준이에요.
+        한 기록이 이슈 파일과 정상 파일 양쪽에서 왔을 수 있어서 상태별 합은 전체보다 클 수 있어요.${
+        ov.unlinkedRecords?` 출처 기록이 없는 예전 데이터 ${fmtNum(ov.unlinkedRecords)}개는 어떤 이슈에도 묶이지 않고 '이슈 없는 데이터'에 남아요.`:''}
+        ${ov.conflictCount?`동기화 중 이슈가 겹쳐 최신 값으로 정리된 파일이 ${fmtNum(ov.conflictCount)}개 있어요([데이터 관리] 탭에서 확인).`:''}</div>
+    </div>`;
 }

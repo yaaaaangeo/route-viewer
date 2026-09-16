@@ -15,16 +15,18 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./time-conditions.js'), require('./collection-stats.js'));
+    module.exports = factory(require('./time-conditions.js'), require('./collection-stats.js'), require('./issue-filter.js'));
   } else {
-    root.ConditionStats = factory(root.TimeConditions, root.CollectionStats);
+    root.ConditionStats = factory(root.TimeConditions, root.CollectionStats, root.IssueFilter);
   }
-}(typeof self !== 'undefined' ? self : this, function (TC, CS) {
+}(typeof self !== 'undefined' ? self : this, function (TC, CS, IF) {
   'use strict';
 
-  const CELL_DIMENSIONS = Object.freeze(['zone', 'vehicle', 'weekdayType', 'trafficPeriod', 'lightCondition', 'weather']);
+  // issueMask: 그 기록이 어느 Import 파일에서 왔는지 요약한 비트(issue-filter.js) —
+  // 이슈 데이터를 나눠 보려면 칸도 나눠 둬야 한다(레코드는 어떤 필터에서도 한 번만 센다)
+  const CELL_DIMENSIONS = Object.freeze(['zone', 'vehicle', 'weekdayType', 'trafficPeriod', 'lightCondition', 'weather', 'issueMask']);
   const DIMENSION_LABELS = Object.freeze({
-    zone: '구역', vehicle: '차량', weekdayType: '요일', trafficPeriod: '교통', lightCondition: '조도', weather: '날씨',
+    zone: '구역', vehicle: '차량', weekdayType: '요일', trafficPeriod: '교통', lightCondition: '조도', weather: '날씨', issueMask: '데이터 상태',
   });
   const DIMENSION_ORDERS = Object.freeze({
     trafficPeriod: [...TC.TRAFFIC_PERIOD_IDS, TC.UNKNOWN],
@@ -47,6 +49,7 @@
       const cell = {
         zone: str(r.zone), vehicle: str(r.vehicle), weekdayType: cls.weekdayType,
         trafficPeriod: cls.trafficPeriod, lightCondition: cls.lightCondition, weather: str(r.weather),
+        issueMask: Number(r.issueMask) || 0,
       };
       const key = CELL_DIMENSIONS.map(d => cell[d]).join('');
       let acc = cells.get(key);
@@ -100,6 +103,34 @@
     return { classificationSignature: TC.classificationSignature(cfg), conditionCells };
   }
 
+  // 날짜 요약 하나를 데이터 상태(이슈) 필터로 걸러 본 값 — 달력 칸·수집 현황이 쓴다.
+  // 기록 수와 수집 시간은 조건 칸(conditionCells)에 이슈 마스크가 있어서 정확히 나눌 수 있다.
+  // 주행 시간(driveSpanSec)은 그날 첫 기록~마지막 기록이라 Import 출처별로 쪼갤 수 없다 —
+  // 그 날짜가 통째로 남을 때만 그대로 쓰고, 일부만 걸러졌으면 0으로 두고 partial 로 알린다.
+  function filterDaySummary(summary, issueFilter) {
+    if (!summary) return null;
+    const f = IF.normalizeFilter(issueFilter);
+    const cells = Array.isArray(summary.conditionCells) ? summary.conditionCells : null;
+    if (f === 'all' || !cells) {
+      return { ...summary, issueFiltered: false, partial: false, fullCount: summary.count };
+    }
+    let recordCount = 0, collectionSec = 0, total = 0;
+    for (const c of cells) {
+      total += c.recordCount || 0;
+      if (!IF.maskMatches(c.issueMask, f)) continue;
+      recordCount += c.recordCount || 0;
+      collectionSec += c.collectionSec || 0;
+    }
+    const partial = recordCount > 0 && recordCount < total;
+    return {
+      ...summary,
+      count: recordCount,
+      collectionSec,
+      driveSpanSec: (recordCount && !partial) ? summary.driveSpanSec : 0,
+      issueFiltered: true, partial, fullCount: total,
+    };
+  }
+
   function isStale(summary, signature) {
     if (!summary || !Array.isArray(summary.conditionCells)) return true;
     return signature != null && summary.classificationSignature !== signature;
@@ -120,6 +151,8 @@
   }
 
   function cellMatches(cell, f) {
+    // 이슈 필터 — 판정 규칙은 issue-filter.js 한 곳(화면마다 따로 판단하지 않는다)
+    if (f.issueFilter && f.issueFilter !== 'all' && !IF.maskMatches(cell.issueMask, f.issueFilter)) return false;
     if (!matchValue(f.zone, cell.zone)) return false;
     if (!matchValue(f.vehicle, cell.vehicle)) return false;
     if (f.vehicleLike && cell.vehicle.indexOf(f.vehicleLike) < 0) return false;
@@ -250,6 +283,7 @@
   }
 
   function dimensionValueLabel(dim, value) {
+    if (dim === 'issueMask') return IF.maskLabel(value);
     if (dim === 'trafficPeriod') return TC.TRAFFIC_PERIOD_LABELS[value] || value;
     if (dim === 'lightCondition') return TC.LIGHT_CONDITION_LABELS[value] || value;
     if (dim === 'weekdayType') return TC.WEEKDAY_TYPE_LABELS[value] || value;
@@ -271,6 +305,7 @@
 
   return {
     CELL_DIMENSIONS,
+    filterDaySummary,
     DIMENSION_LABELS,
     DIMENSION_ORDERS,
     buildConditionSummary,

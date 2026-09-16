@@ -12,6 +12,7 @@
 
 const vm = require('vm');
 const { readSource, freshDb, createDesktopApi, baseContext, load } = require('./route-context');
+const IssueFilter = require('../../src/js/issue-filter.js');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -104,6 +105,9 @@ async function createAccumHarness() {
     createElement: () => makeElement(''),
   };
   const tab = name => () => { stats.tabRenders[name] = (stats.tabRenders[name] || 0) + 1; };
+  // core.js 의 공용 "데이터 상태(이슈) 필터" — 화면 전체(탭 전환·버튼 그리기)를 끌고 오지 않으려고
+  // 값 보관만 흉내 낸다. 무엇이 걸리는지 판정하는 규칙 자체는 진짜 모듈(issue-filter.js)이 한다.
+  let issueFilterValue = 'all';
 
   const ctx = baseContext({
     document,
@@ -120,6 +124,12 @@ async function createAccumHarness() {
     fmtNum: n => String(n),
     dstr: d => d.toISOString().slice(0, 10),
     renderFilterButtons: () => {},
+    currentIssueFilter: () => issueFilterValue,
+    issueFilterActive: () => issueFilterValue !== 'all',
+    issueFilterLabel: v => IssueFilter.filterLabel(v === undefined ? issueFilterValue : v),
+    issueFilterBasis: () => '',
+    renderIssueFilterButtons: () => {},
+    issueBadgeHtml: status => String(status || ''),
     addNoKeyOsmTileLayer: () => {},
     addVehicleStorageMarker: () => {},
     VEHICLE_STORAGE_PLACE: { lat: 37.5, lng: 127.03 },
@@ -135,6 +145,7 @@ async function createAccumHarness() {
   load(ctx, 'src/js/time-conditions.js');
   load(ctx, 'src/js/condition-stats.js');
   load(ctx, 'src/js/recommendation.js');
+  load(ctx, 'src/js/issue-filter.js');
   load(ctx, 'src/js/storage.js');
   load(ctx, 'src/js/map-capture.js');
   load(ctx, 'src/js/accum.js');
@@ -160,6 +171,8 @@ async function createAccumHarness() {
       return false;
     },
     calcCount: () => h.eval('coverageStats.calculations'),
+    // 누적 지도가 보는 데이터 상태 필터를 바꾼다(core.js setIssueFilter 대신)
+    setIssueFilter(value) { issueFilterValue = IssueFilter.normalizeFilter(value); return issueFilterValue; },
   };
 
   await h.eval('RouteDB.init()');

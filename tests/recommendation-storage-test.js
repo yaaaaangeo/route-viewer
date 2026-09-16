@@ -84,7 +84,7 @@ function createRecommendUi(db, extra) {
     ACTIVE_ZONE_NAMES: [], ZONE_COLORS: {}, styleZoneButtons() {}, refreshZoneCache: async () => [],
     renderConsole() {}, switchTab() {}, openModal() {}, closeModal() {},
   }, extra || {}));
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
     'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js', 'src/js/calendar.js', 'src/js/statistics.js', 'src/js/settings.js',
     'src/js/recommend-view.js'].forEach(f => load(ctx, f));
   const run = code => vm.runInContext(code, ctx);
@@ -99,7 +99,7 @@ async function sqliteRouteDB(db) {
 }
 async function idbRouteDB(fake) {
   const ctx = baseContext({ indexedDB: fake.indexedDB, IDBKeyRange: fake.IDBKeyRange, document: fakeDocument(), setInterval: () => 0 });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
     'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js'].forEach(f => load(ctx, f));
   await ctx.RouteDB.init();
   return { RouteDB: ctx.RouteDB, ctx };

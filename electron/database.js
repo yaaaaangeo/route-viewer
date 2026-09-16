@@ -28,6 +28,7 @@ const CollectionStats = require('../src/js/collection-stats.js');
 const TimeConditions = require('../src/js/time-conditions.js');
 const ConditionStats = require('../src/js/condition-stats.js');
 const Recommendation = require('../src/js/recommendation.js');
+const IssueFilter = require('../src/js/issue-filter.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -35,6 +36,35 @@ const SCHEMA_VERSION = 2;
 // 문자열 비교로 모든 날짜보다 커서, 예전엔 "시작일만" 필터에 끼어들었다.
 // (src/js/storage.js 의 IndexedDB matches() 와 같은 규칙)
 const DATE_ONLY_SQL = "date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'";
+
+// ── 이슈 데이터 필터(SQL) ─────────────────────────────
+// 의미는 src/js/issue-filter.js 한 곳에서 정의하고, 여기서는 같은 규칙을 EXISTS 로 옮긴다.
+// (IndexedDB 는 같은 규칙을 IssueFilter.maskMatches 로 판정한다 — 두 저장소 결과가 같아야 한다)
+const ISSUE_SOURCE_EXISTS = cond => `EXISTS (SELECT 1 FROM record_sources rs JOIN imports i ON i.id = rs.import_id
+     WHERE rs.record_hash = driving_records.record_hash AND ${cond})`;
+const ISSUE_OPEN_COND = "i.has_issue = 1 AND i.issue_status = 'open'";
+const ISSUE_ANY_COND = 'i.has_issue = 1';
+const ISSUE_RESOLVED_COND = "i.has_issue = 1 AND i.issue_status = 'resolved'";
+const ISSUE_NON_OPEN_COND = "(i.has_issue = 0 OR i.issue_status <> 'open')";
+
+function issueFilterSql(filter) {
+  switch (IssueFilter.normalizeFilter(filter)) {
+    // 확인 필요 이슈 파일에만 연결된 레코드를 뺀다(정상·확인 완료 출처가 있으면 남긴다, 출처 없는 예전 데이터도 남긴다)
+    case 'clean': return `(NOT ${ISSUE_SOURCE_EXISTS(ISSUE_OPEN_COND)} OR ${ISSUE_SOURCE_EXISTS(ISSUE_NON_OPEN_COND)})`;
+    case 'issue_all': return ISSUE_SOURCE_EXISTS(ISSUE_ANY_COND);
+    case 'issue_open': return ISSUE_SOURCE_EXISTS(ISSUE_OPEN_COND);
+    case 'issue_resolved': return ISSUE_SOURCE_EXISTS(ISSUE_RESOLVED_COND);
+    default: return '';
+  }
+}
+
+// 레코드 한 건의 출처 마스크(1 정상 · 2 확인 필요 · 4 확인 완료 · 0 출처 기록 없음) —
+// 날짜 요약의 조건 칸에 넣어서 달력·통계·추천이 이슈별로 나눠 볼 수 있게 한다.
+const ISSUE_MASK_SQL = `COALESCE((
+    SELECT SUM(DISTINCT CASE WHEN i.has_issue = 1 AND i.issue_status = 'open' THEN 2
+                             WHEN i.has_issue = 1 THEN 4 ELSE 1 END)
+      FROM record_sources rs JOIN imports i ON i.id = rs.import_id
+     WHERE rs.record_hash = driving_records.record_hash), 0)`;
 
 // 30초 주기로 찍혀야 할 기록에서 이상을 찾는 기준 (기존 route-viewer와 동일)
 const GAP_THRESHOLD_SEC = 90;
@@ -195,6 +225,17 @@ class RouteDatabase {
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL DEFAULT ''
       );
+
+      -- GPS 레코드가 "어느 Import 파일에서 나왔는지" — 중복 제거된 레코드도 출처를 잃지 않는다.
+      -- 같은 레코드가 여러 파일에 있으면 행이 여러 개 생기고(PRIMARY KEY 로 같은 쌍은 한 번만),
+      -- 이슈 필터는 이 관계를 EXISTS 로 훑어서 판정한다(src/js/issue-filter.js 규칙).
+      CREATE TABLE IF NOT EXISTS record_sources (
+        record_hash TEXT    NOT NULL,
+        import_id   INTEGER NOT NULL,
+        PRIMARY KEY (record_hash, import_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rs_import ON record_sources(import_id);
     `);
 
     // 예전 버전 DB(imports 테이블에 새 컬럼이 없는 경우) 업그레이드 대비.
@@ -205,7 +246,17 @@ class RouteDatabase {
       distance_km: 'REAL NOT NULL DEFAULT 0',
       conflict_records: 'INTEGER NOT NULL DEFAULT 0',
       conflicts_json: "TEXT NOT NULL DEFAULT '[]'",
+      // 파일별 이슈 — 예전 DB 의 Import 이력은 "이슈 정보 없음"(has_issue 0)으로 남는다.
+      // 출처를 복원할 근거가 없으므로 예전 레코드를 임의의 파일에 연결하지 않는다.
+      has_issue: 'INTEGER NOT NULL DEFAULT 0',
+      issue_note: "TEXT NOT NULL DEFAULT ''",
+      issue_status: "TEXT NOT NULL DEFAULT ''",
+      issue_created_at: "TEXT NOT NULL DEFAULT ''",
+      issue_updated_at: "TEXT NOT NULL DEFAULT ''",
+      issue_conflict_json: "TEXT NOT NULL DEFAULT ''",
     });
+    // 이슈 컬럼을 추가한 뒤에 인덱스를 만든다(예전 DB 는 이 컬럼이 없어서 먼저 만들 수 없다)
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_imports_issue ON imports(has_issue, issue_status);');
 
     // 커버리지 갭에서 "이 칸은 원래 도로가 아니다(제외)" / "이 칸은 방문한
     // 걸로 친다(수동 방문)" / "GPS가 지나갔어도 미방문으로 친다(수동 미방문)"를
@@ -375,6 +426,7 @@ class RouteDatabase {
 
     const normalized = [];
     let skipped = 0;
+    let importId = null;
     for (const raw of records || []) {
       const rec = RouteDatabase.normalize(raw);
       if (!rec) { skipped++; continue; }
@@ -382,6 +434,7 @@ class RouteDatabase {
     }
 
     const dates = new Set();
+    const hashes = new Set();   // 이 파일에서 나온 레코드(신규·중복 모두) — 출처 관계로 남긴다
     let inserted = 0;
     const conflicts = [];
     // 이번 import 배치 안에서 처음 만난 hash의 비교값 캐시 — 매번 DB를 다시
@@ -405,6 +458,7 @@ class RouteDatabase {
         for (const r of normalized) {
           const hash = RouteDatabase.hashOf(r);
           dates.add(r.date);
+          hashes.add(hash);
           const comparable = {
             place: r.place, road: r.road, weather: r.weather,
             timeOfDay: r.timeOfDay, traffic: r.traffic, speed: r.speed,
@@ -443,14 +497,28 @@ class RouteDatabase {
       const distanceKm = fileDistanceKm(normalized);
       const vehicle = mostFrequent(normalized.map(r => r.vehicle).filter(Boolean));
 
+      // 이슈 입력(파일 하나에 하나) — 체크했는데 메모가 없으면 여기서 던져서 Import 자체를 되돌린다
+      const issue = IssueFilter.normalizeIssueForStorage({ hasIssue: meta.hasIssue, issueNote: meta.issueNote, issueStatus: meta.issueStatus });
+      const issueAt = issue.hasIssue ? (meta.issueCreatedAt || importedAt) : '';
       this.db.run(
         `INSERT INTO imports
            (filename, file_hash, imported_at, imported_by, dates, vehicle, distance_km,
-            total_records, inserted_records, duplicate_records, conflict_records, conflicts_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            total_records, inserted_records, duplicate_records, conflict_records, conflicts_json,
+            has_issue, issue_note, issue_status, issue_created_at, issue_updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [filename, fileHash, importedAt, importedBy, [...dates].sort().join(','), vehicle, distanceKm,
-          normalized.length, inserted, duplicates, conflicts.length, JSON.stringify(conflicts.slice(0, 500))]
+          normalized.length, inserted, duplicates, conflicts.length, JSON.stringify(conflicts.slice(0, 500)),
+          issue.hasIssue ? 1 : 0, issue.issueNote, issue.issueStatus, issueAt, issue.hasIssue ? (meta.issueUpdatedAt || issueAt) : '']
       );
+      importId = (this.db.get('SELECT last_insert_rowid() AS id') || {}).id;
+      // 출처 관계 — 중복이라 새로 넣지 않은 레코드도 "이 파일에서도 나왔다"를 남긴다.
+      // 같은 (레코드, 파일) 쌍은 PRIMARY KEY 로 한 번만 저장된다.
+      // meta.trackSources === false 는 백업 복원처럼 "파일에서 온 게 아닌" 경로다(출처로 남기지 않는다)
+      if (meta.trackSources !== false) {
+        const sourceStmt = this.db.prepare('INSERT OR IGNORE INTO record_sources(record_hash, import_id) VALUES (?,?)');
+        try { hashes.forEach(h => sourceStmt.run([h, importId])); }
+        finally { sourceStmt.finalize(); }
+      }
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
@@ -464,6 +532,7 @@ class RouteDatabase {
     const duplicates = normalized.length - inserted;
     return {
       filename,
+      importId,
       dates: [...dates].sort(),
       total: normalized.length,
       inserted,
@@ -482,7 +551,8 @@ class RouteDatabase {
   // 예전 요약 그대로이거나 새 요약이거나 둘 중 하나다. 원본 기록(driving_records)은 건드리지 않는다.
   _rebuildDateSummary(date, classification) {
     const rows = this.db.all(
-      `SELECT date, time, zone, vehicle, weather, speed, latitude AS lat, longitude AS lng
+      `SELECT date, time, zone, vehicle, weather, speed, latitude AS lat, longitude AS lng,
+              ${ISSUE_MASK_SQL} AS issueMask
          FROM driving_records WHERE date = ? ORDER BY timestamp, id`,
       [date]
     );
@@ -491,6 +561,13 @@ class RouteDatabase {
       return;
     }
     const summary = buildDaySummary(rows, classification || this._classificationConfig());
+    // 그 날짜 기록이 어느 Import 에서 왔는지 — 달력 배지·일자 요약의 이슈 목록이 쓴다(상태는 조회할 때 합친다)
+    summary.importSources = this.db.all(
+      `SELECT rs.import_id AS importId, COUNT(*) AS recordCount
+         FROM driving_records dr JOIN record_sources rs ON rs.record_hash = dr.record_hash
+        WHERE dr.date = ? GROUP BY rs.import_id ORDER BY rs.import_id`,
+      [date]
+    );
     this.db.run(
       `INSERT INTO date_summaries(date, record_count, summary_json) VALUES(?,?,?)
        ON CONFLICT(date) DO UPDATE SET record_count = excluded.record_count,
@@ -602,7 +679,7 @@ class RouteDatabase {
     const rows = this.db.all(
       `SELECT date, time, vehicle, zone, place, road, weather,
               time_of_day AS timeOfDay, traffic, speed,
-              latitude AS lat, longitude AS lng
+              latitude AS lat, longitude AS lng, ${ISSUE_MASK_SQL} AS issueMask
          FROM driving_records WHERE date = ? ORDER BY timestamp, id`,
       [date]
     );
@@ -619,6 +696,8 @@ class RouteDatabase {
     if (filter.fromDate) { where.push('date >= ?'); params.push(filter.fromDate); }
     if (filter.toDate) { where.push('date <= ?'); params.push(filter.toDate); }
     if (filter.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + filter.vehicleLike + '%'); }
+    const issueSql = issueFilterSql(filter.issueFilter);
+    if (issueSql) where.push(issueSql);
     return { clause: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
   }
 
@@ -713,12 +792,13 @@ class RouteDatabase {
   // 갭 계산은 "지금까지의 전체 기록" 기준이라 구역 필터를 걸지 않는다.
   getVisitedCellKeys(box) {
     const { latDeg, lngDeg, minLat, maxLat, minLng, maxLng } = box;
+    const issueSql = issueFilterSql(box && box.issueFilter);
     // 화면쪽 paintZoneGapGrid 의 Math.floor(p.lat/latDeg) 와 같은 값이 나와야 한다.
     const rows = this.db.all(
       `SELECT DISTINCT CAST(floor(latitude / ?)  AS INTEGER) AS la,
                        CAST(floor(longitude / ?) AS INTEGER) AS lo
          FROM driving_records
-        WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?`,
+        WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?${issueSql ? ` AND ${issueSql}` : ''}`,
       [latDeg, lngDeg, minLat, maxLat, minLng, maxLng]
     );
     return rows.map(r => r.la + '_' + r.lo);
@@ -774,6 +854,8 @@ class RouteDatabase {
     const before = this.db.get('SELECT COUNT(*) AS n FROM driving_records WHERE date = ?', [date]).n;
     this.db.run('DELETE FROM driving_records WHERE date = ?', [date]);
     this.db.run('DELETE FROM date_summaries WHERE date = ?', [date]);
+    // 지운 레코드의 출처 관계도 정리한다(Import 이력과 이슈 메모 자체는 남긴다)
+    this.db.run('DELETE FROM record_sources WHERE record_hash NOT IN (SELECT record_hash FROM driving_records)');
     return { date, removed: before };
   }
 
@@ -782,6 +864,7 @@ class RouteDatabase {
     this.db.run('DELETE FROM driving_records');
     this.db.run('DELETE FROM date_summaries');
     this.db.run('DELETE FROM imports');
+    this.db.run('DELETE FROM record_sources');
     return { removed: before };
   }
 
@@ -1014,15 +1097,113 @@ class RouteDatabase {
     return all;
   }
 
-  listImports(limit = 200) {
-    return this.db.all(
+  // options: {issueOnly, issueStatus, search} — 데이터 관리의 "이슈만 보기"·파일명/메모 검색
+  listImports(limit = 200, options = {}) {
+    const where = [];
+    const params = [];
+    const o = options || {};
+    if (o.issueOnly) where.push('has_issue = 1');
+    if (o.issueStatus) { where.push('has_issue = 1 AND issue_status = ?'); params.push(o.issueStatus); }
+    if (o.search) { where.push('(filename LIKE ? OR issue_note LIKE ?)'); params.push('%' + o.search + '%', '%' + o.search + '%'); }
+    const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const rows = this.db.all(
       `SELECT id, filename, file_hash AS fileHash, imported_at AS importedAt,
               imported_by AS importedBy, dates, vehicle, distance_km AS distanceKm,
               total_records AS total, inserted_records AS inserted,
-              duplicate_records AS duplicates, conflict_records AS conflicts
-         FROM imports ORDER BY id DESC LIMIT ?`,
-      [limit]
+              duplicate_records AS duplicates, conflict_records AS conflicts,
+              has_issue AS hasIssue, issue_note AS issueNote, issue_status AS issueStatus,
+              issue_created_at AS issueCreatedAt, issue_updated_at AS issueUpdatedAt,
+              issue_conflict_json AS issueConflictJson,
+              (SELECT COUNT(*) FROM record_sources rs WHERE rs.import_id = imports.id) AS relatedRecords
+         FROM imports ${clause} ORDER BY id DESC LIMIT ?`,
+      [...params, limit]
     );
+    return rows.map(normalizeImportRow);
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  Import 이슈 — 메모·상태 수정. 원본 GPS 레코드와 Import 이력은 절대 지우지 않는다.
+  //  상태/메모가 바뀌면 그 파일이 관여한 날짜의 요약만 다시 만든다(조건 칸의 이슈 마스크가 달라지므로).
+  // ══════════════════════════════════════════════════════
+  updateImportIssue(importId, patch) {
+    const row = this.db.get(
+      `SELECT id, has_issue AS hasIssue, issue_note AS issueNote, issue_status AS issueStatus,
+              issue_created_at AS issueCreatedAt, issue_updated_at AS issueUpdatedAt
+         FROM imports WHERE id = ?`, [importId]);
+    if (!row) throw new Error('그 Import 이력을 찾지 못했어요.');
+    const next = IssueFilter.normalizeIssueForStorage(patch || {}, {
+      hasIssue: !!row.hasIssue, issueNote: row.issueNote, issueStatus: row.issueStatus || 'open',
+    });
+    const now = new Date().toISOString();
+    const createdAt = next.hasIssue ? (row.issueCreatedAt || now) : row.issueCreatedAt; // 이슈가 있었던 사실은 지우지 않는다
+    this.db.run(
+      `UPDATE imports SET has_issue = ?, issue_note = ?, issue_status = ?, issue_created_at = ?, issue_updated_at = ?
+        WHERE id = ?`,
+      [next.hasIssue ? 1 : 0, next.issueNote, next.issueStatus, createdAt || '', now, importId]
+    );
+    this.rebuildSummariesForImport(importId);
+    return this.getImport(importId);
+  }
+
+  getImport(importId) {
+    const rows = this.db.all(
+      `SELECT id, filename, file_hash AS fileHash, imported_at AS importedAt, imported_by AS importedBy,
+              dates, vehicle, distance_km AS distanceKm, total_records AS total, inserted_records AS inserted,
+              duplicate_records AS duplicates, conflict_records AS conflicts,
+              has_issue AS hasIssue, issue_note AS issueNote, issue_status AS issueStatus,
+              issue_created_at AS issueCreatedAt, issue_updated_at AS issueUpdatedAt,
+              issue_conflict_json AS issueConflictJson,
+              (SELECT COUNT(*) FROM record_sources rs WHERE rs.import_id = imports.id) AS relatedRecords
+         FROM imports WHERE id = ?`, [importId]);
+    return rows.length ? normalizeImportRow(rows[0]) : null;
+  }
+
+  // 그 Import 의 기록이 들어 있는 날짜들의 요약만 다시 만든다
+  rebuildSummariesForImport(importId) {
+    const dates = this.db.all(
+      `SELECT DISTINCT dr.date AS date FROM record_sources rs
+         JOIN driving_records dr ON dr.record_hash = rs.record_hash
+        WHERE rs.import_id = ?`, [importId]);
+    const config = this._classificationConfig();
+    dates.forEach(d => this._rebuildDateSummary(d.date, config));
+    return dates.map(d => d.date);
+  }
+
+  // 그 날짜의 기록이 어느 Import 에서 왔는지(이슈 정보 포함) — 일자 요약의 "이슈사항"
+  listDateImports(date) {
+    const rows = this.db.all(
+      `SELECT i.id AS id, i.filename AS filename, i.imported_at AS importedAt, i.imported_by AS importedBy,
+              i.vehicle AS vehicle, i.has_issue AS hasIssue, i.issue_note AS issueNote, i.issue_status AS issueStatus,
+              i.issue_created_at AS issueCreatedAt, i.issue_updated_at AS issueUpdatedAt,
+              i.issue_conflict_json AS issueConflictJson, COUNT(*) AS recordCount
+         FROM record_sources rs
+         JOIN driving_records dr ON dr.record_hash = rs.record_hash
+         JOIN imports i ON i.id = rs.import_id
+        WHERE dr.date = ?
+        GROUP BY i.id
+        ORDER BY i.has_issue DESC, i.issue_status, i.id`, [date]);
+    return rows.map(r => ({ ...normalizeImportRow(r), importId: r.id }));
+  }
+
+  // 이슈 현황 요약(통계·데이터 관리) — 파일 수와 이슈 레코드 수
+  getIssueOverview(filter = {}) {
+    const imports = this.listImports(100000, {});
+    const summary = IssueFilter.summarizeImports(imports);
+    const count = issueFilter => {
+      const { clause, params } = this._filterSql({ ...filter, issueFilter });
+      return (this.db.get(`SELECT COUNT(*) AS n FROM driving_records ${clause}`, params) || { n: 0 }).n;
+    };
+    return {
+      ...summary,
+      recordCounts: {
+        all: count('all'), clean: count('clean'), issue_all: count('issue_all'),
+        issue_open: count('issue_open'), issue_resolved: count('issue_resolved'),
+      },
+      unlinkedRecords: (this.db.get(
+        `SELECT COUNT(*) AS n FROM driving_records
+          WHERE NOT EXISTS (SELECT 1 FROM record_sources rs WHERE rs.record_hash = driving_records.record_hash)`
+      ) || { n: 0 }).n,
+    };
   }
 
   // Import History의 "[상세]" — 그 import에서 값이 갈렸던 레코드 목록
@@ -1080,6 +1261,9 @@ class RouteDatabase {
     if (box && box.fromDate) { where.push('date >= ?'); params.push(box.fromDate); }
     if (box && box.toDate) { where.push('date <= ?'); params.push(box.toDate); }
     if (box && box.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + box.vehicleLike + '%'); }
+    // 이슈 필터는 GPS 방문 데이터에만 건다 — 구역 경계·도로/건물 Geometry 는 이 필터와 무관하다(화면에서 따로 캐시)
+    const visitIssueSql = box ? issueFilterSql(box.issueFilter) : '';
+    if (visitIssueSql) where.push(visitIssueSql);
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
     const rows = this.db.all(
@@ -1167,8 +1351,20 @@ class RouteDatabase {
       zones: this.listZones(),
       settings: this.getSettings(),
       backupHistory: this.getBackupHistory(),
-      imports: this.listImports(1000),
+      // Import 이력에 이슈(여부·메모·상태·시각)와 그 파일에서 나온 레코드 키를 함께 싣는다 —
+      // 다른 PC 에서 복원해도 "어느 레코드가 어느 파일에서 왔는지"가 살아 있어야 이슈 필터가 같게 동작한다.
+      // 레코드 키는 저장소 공통 형식(date|time|vehicle|lat|lng)이고, SQLite 는 복원할 때 sha1 로 바꿔 넣는다.
+      imports: this.listImports(1000).map(im => ({ ...im, recordKeys: this.listImportRecordKeys(im.id) })),
     };
+  }
+
+  // 그 Import 에서 나온 레코드들의 공통 키(date|time|vehicle|lat|lng)
+  listImportRecordKeys(importId) {
+    return this.db.all(
+      `SELECT dr.date AS date, dr.time AS time, dr.vehicle AS vehicle, dr.latitude AS lat, dr.longitude AS lng
+         FROM record_sources rs JOIN driving_records dr ON dr.record_hash = rs.record_hash
+        WHERE rs.import_id = ?`, [importId]
+    ).map(r => recordKeyOf(r));
   }
 
   // mode: 'merge'(병합 복구) | 'replace'(전체 교체 복구)
@@ -1191,6 +1387,10 @@ class RouteDatabase {
       filename: '(백업 복구)',
       fileHash: '',
       importedAt: payload.exportedAt || new Date().toISOString(),
+      // 이 Import 는 "어느 파일에서 왔는지"가 아니라 복원 경로일 뿐이다. 출처로 남기면 모든
+      // 기록이 "이슈 없는 파일에서도 왔다"가 되어 이슈 데이터 분리가 통째로 무너진다.
+      // 진짜 출처는 아래 restoreImports(payload.imports) 가 recordKeys 로 되살린다.
+      trackSources: false,
     });
 
     if (payload.zonePolygons && typeof payload.zonePolygons === 'object') {
@@ -1224,10 +1424,131 @@ class RouteDatabase {
         : [...payload.backupHistory, ...this.getBackupHistory()];
       this.setBackupHistory(dedupeHistory(merged));
     }
+    const importResult = this.restoreImports(payload.imports);
     // 백업의 설정이 분류 기준을 바꿨으면 기존 날짜 요약도 새 기준으로 맞춘다(원본 기록은 그대로)
     const reclassified = this.reclassifyStaleSummariesSync();
-    return { ...result, mode, reclassifiedDates: reclassified.rebuilt };
+    return { ...result, mode, reclassifiedDates: reclassified.rebuilt, imports: importResult };
   }
+
+  // ══════════════════════════════════════════════════════
+  //  Import 이력 복원(백업·서버 동기화) — 이슈와 출처 관계를 함께 되살린다.
+  //
+  //  같은 Import 인지는 파일명|파일 지문|Import 시각으로 가린다(기기마다 id 가 다르다).
+  //  이슈가 양쪽에서 수정됐으면 issueUpdatedAt 이 최신인 쪽을 쓰고, 밀려난 내용은 지우지 않고
+  //  issue_conflict_json 에 남겨 Import 상세에서 확인할 수 있게 한다(메모를 임의로 합치지 않는다).
+  // ══════════════════════════════════════════════════════
+  restoreImports(imports) {
+    if (!Array.isArray(imports) || !imports.length) return { added: 0, updated: 0, conflicts: 0, sources: 0 };
+    let added = 0, updated = 0, conflicts = 0, sources = 0;
+    const touched = new Set();
+    const sourceStmt = this.db.prepare(`INSERT OR IGNORE INTO record_sources(record_hash, import_id)
+      SELECT ?, ? WHERE EXISTS (SELECT 1 FROM driving_records WHERE record_hash = ?)`);
+    try {
+      for (const im of imports) {
+        if (!im || typeof im !== 'object') continue;
+        const filename = String(im.filename || '');
+        const fileHash = String(im.fileHash || '');
+        const importedAt = String(im.importedAt || '');
+        const existing = this.db.get(
+          `SELECT id, has_issue AS hasIssue, issue_note AS issueNote, issue_status AS issueStatus,
+                  issue_created_at AS issueCreatedAt, issue_updated_at AS issueUpdatedAt
+             FROM imports WHERE filename = ? AND file_hash = ? AND imported_at = ?`,
+          [filename, fileHash, importedAt]);
+        const incoming = {
+          hasIssue: !!im.hasIssue,
+          issueNote: String(im.issueNote || ''),
+          issueStatus: im.hasIssue ? (im.issueStatus === 'resolved' ? 'resolved' : 'open') : '',
+          issueCreatedAt: String(im.issueCreatedAt || ''),
+          issueUpdatedAt: String(im.issueUpdatedAt || ''),
+        };
+        let importId;
+        if (!existing) {
+          this.db.run(
+            `INSERT INTO imports (filename, file_hash, imported_at, imported_by, dates, vehicle, distance_km,
+               total_records, inserted_records, duplicate_records, conflict_records, conflicts_json,
+               has_issue, issue_note, issue_status, issue_created_at, issue_updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [filename, fileHash, importedAt, String(im.importedBy || ''), String(im.dates || ''), String(im.vehicle || ''),
+              Number(im.distanceKm) || 0, Number(im.total) || 0, Number(im.inserted) || 0, Number(im.duplicates) || 0,
+              Number(im.conflicts) || 0, '[]',
+              incoming.hasIssue ? 1 : 0, incoming.issueNote, incoming.issueStatus, incoming.issueCreatedAt, incoming.issueUpdatedAt]);
+          importId = (this.db.get('SELECT last_insert_rowid() AS id') || {}).id;
+          added++;
+        } else {
+          importId = existing.id;
+          const mineUpdated = existing.issueUpdatedAt || '';
+          const theirsUpdated = incoming.issueUpdatedAt || '';
+          const differs = (!!existing.hasIssue !== incoming.hasIssue) || ((existing.issueNote || '') !== incoming.issueNote)
+            || ((existing.issueStatus || '') !== incoming.issueStatus);
+          if (differs && theirsUpdated > mineUpdated) {
+            // 들어온 쪽이 최신 — 지금 값을 충돌 기록으로 남기고 덮어쓴다
+            if (mineUpdated) {
+              conflicts++;
+              this.db.run('UPDATE imports SET issue_conflict_json = ? WHERE id = ?', [JSON.stringify({
+                keptFrom: 'incoming', detectedAt: new Date().toISOString(),
+                replaced: { hasIssue: !!existing.hasIssue, issueNote: existing.issueNote || '', issueStatus: existing.issueStatus || '', issueUpdatedAt: mineUpdated },
+              }), importId]);
+            }
+            this.db.run(
+              `UPDATE imports SET has_issue = ?, issue_note = ?, issue_status = ?, issue_created_at = ?, issue_updated_at = ? WHERE id = ?`,
+              [incoming.hasIssue ? 1 : 0, incoming.issueNote, incoming.issueStatus,
+                incoming.issueCreatedAt || existing.issueCreatedAt || '', theirsUpdated, importId]);
+            updated++;
+          } else if (differs && mineUpdated && theirsUpdated && theirsUpdated < mineUpdated) {
+            // 지금 값이 최신 — 들어온 값은 반영하지 않고 충돌만 기록한다
+            conflicts++;
+            this.db.run('UPDATE imports SET issue_conflict_json = ? WHERE id = ?', [JSON.stringify({
+              keptFrom: 'local', detectedAt: new Date().toISOString(),
+              replaced: { hasIssue: incoming.hasIssue, issueNote: incoming.issueNote, issueStatus: incoming.issueStatus, issueUpdatedAt: theirsUpdated },
+            }), importId]);
+          } else if (differs && !mineUpdated) {
+            this.db.run(
+              `UPDATE imports SET has_issue = ?, issue_note = ?, issue_status = ?, issue_created_at = ?, issue_updated_at = ? WHERE id = ?`,
+              [incoming.hasIssue ? 1 : 0, incoming.issueNote, incoming.issueStatus, incoming.issueCreatedAt, theirsUpdated, importId]);
+            updated++;
+          }
+        }
+        (im.recordKeys || []).forEach(key => {
+          const hash = crypto.createHash('sha1').update(String(key), 'utf8').digest('hex');
+          sourceStmt.run([hash, importId, hash]);
+          sources++;
+        });
+        touched.add(importId);
+      }
+    } finally {
+      sourceStmt.finalize();
+    }
+    // 출처·이슈가 달라졌으니 그 파일들이 관여한 날짜 요약(조건 칸의 이슈 마스크)을 다시 만든다
+    touched.forEach(id => this.rebuildSummariesForImport(id));
+    return { added, updated, conflicts, sources };
+  }
+}
+
+// imports 한 행 → 화면·백업이 쓰는 형태(이슈 필드 정규화, 예전 행은 "이슈 정보 없음")
+// 저장소 공통 레코드 키 — src/js/storage.js recordKey() 와 같은 형식이어야 백업이 서로 통한다
+function recordKeyOf(rec) {
+  return [rec.date, rec.time, rec.vehicle, Number(rec.lat).toFixed(6), Number(rec.lng).toFixed(6)].join('|');
+}
+
+// 백업·동기화에서 같은 Import 인지 가리는 키(기기마다 id 가 다르므로 파일 지문·시각으로 맞춘다)
+function importIdentityOf(im) {
+  return [im.filename || '', im.fileHash || '', im.importedAt || ''].join('|');
+}
+
+function normalizeImportRow(r) {
+  const { issueConflictJson, ...rest } = r;
+  let issueConflict = null;
+  try { issueConflict = issueConflictJson ? JSON.parse(issueConflictJson) : null; } catch (_) { issueConflict = null; }
+  return {
+    ...rest,
+    hasIssue: !!r.hasIssue,
+    issueNote: r.issueNote || '',
+    issueStatus: r.hasIssue ? (r.issueStatus || 'open') : null,
+    issueCreatedAt: r.issueCreatedAt || null,
+    issueUpdatedAt: r.issueUpdatedAt || null,
+    issueConflict,
+    relatedRecords: r.relatedRecords != null ? r.relatedRecords : null,
+  };
 }
 
 function normalizeRecommendationState(state) {

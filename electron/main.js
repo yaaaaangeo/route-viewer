@@ -299,7 +299,7 @@ function registerIpc() {
   handle('db:deleteAll', () => openDatabase().deleteAll());
   handle('db:getZonePolygons', () => openDatabase().getZonePolygons());
   handle('db:saveZonePolygons', polys => openDatabase().saveZonePolygons(polys));
-  handle('db:listImports', limit => openDatabase().listImports(limit));
+  handle('db:listImports', (limit, options) => openDatabase().listImports(limit, options));
   handle('db:findImportByFileHash', hash => openDatabase().findImportByFileHash(hash));
   handle('db:getImportConflicts', importId => openDatabase().getImportConflicts(importId));
   handle('db:listVehicles', () => openDatabase().listVehicles());
@@ -318,6 +318,11 @@ function registerIpc() {
   handle('db:listCoverageSnapshots', () => openDatabase().listCoverageSnapshots());
   handle('db:listRecommendationStates', () => openDatabase().listRecommendationStates());
   handle('db:setRecommendationState', (id, state) => openDatabase().setRecommendationState(id, state));
+  handle('db:getImport', id => openDatabase().getImport(id));
+  handle('db:updateImportIssue', (id, patch) => openDatabase().updateImportIssue(id, patch));
+  handle('db:listDateImports', date => openDatabase().listDateImports(date));
+  handle('db:getIssueOverview', filter => openDatabase().getIssueOverview(filter));
+  handle('db:restoreImports', imports => openDatabase().restoreImports(imports));
   handle('db:getCellVisitCounts', (box, cellSizeM) => openDatabase().getCellVisitCounts(box, cellSizeM));
   handle('db:getBackupHistory', () => openDatabase().getBackupHistory());
   handle('db:setBackupHistory', h => openDatabase().setBackupHistory(h));

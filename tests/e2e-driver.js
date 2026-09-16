@@ -80,8 +80,10 @@ async function waitCoverageIdle(win, timeoutMs = 90000) {
   return false;
 }
 
-// 화면의 handleFiles() 를 실제 File 객체로 호출한다 (드래그앤드롭과 같은 경로)
-async function importViaUI(win, filename) {
+// 화면의 handleFiles() 를 실제 File 객체로 호출한다 (드래그앤드롭과 같은 경로).
+// 저장 전에 "이 파일에 이슈가 있나요?" 확인 창이 한 번 뜨므로, issue 를 주면 체크 + 메모를
+// 채우고 저장 버튼과 같은 confirmImportFlow() 로 마무리한다.
+async function importViaUI(win, filename, issue) {
   const buf = fs.readFileSync(path.join(XLSX_DIR, filename));
   const b64 = buf.toString('base64');
   await js(win, `(async () => {
@@ -93,7 +95,35 @@ async function importViaUI(win, filename) {
     await handleFiles([file]);
     return true;
   })()`);
-  await sleep(120);
+  await sleep(150);
+  await js(win, `(async () => {
+    const issue = ${JSON.stringify(issue || null)};
+    if (issue) {
+      document.getElementById('imp-issue-0').checked = true;
+      onImportIssueToggle(0);
+      document.getElementById('imp-note-0').value = issue.note;
+      onImportIssueNoteInput(0);
+    }
+    await confirmImportFlow();
+    return true;
+  })()`);
+  await sleep(150);
+}
+
+// 확인 창까지만 진행한다(저장하지 않는다) — 확인 창 자체를 검사할 때 쓴다
+async function importViaUIRaw(win, filename) {
+  const buf = fs.readFileSync(path.join(XLSX_DIR, filename));
+  const b64 = buf.toString('base64');
+  await js(win, `(async () => {
+    const bin = atob(${JSON.stringify(b64)});
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const file = new File([bytes], ${JSON.stringify(filename)},
+      { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    await handleFiles([file]);
+    return true;
+  })()`);
+  await sleep(200);
 }
 
 async function shot(win, name) {
@@ -848,6 +878,97 @@ async function main(win, dbFilePath) {
   }
 
   // ── Test 4 — 앱 재실행 ──────────────────────────────
+  section('신규 — Import 이슈 기록 · 이슈 데이터 분리');
+  await js(win, `switchTab('upload')`);
+  const issueFile = 'TalkFile_주행기록_2026-08-26 3.xlsx.xlsx';
+  await importViaUIRaw(win, issueFile);       // 확인 창만 띄우고 멈춘다
+  check('저장 전에 확인 창이 뜬다',
+    (await js(win, `document.getElementById('modal-title').textContent`)) === '저장하기 전에 확인해주세요');
+  check('파일별로 예상 날짜·차량·레코드 수를 보여준다',
+    /레코드/.test(await js(win, `document.getElementById('imp-row-0').innerText`)),
+    (await js(win, `document.getElementById('imp-row-0').innerText`)).replace(/\s+/g, ' ').slice(0, 90));
+  check('이슈를 체크하기 전에는 메모 칸이 잠겨 있다',
+    await js(win, `document.getElementById('imp-note-0').disabled === true`));
+  const beforeIssueImport = await js(win, `(async()=>(await RouteDB.stats()).points)()`);
+  await js(win, `(async()=>{ document.getElementById('imp-issue-0').checked=true; onImportIssueToggle(0); await confirmImportFlow(); return true; })()`);
+  await sleep(200);
+  check('이슈를 체크했는데 메모가 없으면 저장되지 않고 이유를 알려준다',
+    /한 줄로 적어주세요/.test(await js(win, `document.getElementById('imp-err-0').textContent`))
+    && (await js(win, `(async()=>(await RouteDB.stats()).points)()`)) === beforeIssueImport
+    && (await js(win, `document.getElementById('modal-title').textContent`)) === '저장하기 전에 확인해주세요',
+    await js(win, `document.getElementById('imp-err-0').textContent`));
+  await js(win, `(async()=>{ document.getElementById('imp-note-0').value='GPS 가 튀는 구간이 있어요'; onImportIssueNoteInput(0); await confirmImportFlow(); return true; })()`);
+  await sleep(400);
+  const issueReport = await js(win, `document.getElementById('modal-body').innerText`);
+  check('메모를 적으면 저장되고, 결과에 이슈로 표시한 파일이 나온다',
+    (await js(win, `document.getElementById('modal-title').textContent`)) === '주행 기록 추가 완료'
+    && /이슈로 표시한 파일/.test(issueReport), issueReport.replace(/\s+/g, ' ').slice(0, 110));
+  await js(win, `closeModal()`);
+  const issueImports = await js(win, `(async()=>{const l=await RouteDB.listImports(50,{issueOnly:true});return l.map(i=>({f:i.filename,n:i.issueNote,s:i.issueStatus,r:i.relatedRecords}));})()`);
+  check('Import 이력에 이슈 메모와 "확인 필요" 상태가 남는다',
+    issueImports.length === 1 && issueImports[0].s === 'open'
+    && issueImports[0].n === 'GPS 가 튀는 구간이 있어요' && issueImports[0].r > 0, JSON.stringify(issueImports));
+  const issueCounts = await js(win, `(async()=>{
+    const out={};
+    for (const f of IssueFilter.ISSUE_FILTERS) out[f]=(await RouteDB.getOverview({issueFilter:f})).points;
+    return out;
+  })()`);
+  check('데이터 상태별 기록 수가 갈린다(전체 > 이슈 없음 · 확인 필요 > 0)',
+    issueCounts.all > issueCounts.clean && issueCounts.issue_open > 0 && issueCounts.issue_resolved === 0,
+    JSON.stringify(issueCounts));
+
+  await js(win, `switchTab('calendar')`);
+  await sleep(400);
+  check('이슈가 있는 날짜에 "확인 필요" 배지가 붙는다',
+    (await js(win, `document.querySelectorAll('#cal-grid .cal-issue-badge .issue-badge.open').length`)) >= 1,
+    '배지 ' + await js(win, `document.querySelectorAll('#cal-grid .cal-issue-badge').length`) + '개');
+  check('달력 위에 데이터 상태 필터 버튼 5개가 있다',
+    (await js(win, `document.querySelectorAll('#issue-filter-group .zone-btn').length`)) === 5);
+  const cleanView = await js(win, `(()=>{ setIssueFilter('clean');
+    const hidden=document.querySelectorAll('#cal-grid .cal-cell.issue-hidden').length;
+    const basis=document.getElementById('cp-issue-basis').textContent;
+    setIssueFilter('all');
+    return {hidden, basis};
+  })()`);
+  check('"이슈 없음"으로 보면 이슈 데이터만 있는 날짜가 흐려지고 계산 기준을 밝힌다',
+    cleanView.hidden >= 1 && /확인 필요 이슈/.test(cleanView.basis),
+    `${cleanView.hidden}칸 · ${cleanView.basis.slice(0, 60)}`);
+  const dayIssue = await js(win, `(async()=>{
+    await openDayDetail('2026-08-26');
+    await renderDayIssues('2026-08-26');
+    return document.getElementById('ds-issues').innerText.replace(/\s+/g,' ');
+  })()`);
+  check('일자 요약에 이슈사항(파일·메모·상태)이 나온다',
+    /이슈사항/.test(dayIssue) && /GPS 가 튀는 구간이 있어요/.test(dayIssue), dayIssue.slice(0, 110));
+
+  await js(win, `switchTab('stats')`);
+  await sleep(800);
+  const issueOverviewText = await js(win, `document.getElementById('stats-issue-overview').innerText.replace(/\s+/g,' ')`);
+  check('통계에 이슈 현황 · 전체/이슈 없음/이슈 데이터 비교표가 나온다',
+    ['이슈 현황', '전체 데이터', '이슈 없는 데이터', '이슈 데이터', '확인 필요', '확인 완료']
+      .every(k => issueOverviewText.includes(k)), issueOverviewText.slice(0, 120));
+  check('통계에도 같은 데이터 상태 필터 버튼이 있다',
+    (await js(win, `document.querySelectorAll('#stats-issue-filter .zone-btn').length`)) === 5);
+
+  await js(win, `switchTab('data')`);
+  await sleep(700);
+  const adminItems = await js(win, `document.querySelectorAll('#data-issue-admin .issue-list .issue-item').length`);
+  const adminOpen = await js(win, `document.querySelectorAll('#data-issue-admin .issue-list .issue-badge.open').length`);
+  check('데이터 관리에 이슈 관리 목록이 있고 이슈 파일이 "확인 필요"로 보인다',
+    adminItems > 0 && adminOpen === 1, `파일 ${adminItems}개 · 확인 필요 ${adminOpen}개`);
+  const toggled = await js(win, `(async()=>{
+    const id=(await RouteDB.listImports(50,{issueOnly:true}))[0].id;
+    await toggleIssueAdminStatus(id);
+    const after=(await RouteDB.getImport(id)).issueStatus;
+    const cleanAfter=(await RouteDB.getOverview({issueFilter:'clean'})).points;
+    await toggleIssueAdminStatus(id);
+    return {after, cleanAfter, back:(await RouteDB.getImport(id)).issueStatus};
+  })()`);
+  check('데이터 관리에서 확인 완료 ↔ 확인 필요로 바꿀 수 있고, 바꾸면 이슈 없음 쪽 개수가 늘어난다',
+    toggled.after === 'resolved' && toggled.back === 'open' && toggled.cleanAfter === issueCounts.all,
+    JSON.stringify(toggled));
+  await shot(win, '16-issue-admin');
+
   section('Test 4 — 앱 재실행 (창을 다시 로드해도 남아있는지)');
   const beforeReload = await js(win, `(async()=>await RouteDB.stats())()`);
   await new Promise(resolve => {

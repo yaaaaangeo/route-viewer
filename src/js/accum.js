@@ -1670,6 +1670,9 @@ function coverageCalcKey(zoneName){
     manualOverrideRevision:coverageZoneRevisions[zoneName]||0,
     cellSizeM:coverageCellSizeM(),
     coverageSettingsRevision,
+    // 데이터 상태 필터가 다르면 방문한 칸도 달라진다 — 키에 넣지 않으면 "이슈만" 화면에
+    // 전체 데이터로 계산한 Coverage 가 그대로 남는다
+    issueFilter:currentIssueFilter(),
   });
 }
 
@@ -1690,7 +1693,7 @@ function coverageZonesInView(){
 
 // 지금 누적 지도에 "무엇이 그려져 있어야 하는지"를 나타내는 키
 function accumViewKey(){
-  const base=[showCoverageGaps?'coverage':'density',accumZoneFilter,accumDateFrom,accumDateTo,coverageDataRevision,ACTIVE_ZONE_NAMES.join('|')];
+  const base=[showCoverageGaps?'coverage':'density',accumZoneFilter,accumDateFrom,accumDateTo,coverageDataRevision,ACTIVE_ZONE_NAMES.join('|'),currentIssueFilter()];
   if(!showCoverageGaps) return JSON.stringify(base);
   return JSON.stringify(base.concat([showCoverageDepth,showExclusionDebug,depthTierSignature(),coverageZonesInView().map(coverageCalcKey)]));
 }
@@ -1762,7 +1765,8 @@ function saveCoverageSnapshotFor(zoneName,result){
   if(typeof RouteDB==='undefined'||typeof RouteDB.saveCoverageSnapshot!=='function') return;
   let total=0,visited=0;
   result.cells.forEach(c=>{ if(c.state!=='valid') return; total++; if(c.visits>0) visited++; });
-  Promise.resolve(RouteDB.saveCoverageSnapshot(zoneName,{total,visited,provisional:!result.cacheable,cellSizeM:coverageCellSizeM(),computedAt:new Date().toISOString()}))
+  // 어떤 데이터 상태 필터로 계산한 Coverage 인지도 남긴다 — 추천 화면이 자기 기준과 다르면 그렇게 밝힌다
+  Promise.resolve(RouteDB.saveCoverageSnapshot(zoneName,{total,visited,provisional:!result.cacheable,cellSizeM:coverageCellSizeM(),issueFilter:currentIssueFilter(),computedAt:new Date().toISOString()}))
     .catch(err=>console.warn('[경로뷰어] Coverage 스냅샷 저장 실패:',err));
 }
 
@@ -1772,6 +1776,9 @@ function onRouteDataChanged(evt){
   const args=(evt&&evt.args)||[];
   if(method==='importRecords'||method==='deleteDate'||method==='deleteAll'){
     invalidateCoverage(method);
+  }else if(method==='updateImportIssue'||method==='restoreImports'){
+    // 이슈 상태가 바뀌면 같은 기록이라도 데이터 상태 필터에 걸리고 안 걸리고가 달라진다
+    invalidateCoverage('issue');
   }else if(method==='restoreBackupPayload'||method==='sync'){
     committedManualCellsByZone.clear(); // 백업/서버에서 수동 셀이 병합됐을 수 있다
     invalidateCoverage(method==='sync'?'sync':'restore');
@@ -1870,13 +1877,16 @@ function accumFilter(){
   const filter=accumZoneFilter==='all' ? {} : {zone:accumZoneFilter};
   if(accumDateFrom) filter.fromDate=accumDateFrom;
   if(accumDateTo) filter.toDate=accumDateTo;
+  if(issueFilterActive()) filter.issueFilter=currentIssueFilter();
   return filter;
 }
 
+// Coverage 방문 집계용 — 구역은 폴리곤으로 따로 자르므로 날짜와 데이터 상태만 넘긴다
 function accumDateFilter(){
   const filter={};
   if(accumDateFrom) filter.fromDate=accumDateFrom;
   if(accumDateTo) filter.toDate=accumDateTo;
+  if(issueFilterActive()) filter.issueFilter=currentIssueFilter();
   return filter;
 }
 
@@ -2431,6 +2441,7 @@ function refreshAccumUI(){
   normalizeAccumZoneFilter();
   renderFilterButtons('zone-filter-buttons',ACTIVE_ZONE_NAMES.map(z=>({value:z,label:z})),'zone',setAccumZone,false);
   styleZoneButtons('zone-filter-group',accumZoneFilter);
+  renderIssueFilterButtons('accum-issue-filter');
   updateBoundaryUI();
   updateAccumDateFilterUI();
   updateCellEditHint();

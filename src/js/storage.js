@@ -111,7 +111,7 @@
       deleteAll: () => api.deleteAll(),
       getZonePolygons: () => api.getZonePolygons(),
       saveZonePolygons: p => api.saveZonePolygons(p),
-      listImports: n => api.listImports(n),
+      listImports: (n, o) => api.listImports(n, o || {}),
       findImportByFileHash: h => api.findImportByFileHash(h),
       getImportConflicts: id => api.getImportConflicts(id),
       listVehicles: () => api.listVehicles(),
@@ -130,6 +130,11 @@
       listCoverageSnapshots: () => api.listCoverageSnapshots(),
       listRecommendationStates: () => api.listRecommendationStates(),
       setRecommendationState: (id, state) => api.setRecommendationState(id, state),
+      getImport: id => api.getImport(id),
+      updateImportIssue: (id, patch) => api.updateImportIssue(id, patch),
+      listDateImports: date => api.listDateImports(date),
+      getIssueOverview: filter => api.getIssueOverview(filter || {}),
+      restoreImports: imports => api.restoreImports(imports),
       getCellVisitCounts: (box, cellSizeM) => api.getCellVisitCounts(box, cellSizeM),
       getBackupHistory: () => api.getBackupHistory(),
       setBackupHistory: h => api.setBackupHistory(h),
@@ -144,7 +149,8 @@
   //  들고 있지 않으므로 데이터가 커져도 메모리가 터지지 않는다.
   // ══════════════════════════════════════════════════════
   const IDB_NAME = 'route-viewer';
-  const IDB_VERSION = 2; // v2: vehicles/zones 설정 저장소 추가 (요구사항 13~16)
+  // v2: vehicles/zones 설정 저장소 추가 · v3: recordSources(GPS 레코드 ↔ Import 파일 출처) 추가
+  const IDB_VERSION = 3;
 
   function makeIdbBackend() {
     let dbp = null;   // open() 진행중 promise
@@ -171,6 +177,13 @@
           if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
           if (!db.objectStoreNames.contains('vehicles')) db.createObjectStore('vehicles', { keyPath: 'name' });
           if (!db.objectStoreNames.contains('zones')) db.createObjectStore('zones', { keyPath: 'name' });
+          // 레코드 ↔ Import 출처. id = '<레코드 키><importId>' 라서 같은 쌍은 한 번만 저장된다
+          // (SQLite record_sources 의 PRIMARY KEY 와 같은 뜻). 예전 DB 를 열면 이 저장소만 새로 생긴다.
+          if (!db.objectStoreNames.contains('recordSources')) {
+            const st = db.createObjectStore('recordSources', { keyPath: 'id' });
+            st.createIndex('key', 'key');
+            st.createIndex('importId', 'importId');
+          }
         };
         req.onsuccess = () => { rawDb = req.result; resolve(rawDb); };
         req.onerror = () => reject(req.error);
@@ -193,9 +206,40 @@
       });
     }
 
+    // ── 이슈 출처 색인 ────────────────────────────────
+    // 레코드 키 → 출처 마스크(issue-filter.js). 이슈가 걸린 레코드만 담는다 —
+    // 마스크 0(출처 기록 없음)과 1(정상 파일에서만 옴)은 모든 필터에서 똑같이 취급되므로 담을 필요가 없다.
+    // Import·이슈 수정·삭제·복원 때만 비운다(탭 이동으로는 다시 만들지 않는다).
+    let issueIndexCache = null;
+    function invalidateIssueIndex() { issueIndexCache = null; }
+
+    async function issueIndex() {
+      if (issueIndexCache) return issueIndexCache;
+      const db = await ready();
+      const t = db.transaction(['imports', 'recordSources'], 'readonly');
+      const impReq = reqp(t.objectStore('imports').getAll());
+      const srcReq = reqp(t.objectStore('recordSources').getAll());
+      const [imports, sources] = await Promise.all([impReq, srcReq]);
+      const byId = new Map(imports.map(i => [i.id, i]));
+      const all = new Map();
+      sources.forEach(s => {
+        const bit = global.IssueFilter.maskBitOf(byId.get(s.importId));
+        all.set(s.key, (all.get(s.key) || 0) | bit);
+      });
+      // 이슈 없는 출처(NON_ISSUE=1)도 그대로 둔다 — 0("출처 기록이 아예 없는 예전 데이터")과
+      // 1("이슈 없는 파일에서 왔다")은 뜻이 다르고, 날짜 요약의 조건 칸에 그대로 저장되기 때문에
+      // SQLite 의 ISSUE_MASK_SQL 과 값이 같아야 한다.
+      issueIndexCache = { byId, byKey: all };
+      return issueIndexCache;
+    }
+
+    const maskOf = (index, key) => (index && index.byKey.get(key)) || 0;
+
     // records 를 커서로 훑으면서 콜백에 하나씩 넘긴다(배열로 모으지 않음)
     async function scan(filter, onRecord) {
       const db = await ready();
+      const needsIssue = !!(filter && filter.issueFilter && filter.issueFilter !== 'all');
+      const index = needsIssue ? await issueIndex() : null;
       return new Promise((resolve, reject) => {
         const t = db.transaction(['records'], 'readonly');
         const store = t.objectStore('records');
@@ -208,7 +252,7 @@
           const cur = req.result;
           if (!cur) { resolve(); return; }
           const v = cur.value;
-          if (matches(v, filter)) onRecord(v);
+          if (matches(v, filter, index)) onRecord(v);
           cur.continue();
         };
         req.onerror = () => reject(req.error);
@@ -217,8 +261,11 @@
 
     // database.js _filterSql 과 같은 조건 — 예전엔 fromDate/toDate 를 빠뜨려서 브라우저 모드에서는
     // 누적 지도 날짜 필터가 통계/밀도/Coverage 어디에도 적용되지 않았다.
-    function matches(v, filter) {
+    function matches(v, filter, issueIdx) {
       if (!filter) return true;
+      // 이슈 필터 — SQLite 의 EXISTS 절과 같은 규칙(issue-filter.js)
+      if (filter.issueFilter && filter.issueFilter !== 'all'
+        && !global.IssueFilter.maskMatches(maskOf(issueIdx, v.key), filter.issueFilter)) return false;
       if (filter.date && v.date !== filter.date) return false;
       // 날짜 범위는 'YYYY-MM-DD' 날짜에만 — '날짜미상'이 "시작일만" 필터에 끼지 않게(database.js DATE_ONLY_SQL)
       if ((filter.fromDate || filter.toDate) && !/^\d{4}-\d{2}-\d{2}$/.test(v.date || '')) return false;
@@ -249,17 +296,64 @@
       const config = classification || await classificationConfig();
       const rows = [];
       await scan({ date }, r => rows.push(r));
+      // 읽기(이슈 마스크·출처)는 요약을 쓰는 트랜잭션을 열기 "전에" 모두 끝낸다 —
+      // IndexedDB 트랜잭션은 그 사이에 await 하면 비활성화돼서 put 이 영영 끝나지 않는다.
+      let payload = null;
+      if (rows.length) {
+        rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+        // 조건 칸에 이슈 마스크를 넣는다(SQLite 의 ISSUE_MASK_SQL 과 같은 값)
+        const index = await issueIndex();
+        const withIssue = rows.map(r => ({ ...r, issueMask: maskOf(index, r.key) }));
+        const sources = new Map();
+        const srcRows = await sourcesForKeys(rows.map(r => r.key));
+        srcRows.forEach(s => sources.set(s.importId, (sources.get(s.importId) || 0) + 1));
+        payload = {
+          date, count: rows.length, ...global.buildDaySummaryFromPoints(withIssue, config),
+          importSources: [...sources.entries()].sort((a, b) => a[0] - b[0]).map(([importId, recordCount]) => ({ importId, recordCount })),
+        };
+      }
       const db = await ready();
       const t = db.transaction(['summaries'], 'readwrite');
-      if (!rows.length) {
-        t.objectStore('summaries').delete(date);
-      } else {
-        rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-        t.objectStore('summaries').put({
-          date, count: rows.length, ...global.buildDaySummaryFromPoints(rows, config),
-        });
-      }
+      if (payload) t.objectStore('summaries').put(payload);
+      else t.objectStore('summaries').delete(date);
       await done(t);
+    }
+
+    async function allSources() {
+      const db = await ready();
+      const t = db.transaction(['recordSources'], 'readonly');
+      return reqp(t.objectStore('recordSources').getAll());
+    }
+
+    // 그 레코드들이 어느 Import 에서 왔는지(달력 배지·일자 요약이 쓰는 importSources 계산용)
+    async function sourcesForKeys(keys) {
+      const all = await allSources();
+      const want = new Set(keys);
+      return all.filter(s => want.has(s.key));
+    }
+
+    async function keysForImport(importId) {
+      return (await allSources()).filter(s => s.importId === importId).map(s => s.key);
+    }
+
+    async function sourceCountsByImport() {
+      const counts = new Map();
+      (await allSources()).forEach(s => counts.set(s.importId, (counts.get(s.importId) || 0) + 1));
+      return counts;
+    }
+
+    // Import 한 행 → 화면·백업이 쓰는 형태(electron/database.js normalizeImportRow 와 같은 모양)
+    function normalizeImportRecord(row, relatedRecords) {
+      return {
+        ...row,
+        hasIssue: !!row.hasIssue,
+        issueNote: row.issueNote || '',
+        issueStatus: row.hasIssue ? (row.issueStatus || 'open') : null,
+        issueCreatedAt: row.issueCreatedAt || null,
+        issueUpdatedAt: row.issueUpdatedAt || null,
+        issueConflict: row.issueConflict || null,
+        relatedRecords,
+      };
     }
 
     // ── 설정 · 조건 분류 ──
@@ -494,6 +588,9 @@
           }
         }
 
+        // 이슈 입력(파일 하나에 하나) — 체크했는데 메모가 없으면 여기서 던진다(기록도 넣지 않는다)
+        const issue = global.IssueFilter.normalizeIssueForStorage({ hasIssue: meta.hasIssue, issueNote: meta.issueNote, issueStatus: meta.issueStatus });
+
         {
           const t = db.transaction(['records'], 'readwrite');
           const store = t.objectStore('records');
@@ -501,24 +598,43 @@
           await done(t);
         }
 
-        const classification = await classificationConfig();
-        for (const d of dates) await rebuildDateSummary(d, classification);
-
         const duplicates = normalized.length - inserted;
         const distanceKm = fileDistanceKm(normalized);
         const vehicle = mostFrequent(normalized.map(r => r.vehicle).filter(Boolean));
+        const issueAt = issue.hasIssue ? (meta.issueCreatedAt || importedAt) : null;
 
-        const t2 = db.transaction(['imports'], 'readwrite');
-        t2.objectStore('imports').put({
-          filename: meta.filename || '', fileHash: meta.fileHash || '', importedAt, importedBy,
-          dates: [...dates].sort().join(','), vehicle, distanceKm,
-          total: normalized.length, inserted, duplicates, conflicts: conflicts.length,
-          conflictDetails: conflicts.slice(0, 500),
-        });
-        await done(t2);
+        // Import 이력을 먼저 저장해 id 를 받고, 그 id 로 출처 관계를 남긴다(중복이라 새로 안 넣은 레코드도 포함)
+        const importId = await (async () => {
+          const t = db.transaction(['imports'], 'readwrite');
+          const req = t.objectStore('imports').put({
+            filename: meta.filename || '', fileHash: meta.fileHash || '', importedAt, importedBy,
+            dates: [...dates].sort().join(','), vehicle, distanceKm,
+            total: normalized.length, inserted, duplicates, conflicts: conflicts.length,
+            conflictDetails: conflicts.slice(0, 500),
+            hasIssue: issue.hasIssue, issueNote: issue.issueNote,
+            issueStatus: issue.hasIssue ? issue.issueStatus : null,
+            issueCreatedAt: issueAt, issueUpdatedAt: issue.hasIssue ? (meta.issueUpdatedAt || issueAt) : null,
+            issueConflict: null,
+          });
+          const id = await reqp(req);
+          await done(t);
+          return id;
+        })();
+
+        if (meta.trackSources !== false) {
+          const t = db.transaction(['recordSources'], 'readwrite');
+          const store = t.objectStore('recordSources');
+          [...new Set(allKeys)].forEach(key => store.put({ id: `${key}${importId}`, key, importId }));
+          await done(t);
+        }
+        invalidateIssueIndex();
+
+        const classification = await classificationConfig();
+        for (const d of dates) await rebuildDateSummary(d, classification);
 
         return {
           filename: meta.filename || '',
+          importId,
           dates: [...dates].sort(),
           total: normalized.length,
           inserted,
@@ -543,9 +659,11 @@
         await scan({ date }, r => rows.push(r));
         rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
         const config = await classificationConfig();
+        const index = await issueIndex();
         return rows.map(r => {
+          const mask = maskOf(index, r.key);
           const rec = stripInternal(r);
-          return { ...rec, ...global.TimeConditions.classifyRecord(rec, config) };
+          return { ...rec, ...global.TimeConditions.classifyRecord(rec, config), issueMask: mask };
         });
       },
 
@@ -662,7 +780,7 @@
       async getVisitedCellKeys(box) {
         const { latDeg, lngDeg, minLat, maxLat, minLng, maxLng } = box;
         const keys = new Set();
-        await scan(null, r => {
+        await scan({ issueFilter: box && box.issueFilter }, r => {
           if (r.lat < minLat || r.lat > maxLat || r.lng < minLng || r.lng > maxLng) return;
           keys.add(Math.floor(r.lat / latDeg) + '_' + Math.floor(r.lng / lngDeg));
         });
@@ -696,22 +814,29 @@
         const keys = [];
         await scan({ date }, r => keys.push(r.key));
         const db = await ready();
-        const t = db.transaction(['records', 'summaries'], 'readwrite');
+        const sources = await sourcesForKeys(keys);
+        const t = db.transaction(['records', 'summaries', 'recordSources'], 'readwrite');
         const store = t.objectStore('records');
         keys.forEach(k => store.delete(k));
         t.objectStore('summaries').delete(date);
+        // 지운 레코드의 출처 관계도 지운다(Import 이력과 이슈 메모는 남는다)
+        const srcStore = t.objectStore('recordSources');
+        sources.forEach(s => srcStore.delete(s.id));
         await done(t);
+        invalidateIssueIndex();
         return { date, removed: keys.length };
       },
 
       async deleteAll() {
         const before = (await this.stats()).points;
         const db = await ready();
-        const t = db.transaction(['records', 'summaries', 'imports'], 'readwrite');
+        const t = db.transaction(['records', 'summaries', 'imports', 'recordSources'], 'readwrite');
         t.objectStore('records').clear();
         t.objectStore('summaries').clear();
         t.objectStore('imports').clear();
+        t.objectStore('recordSources').clear();
         await done(t);
+        invalidateIssueIndex();
         return { removed: before };
       },
 
@@ -886,10 +1011,12 @@
         const marginLngDeg = marginM / (111320 * Math.cos(refLat * Math.PI / 180));
 
         const groups = new Map();
-        await scan(null, r => {
+        // 이슈 필터는 GPS 방문 데이터에만 건다(구역 경계·도로 Geometry 는 무관 — 화면에서 따로 캐시)
+        const issueIdx = (box && box.issueFilter && box.issueFilter !== 'all') ? await issueIndex() : null;
+        await scan({ issueFilter: box && box.issueFilter }, r => {
           if (box && box.minLat != null && (r.lat < box.minLat - marginLatDeg || r.lat > box.maxLat + marginLatDeg)) return;
           if (box && box.minLng != null && (r.lng < box.minLng - marginLngDeg || r.lng > box.maxLng + marginLngDeg)) return;
-          if (box && !matches(r, box)) return; // 날짜 범위/구역/차량 — database.js getCellVisitCounts 와 같은 조건
+          if (box && !matches(r, box, issueIdx)) return; // 날짜 범위/구역/차량 — database.js getCellVisitCounts 와 같은 조건
           const key = (r.date || '') + '|' + (r.vehicle || '');
           if (!groups.has(key)) groups.set(key, []);
           groups.get(key).push({ lat: r.lat, lng: r.lng, timestamp: r.timestamp || '' });
@@ -905,11 +1032,160 @@
         });
       },
 
-      async listImports(limit) {
+      // options: {issueOnly, issueStatus, search} — database.js listImports 와 같은 의미
+      async listImports(limit, options) {
+        const o = options || {};
         const db = await ready();
         const t = db.transaction(['imports'], 'readonly');
         const rows = await reqp(t.objectStore('imports').getAll());
-        return rows.sort((a, b) => (b.id || 0) - (a.id || 0)).slice(0, limit || 200);
+        const counts = await sourceCountsByImport();
+        return rows
+          .map(r => normalizeImportRecord(r, counts.get(r.id) || 0))
+          .filter(r => (!o.issueOnly || r.hasIssue)
+            && (!o.issueStatus || (r.hasIssue && r.issueStatus === o.issueStatus))
+            && (!o.search || `${r.filename} ${r.issueNote}`.toLowerCase().includes(String(o.search).toLowerCase())))
+          .sort((a, b) => (b.id || 0) - (a.id || 0))
+          .slice(0, limit || 200);
+      },
+
+      async getImport(importId) {
+        const db = await ready();
+        const t = db.transaction(['imports'], 'readonly');
+        const row = await reqp(t.objectStore('imports').get(importId));
+        if (!row) return null;
+        const counts = await sourceCountsByImport();
+        return normalizeImportRecord(row, counts.get(importId) || 0);
+      },
+
+      // 이슈 메모·상태 수정 — 원본 기록과 Import 이력은 그대로 두고, 그 파일이 관여한 날짜 요약만 다시 만든다
+      async updateImportIssue(importId, patch) {
+        const db = await ready();
+        const existing = await (async () => { const t = db.transaction(['imports'], 'readonly'); return reqp(t.objectStore('imports').get(importId)); })();
+        if (!existing) throw new Error('그 Import 이력을 찾지 못했어요.');
+        const next = global.IssueFilter.normalizeIssueForStorage(patch || {}, {
+          hasIssue: !!existing.hasIssue, issueNote: existing.issueNote || '', issueStatus: existing.issueStatus || 'open',
+        });
+        const now = new Date().toISOString();
+        const row = {
+          ...existing,
+          hasIssue: next.hasIssue,
+          issueNote: next.issueNote,
+          issueStatus: next.hasIssue ? next.issueStatus : null,
+          issueCreatedAt: next.hasIssue ? (existing.issueCreatedAt || now) : (existing.issueCreatedAt || null),
+          issueUpdatedAt: now,
+        };
+        const t = db.transaction(['imports'], 'readwrite');
+        t.objectStore('imports').put(row);
+        await done(t);
+        invalidateIssueIndex();
+        await this.rebuildSummariesForImport(importId);
+        return this.getImport(importId);
+      },
+
+      async rebuildSummariesForImport(importId) {
+        const keys = await keysForImport(importId);
+        const dates = [...new Set(keys.map(k => String(k).split('|')[0]))];
+        const config = await classificationConfig();
+        for (const d of dates) await rebuildDateSummary(d, config);
+        return dates;
+      },
+
+      // 그 날짜 기록이 어느 Import 에서 왔는지(이슈 포함) — 일자 요약의 "이슈사항"
+      async listDateImports(date) {
+        const rows = [];
+        await scan({ date }, r => rows.push(r.key));
+        const sources = await sourcesForKeys(rows);
+        const counts = new Map();
+        sources.forEach(s => counts.set(s.importId, (counts.get(s.importId) || 0) + 1));
+        const all = await this.listImports(100000, {});
+        return all.filter(im => counts.has(im.id))
+          .map(im => ({ ...im, importId: im.id, recordCount: counts.get(im.id) }))
+          .sort((a, b) => (Number(b.hasIssue) - Number(a.hasIssue)) || String(a.issueStatus || '').localeCompare(String(b.issueStatus || '')) || (a.id - b.id));
+      },
+
+      // Import 이력·이슈·출처 관계 복원(백업/서버 동기화) — database.js restoreImports 와 같은 규칙.
+      // 같은 Import 인지는 파일명|파일 지문|Import 시각으로 가리고, 이슈가 양쪽에서 수정됐으면
+      // issueUpdatedAt 이 최신인 쪽을 쓰되 밀려난 값을 issueConflict 로 남긴다(메모를 합치지 않는다).
+      async restoreImports(imports) {
+        if (!Array.isArray(imports) || !imports.length) return { added: 0, updated: 0, conflicts: 0, sources: 0 };
+        const db = await ready();
+        const existingRows = await (async () => { const t = db.transaction(['imports'], 'readonly'); return reqp(t.objectStore('imports').getAll()); })();
+        const identity = im => [im.filename || '', im.fileHash || '', im.importedAt || ''].join('|');
+        const byIdentity = new Map(existingRows.map(r => [identity(r), r]));
+        const recordKeys = new Set();
+        await scan(null, r => recordKeys.add(r.key));
+        let added = 0, updated = 0, conflicts = 0, sources = 0;
+        const touched = [];
+        for (const im of imports) {
+          if (!im || typeof im !== 'object') continue;
+          const incoming = {
+            hasIssue: !!im.hasIssue, issueNote: String(im.issueNote || ''),
+            issueStatus: im.hasIssue ? (im.issueStatus === 'resolved' ? 'resolved' : 'open') : null,
+            issueCreatedAt: im.issueCreatedAt || null, issueUpdatedAt: im.issueUpdatedAt || null,
+          };
+          const existing = byIdentity.get(identity(im));
+          let importId;
+          if (!existing) {
+            const { id, recordKeys: _keys, relatedRecords: _rel, ...rest } = im;
+            const t = db.transaction(['imports'], 'readwrite');
+            importId = await reqp(t.objectStore('imports').put({ ...rest, ...incoming, issueConflict: null }));
+            await done(t);
+            added++;
+          } else {
+            importId = existing.id;
+            const mine = existing.issueUpdatedAt || '';
+            const theirs = incoming.issueUpdatedAt || '';
+            const differs = (!!existing.hasIssue !== incoming.hasIssue) || ((existing.issueNote || '') !== incoming.issueNote)
+              || ((existing.issueStatus || '') !== (incoming.issueStatus || ''));
+            if (differs && (theirs > mine || !mine)) {
+              const conflict = mine ? {
+                keptFrom: 'incoming', detectedAt: new Date().toISOString(),
+                replaced: { hasIssue: !!existing.hasIssue, issueNote: existing.issueNote || '', issueStatus: existing.issueStatus || '', issueUpdatedAt: mine },
+              } : null;
+              if (conflict) conflicts++;
+              const t = db.transaction(['imports'], 'readwrite');
+              t.objectStore('imports').put({ ...existing, ...incoming, issueCreatedAt: incoming.issueCreatedAt || existing.issueCreatedAt || null, issueConflict: conflict || existing.issueConflict || null });
+              await done(t);
+              updated++;
+            } else if (differs && mine && theirs && theirs < mine) {
+              conflicts++;
+              const t = db.transaction(['imports'], 'readwrite');
+              t.objectStore('imports').put({ ...existing, issueConflict: {
+                keptFrom: 'local', detectedAt: new Date().toISOString(),
+                replaced: { hasIssue: incoming.hasIssue, issueNote: incoming.issueNote, issueStatus: incoming.issueStatus, issueUpdatedAt: theirs },
+              } });
+              await done(t);
+            }
+          }
+          const keys = (im.recordKeys || []).filter(k => recordKeys.has(k));
+          if (keys.length) {
+            const t = db.transaction(['recordSources'], 'readwrite');
+            const store = t.objectStore('recordSources');
+            keys.forEach(key => store.put({ id: `${key}${importId}`, key, importId }));
+            await done(t);
+            sources += keys.length;
+          }
+          touched.push(importId);
+        }
+        invalidateIssueIndex();
+        for (const id of [...new Set(touched)]) await this.rebuildSummariesForImport(id);
+        return { added, updated, conflicts, sources };
+      },
+
+      async getIssueOverview(filter) {
+        const imports = await this.listImports(100000, {});
+        const base = global.IssueFilter.summarizeImports(imports);
+        const counts = {};
+        for (const f of global.IssueFilter.ISSUE_FILTERS) {
+          let n = 0;
+          await scan({ ...(filter || {}), issueFilter: f }, () => { n++; });
+          counts[f] = n;
+        }
+        const index = await issueIndex();
+        let unlinked = 0;
+        const linked = new Set((await allSources()).map(s => s.key));
+        await scan(null, r => { if (!linked.has(r.key)) unlinked++; });
+        return { ...base, recordCounts: counts, unlinkedRecords: unlinked, issueRecordKeys: index.byKey.size };
       },
 
       async findImportByFileHash(hash) {
@@ -943,7 +1219,14 @@
           zones: await this.listZones(),
           settings: await this.getSettings(),
           backupHistory: await this.getBackupHistory(),
-          imports: await this.listImports(1000),
+          // Import 이슈와 "그 파일에서 나온 레코드 키"를 함께 싣는다(database.js buildBackupPayload 와 같은 형식)
+          imports: await (async () => {
+            const imports = await this.listImports(1000, {});
+            const sources = await allSources();
+            const byImport = new Map();
+            sources.forEach(s => { if (!byImport.has(s.importId)) byImport.set(s.importId, []); byImport.get(s.importId).push(s.key); });
+            return imports.map(im => ({ ...im, recordKeys: byImport.get(im.id) || [] }));
+          })(),
         };
       },
 
@@ -960,6 +1243,9 @@
         const result = await this.importRecords(flat, {
           filename: '(백업 복구)',
           importedAt: payload.exportedAt || new Date().toISOString(),
+          // database.js 와 같은 이유 — 복원 경로를 레코드 출처로 남기지 않는다.
+          // 남기면 모든 기록이 "이슈 없는 파일에서도 왔다"가 되어 이슈 분리가 무너진다.
+          trackSources: false,
         });
         if (payload.zonePolygons && typeof payload.zonePolygons === 'object') {
           const merged = mode === 'replace' ? {} : await this.getZonePolygons();
@@ -989,9 +1275,10 @@
           const current = mode === 'replace' ? [] : await this.getBackupHistory();
           await this.setBackupHistory(global.dedupeBackupHistory([...payload.backupHistory, ...current]));
         }
+        const importResult = await this.restoreImports(payload.imports);
         // 백업의 설정이 분류 기준을 바꿨으면 기존 날짜 요약도 새 기준으로 맞춘다
         const reclassified = await reclassifyStale();
-        return { ...result, mode, reclassifiedDates: reclassified.rebuilt };
+        return { ...result, mode, reclassifiedDates: reclassified.rebuilt, imports: importResult };
       },
     };
   }
@@ -1052,7 +1339,7 @@
   const MUTATING_METHODS = new Set([
     'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveZone', 'setZoneActive',
     'saveZoneManualCells', 'setSettings', 'restoreBackupPayload', 'reclassifySummaries',
-    'saveCoverageSnapshot', 'setRecommendationState',
+    'saveCoverageSnapshot', 'setRecommendationState', 'updateImportIssue', 'restoreImports',
   ]);
 
   // 백엔드 메서드를 RouteDB 로 그대로 흘려보낸다
@@ -1066,6 +1353,7 @@
     'getBackupHistory', 'setBackupHistory', 'buildBackupPayload', 'restoreBackupPayload',
     'getClassificationStatus', 'reclassifySummaries',
     'saveCoverageSnapshot', 'listCoverageSnapshots', 'listRecommendationStates', 'setRecommendationState',
+    'getImport', 'updateImportIssue', 'listDateImports', 'getIssueOverview', 'restoreImports',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

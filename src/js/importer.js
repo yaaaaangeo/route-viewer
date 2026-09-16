@@ -70,34 +70,177 @@ function setImportBusy(on,message){
 // ══════════════════════════════════════════════════════
 //  handleFiles — 파일 여러 개를 순서대로 DB에 추가한다.
 //  ★ 기존 데이터를 초기화하는 코드는 여기에 없다(있으면 안 된다).
+//
+//  DB에 넣기 전에 "이 파일에 이슈가 있나요?" 를 파일별로 한 번 묻는다.
+//  파싱(느린 부분)은 먼저 끝내고, 확인 창에서는 이미 읽어둔 결과만 보여준다.
+//  취소하면 아무것도 저장하지 않는다.
 // ══════════════════════════════════════════════════════
-async function handleFiles(fileList){
+
+// 확인 창이 열려 있는 동안 들고 있는 파일들 — 저장했거나 취소하면 비운다
+let pendingImportFiles=null;
+
+// 파일을 읽어 레코드로 바꾸고, 확인 창에 보여줄 요약(날짜·차량·레코드 수)을 붙인다.
+// items: [{name, bytes}] — 브라우저 File 과 데스크톱 pickRouteFiles 결과를 같은 모양으로 맞춘 것
+async function parseImportFiles(items,onProgress){
+  const parsed=[],failed=[];
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    if(onProgress) onProgress(i,items.length,it.name);
+    try{
+      const bytes=await it.bytes();
+      const records=RouteParser.parseBuffer(bytes);
+      if(!records.length){ failed.push({name:it.name,reason:'GPS 좌표를 찾지 못했어요'}); continue; }
+      const fileHash=await hashBuffer(bytes);
+      const seenBefore=await RouteDB.findImportByFileHash(fileHash);
+      parsed.push({
+        filename:it.name, records, fileHash, seenBefore,
+        dates:[...new Set(records.map(r=>r.date).filter(Boolean))].sort(),
+        vehicles:[...new Set(records.map(r=>r.vehicle).filter(Boolean))].sort(),
+        // 파일별로 따로 적는다 — 한 파일의 이슈가 다른 파일에 옮겨붙지 않는다
+        issue:{hasIssue:false,issueNote:''},
+      });
+    }catch(err){
+      console.warn('[경로뷰어] 파싱 실패:',it.name,err);
+      failed.push({name:it.name,reason:err.message||'읽지 못했어요'});
+    }
+  }
+  return {parsed,failed};
+}
+
+async function startImportFlow(items){
   clearError();
-  const files=Array.from(fileList);
-  const results=[];
-  const failed=[];
-
-  setImportBusy(true,`파일 ${files.length}개 읽는 중…`);
+  setImportBusy(true,`파일 ${items.length}개 읽는 중…`);
+  let parsed,failed;
   try{
-    for(let i=0;i<files.length;i++){
-      const file=files[i];
-      setImportBusy(true,`(${i+1}/${files.length}) ${file.name} 처리 중…`);
-      try{
-        const bytes=await readFileBuffer(file);
-        const records=RouteParser.parseBuffer(bytes);
-        if(!records.length){
-          failed.push({name:file.name,reason:'GPS 좌표를 찾지 못했어요'});
-          continue;
-        }
-        const fileHash=await hashBuffer(bytes);
-        const seenBefore=await RouteDB.findImportByFileHash(fileHash);
+    ({parsed,failed}=await parseImportFiles(items,(i,n,name)=>setImportBusy(true,`(${i+1}/${n}) ${name} 읽는 중…`)));
+  }finally{
+    setImportBusy(false);
+  }
+  if(!parsed.length){
+    showError(items.length>1
+      ? '선택한 파일들에서 GPS 좌표를 찾지 못했어요. nav-app "오늘 기록 다운로드"로 받은 파일이 맞는지 확인해주세요.'
+      : '파일에서 GPS 좌표를 찾지 못했어요. nav-app "오늘 기록 다운로드"로 받은 파일이 맞는지 확인해주세요.');
+    return;
+  }
+  pendingImportFiles={parsed,failed};
+  showImportIssuePrompt();
+}
 
-        // ★ 추가(merge)만 한다. 기존 날짜/기록은 그대로 둔다.
-        const res=await RouteDB.importRecords(records,{filename:file.name,fileHash,importedBy:currentUserName()});
-        results.push({...res,filename:file.name,seenBefore});
+// ── 저장 전 확인 창 — 파일별 이슈 체크 + 한 줄 메모 ───────
+function showImportIssuePrompt(){
+  const {parsed,failed}=pendingImportFiles;
+  const max=(window.IssueFilter&&IssueFilter.ISSUE_NOTE_MAX)||200;
+  const rows=parsed.map((p,i)=>`
+    <div class="imp-row" id="imp-row-${i}">
+      <div class="imp-row-head">
+        <span class="imp-name" title="${escapeHtml(p.filename)}">${escapeHtml(p.filename)}</span>
+        ${p.seenBefore?'<span class="imp-seen">이미 넣었던 파일</span>':''}
+      </div>
+      <div class="imp-meta mono">
+        <span>${p.dates.length?escapeHtml(p.dates.length>3?`${p.dates[0]} … ${p.dates[p.dates.length-1]} (${p.dates.length}일)`:p.dates.join(', ')):'날짜 미상'}</span>
+        <span>${p.vehicles.length?escapeHtml(p.vehicles.join(', ')):'차량 미상'}</span>
+        <span>${fmtNum(p.records.length)} 레코드</span>
+      </div>
+      <label class="imp-check">
+        <input type="checkbox" id="imp-issue-${i}" ${p.issue.hasIssue?'checked':''} onchange="onImportIssueToggle(${i})"/>
+        <span>이 파일에 이슈가 있어요 (확인 필요)</span>
+      </label>
+      <input type="text" class="imp-note" id="imp-note-${i}" maxlength="${max}"
+             placeholder="어떤 이슈인지 한 줄로 적어주세요 (최대 ${max}자)"
+             value="${escapeHtml(p.issue.issueNote)}"
+             oninput="onImportIssueNoteInput(${i})" ${p.issue.hasIssue?'':'disabled'}/>
+      <div class="imp-err" id="imp-err-${i}"></div>
+    </div>`).join('');
+
+  const failNote=failed.length
+    ? `<div class="ir-note warn">읽지 못한 파일 ${failed.length}개<br/>${
+        failed.map(f=>`· ${escapeHtml(f.name)} — ${escapeHtml(f.reason)}`).join('<br/>')
+      }</div>`
+    : '';
+
+  openModal({
+    title:'저장하기 전에 확인해주세요',
+    icon:'✎',
+    wide:true,
+    body:`
+      <div class="imp-intro">이슈가 있는 파일은 체크하고 내용을 한 줄로 적어주세요.
+        이슈로 표시한 데이터도 저장은 되지만, 달력·누적 지도·통계·추천에서 따로 걸러 볼 수 있어요.</div>
+      <div class="imp-list">${rows}</div>
+      ${failNote}
+    `,
+    buttons:[
+      {label:'취소',onClick:cancelImportFlow},
+      {label:`${parsed.length}개 파일 저장`,primary:true,onClick:confirmImportFlow},
+    ],
+  });
+}
+
+function onImportIssueToggle(i){
+  if(!pendingImportFiles) return;
+  const p=pendingImportFiles.parsed[i];
+  const box=document.getElementById('imp-issue-'+i);
+  const note=document.getElementById('imp-note-'+i);
+  p.issue.hasIssue=!!(box&&box.checked);
+  if(note){
+    note.disabled=!p.issue.hasIssue;
+    if(p.issue.hasIssue&&note.focus) note.focus();
+  }
+  setImportIssueError(i,'');
+}
+
+function onImportIssueNoteInput(i){
+  if(!pendingImportFiles) return;
+  const note=document.getElementById('imp-note-'+i);
+  pendingImportFiles.parsed[i].issue.issueNote=note?note.value:'';
+  setImportIssueError(i,'');
+}
+
+function setImportIssueError(i,msg){
+  const box=document.getElementById('imp-err-'+i);
+  if(box){ box.textContent=msg||''; box.style.display=msg?'block':'none'; }
+  const row=document.getElementById('imp-row-'+i);
+  if(row&&row.classList) row.classList.toggle('bad',!!msg);
+}
+
+function cancelImportFlow(){
+  pendingImportFiles=null;
+  closeModal();
+}
+
+async function confirmImportFlow(){
+  if(!pendingImportFiles){ closeModal(); return; }
+  const {parsed,failed}=pendingImportFiles;
+  // 저장 전에 전부 검사한다 — 하나라도 어긋나면 아무것도 저장하지 않는다
+  let bad=-1;
+  parsed.forEach((p,i)=>{
+    const v=IssueFilter.validateIssueInput(p.issue);
+    if(v.ok){ setImportIssueError(i,''); p.issue=v.value; }
+    else{ setImportIssueError(i,v.errors[0]); if(bad<0) bad=i; }
+  });
+  if(bad>=0){
+    const el=document.getElementById('imp-note-'+bad);
+    if(el&&el.focus) el.focus();
+    return;
+  }
+  closeModal();
+  pendingImportFiles=null;
+
+  const results=[];
+  setImportBusy(true,`파일 ${parsed.length}개 저장 중…`);
+  try{
+    for(let i=0;i<parsed.length;i++){
+      const p=parsed[i];
+      setImportBusy(true,`(${i+1}/${parsed.length}) ${p.filename} 저장 중…`);
+      try{
+        const res=await RouteDB.importRecords(p.records,{
+          filename:p.filename, fileHash:p.fileHash, importedBy:currentUserName(),
+          hasIssue:p.issue.hasIssue, issueNote:p.issue.issueNote,
+          issueStatus:p.issue.hasIssue?(p.issue.issueStatus||'open'):null,
+        });
+        results.push({...res,filename:p.filename,seenBefore:p.seenBefore,hasIssue:p.issue.hasIssue,issueNote:p.issue.issueNote});
       }catch(err){
-        console.warn('[경로뷰어] 파싱 실패:',file.name,err);
-        failed.push({name:file.name,reason:err.message||'읽지 못했어요'});
+        console.warn('[경로뷰어] 저장 실패:',p.filename,err);
+        failed.push({name:p.filename,reason:err.message||'저장하지 못했어요'});
       }
     }
   }finally{
@@ -105,16 +248,18 @@ async function handleFiles(fileList){
   }
 
   if(!results.length){
-    showError(files.length>1
-      ? '선택한 파일들에서 GPS 좌표를 찾지 못했어요. nav-app "오늘 기록 다운로드"로 받은 파일이 맞는지 확인해주세요.'
-      : '파일에서 GPS 좌표를 찾지 못했어요. nav-app "오늘 기록 다운로드"로 받은 파일이 맞는지 확인해주세요.');
+    showError('파일을 저장하지 못했어요. '+(failed[0]?failed[0].reason:''));
     return;
   }
-
   await refreshDateIndex();
   const stats=await RouteDB.stats();
   showImportReport(results,failed,stats);
   updateBackupStatus();
+}
+
+async function handleFiles(fileList){
+  const files=Array.from(fileList);
+  await startImportFlow(files.map(file=>({name:file.name,bytes:()=>readFileBuffer(file)})));
 }
 
 // 데스크톱 앱: 메뉴/버튼에서 "파일 선택" 다이얼로그로 불러오기
@@ -128,38 +273,7 @@ async function openRouteFileDialog(){
   try{ picked=await window.routeAPI.pickRouteFiles(); }
   catch(err){ showError('파일을 열지 못했어요. ('+err.message+')'); return; }
   if(!picked.length) return;
-
-  const results=[], failed=[];
-  setImportBusy(true,`파일 ${picked.length}개 읽는 중…`);
-  try{
-    for(let i=0;i<picked.length;i++){
-      const f=picked[i];
-      setImportBusy(true,`(${i+1}/${picked.length}) ${f.name} 처리 중…`);
-      try{
-        const bytes=new Uint8Array(f.buffer);
-        const records=RouteParser.parseBuffer(bytes);
-        if(!records.length){ failed.push({name:f.name,reason:'GPS 좌표를 찾지 못했어요'}); continue; }
-        const fileHash=await hashBuffer(bytes);
-        const seenBefore=await RouteDB.findImportByFileHash(fileHash);
-        const res=await RouteDB.importRecords(records,{filename:f.name,fileHash,importedBy:currentUserName()});
-        results.push({...res,filename:f.name,seenBefore});
-      }catch(err){
-        console.warn('[경로뷰어] 파싱 실패:',f.name,err);
-        failed.push({name:f.name,reason:err.message||'읽지 못했어요'});
-      }
-    }
-  }finally{
-    setImportBusy(false);
-  }
-
-  if(!results.length){
-    showError('선택한 파일에서 GPS 좌표를 찾지 못했어요.');
-    return;
-  }
-  await refreshDateIndex();
-  const stats=await RouteDB.stats();
-  showImportReport(results,failed,stats);
-  updateBackupStatus();
+  await startImportFlow(picked.map(f=>({name:f.name,bytes:async()=>new Uint8Array(f.buffer)})));
 }
 
 // ══════════════════════════════════════════════════════
@@ -210,12 +324,20 @@ function showImportReport(results,failed,stats){
         <div class="ir-file">
           <span class="ir-file-name" title="${escapeHtml(r.filename)}">${escapeHtml(r.filename)}</span>
           <span class="ir-file-nums">
+            ${r.hasIssue?`<span class="ir-issue" title="${escapeHtml(r.issueNote)}">이슈</span>`:''}
             <span class="ir-add">+${fmtNum(r.inserted)}</span>
             ${r.duplicates?`<span class="ir-dup">중복 ${fmtNum(r.duplicates)}</span>`:''}
             ${r.conflicts?`<span class="ir-conflict">충돌 ${fmtNum(r.conflicts)}</span>`:''}
             <span class="ir-date">${escapeHtml(r.dates.join(', '))}</span>
           </span>
         </div>`).join('')}</div>`
+    : '';
+
+  const issued=results.filter(r=>r.hasIssue);
+  const issueNote=issued.length
+    ? `<div class="ir-note">이슈로 표시한 파일 ${issued.length}개 — 확인 필요 상태로 저장했어요.<br/>${
+        issued.map(r=>`· ${escapeHtml(r.filename)} — ${escapeHtml(r.issueNote)}`).join('<br/>')
+      }<br/>[데이터 관리] 탭에서 확인 완료로 바꿀 수 있어요.</div>`
     : '';
 
   const repeated=results.filter(r=>r.seenBefore);
@@ -242,7 +364,7 @@ function showImportReport(results,failed,stats){
       <table class="ir-table">
         ${rows.map(([k,v])=>`<tr><td class="ir-k">${k}</td><td class="ir-v mono">${v}</td></tr>`).join('')}
       </table>
-      ${perFile}${zeroNote}${repeatNote}${failNote}
+      ${perFile}${issueNote}${zeroNote}${repeatNote}${failNote}
     `,
     buttons:[
       ...(hasDupInfo?[{label:'중복 상세',onClick:()=>showDuplicateDetail(results,sum)}]:[]),
