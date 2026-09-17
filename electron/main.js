@@ -298,6 +298,10 @@ function registerIpc() {
   handle('db:setSubZoneActive', (id, active) => openDatabase().setSubZoneActive(id, active));
   handle('db:deleteSubZone', id => openDatabase().deleteSubZone(id));
   handle('db:getSubZoneStats', (subZones, options) => openDatabase().getSubZoneStats(subZones, options));
+  handle('db:getAutoAnalysis', (parentZone, options) => openDatabase().getAutoAnalysis(parentZone, options));
+  handle('db:listSubZoneOverrides', parentZone => openDatabase().listSubZoneOverrides(parentZone));
+  handle('db:saveSubZoneOverride', override => openDatabase().saveSubZoneOverride(override));
+  handle('db:deleteSubZoneOverride', id => openDatabase().deleteSubZoneOverride(id));
   handle('db:getAccumBundle', (filter, cell) => openDatabase().getAccumBundle(filter, cell));
   handle('db:getBounds', filter => openDatabase().getBounds(filter));
   handle('db:getVisitedCellKeys', box => openDatabase().getVisitedCellKeys(box));

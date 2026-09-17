@@ -290,8 +290,10 @@
   // 도로 등급 — 이름에 그렇게 적혀 있을 때만 단정한다(올림픽대로처럼 이름만으로 알 수 없으면 확인 불가)
   function roadClassOf(name, osmTags) {
     const tag = (osmTags && osmTags.highway) || '';
-    if (tag === 'motorway' || tag === 'motorway_link') return { id: 'expressway', label: '고속도로·도시고속도로', source: 'osm' };
-    if (tag === 'trunk' || tag === 'trunk_link') return { id: 'trunk', label: '자동차전용도로급 간선', source: 'osm' };
+    // 본선과 연결로(_link)는 성격이 다르다 — 램프를 본선으로 부르지 않는다
+    if (tag === 'motorway_link' || tag === 'trunk_link') return { id: 'ramp', label: '진입·진출 램프', source: 'osm' };
+    if (tag === 'motorway') return { id: 'expressway', label: '고속도로·도시고속도로', source: 'osm' };
+    if (tag === 'trunk') return { id: 'trunk', label: '자동차전용도로급 간선', source: 'osm' };
     if (tag) return { id: 'road', label: '일반도로', source: 'osm' };
     if (/고속도로/.test(String(name || ''))) return { id: 'expressway', label: '고속도로', source: 'name' };
     return { id: 'unknown', label: '확인 불가', source: null };
@@ -369,16 +371,21 @@
   // 평행한 옆 도로에 잘못 붙지 않도록, 일정 거리(기본 25m) 안에 있는 선분만 후보로 본다.
   const MATCH_CELL_DEG = 0.002;      // 약 200m
   const DEFAULT_MATCH_DISTANCE_M = 25;
+  const SEGMENT_COVERAGE_CELL_M = 20;   // 구간 Coverage 를 재는 칸 크기(누적 지도 Coverage 와 같은 20m)
 
   function buildRoadIndex(segments) {
     const cells = new Map();
     (segments || []).forEach(seg => {
+      let offsetM = 0;
       (seg.chunks || [seg.geometry]).forEach(pts => {
         for (let i = 1; i < pts.length; i++) {
           const a = pts[i - 1], b = pts[i];
+          const chunkLengthM = distanceM(a[0], a[1], b[0], b[1]);
           const key = `${Math.floor(((a[0] + b[0]) / 2) / MATCH_CELL_DEG)}_${Math.floor(((a[1] + b[1]) / 2) / MATCH_CELL_DEG)}`;
           if (!cells.has(key)) cells.set(key, []);
-          cells.get(key).push({ seg, a, b });
+          // offsetM = 구간 시작점에서 이 선분까지의 거리 — 어디쯤을 달렸는지(구간 Coverage) 계산에 쓴다
+          cells.get(key).push({ seg, a, b, offsetM, chunkLengthM });
+          offsetM += chunkLengthM;
         }
       });
     });
@@ -396,14 +403,18 @@
         const key = `${Math.floor(lat / MATCH_CELL_DEG) + dy}_${Math.floor(lng / MATCH_CELL_DEG) + dx}`;
         const list = index.cells.get(key);
         if (!list) continue;
-        list.forEach(({ seg, a, b }) => {
+        list.forEach(({ seg, a, b, offsetM, chunkLengthM }) => {
           const r = pointToSegment(lat, lng, a, b);
           if (r.distanceM > maxDist) return;
-          if (!best || r.distanceM < best.distanceM) best = { seg, distanceM: r.distanceM, bearing: r.bearing };
+          if (!best || r.distanceM < best.distanceM) {
+            best = { seg, distanceM: r.distanceM, bearing: r.bearing, alongM: (offsetM || 0) + r.t * (chunkLengthM || 0) };
+          }
         });
       }
     }
     if (!best) return null;
+    // road-graph 의 Segment 는 id, roadSegmentsIn 의 구간은 roadId 를 쓴다 — 둘 다 받는다
+    const id = best.seg.roadId || best.seg.id;
     let direction = null;
     if (Number.isFinite(heading)) {
       const diff = angleDiff(heading, best.bearing);
@@ -411,7 +422,7 @@
       if (diff <= 60) direction = 'forward';
       else if (diff >= 120) direction = 'backward';
     }
-    return { roadId: best.seg.roadId, name: best.seg.name, distanceM: best.distanceM, segBearing: best.bearing, direction };
+    return { roadId: id, name: best.seg.name || best.seg.roadName, distanceM: best.distanceM, segBearing: best.bearing, direction, alongM: best.alongM };
   }
 
   // 방향별 수집량이 믿을 만한지 — 표본이 적거나 한쪽만 있으면 "확인 불가"로 둔다
@@ -574,10 +585,132 @@
     };
   }
 
+  // ══════════════════════════════════════════════════════
+  //  도로 Segment 별 집계 — 자동 분석의 심장
+  //
+  //  기록 하나하나를 가장 가까운 Segment(25m 안)에 붙이고, 진행 방향과 조건(요일·교통 시간대·
+  //  조도·날씨)까지 나눠서 센다. 같은 도로라도 방향이 다르면 다른 칸이다.
+  //
+  //  rows: (차량, 시각) 순으로 정렬된 기록 {date,time,vehicle,weather,speed,lat,lng,issueMask}
+  //  → { [segmentId]: {recordCount, collectionSec, visitCount, uniqueDays, lastVisitedAt,
+  //                    speed:{count,avgKmh,slowRatio,stoppedRatio}, periods:{id:sec},
+  //                    directions:{forward,backward,unknown}, cells:[...], issueRecordCount} }
+  // ══════════════════════════════════════════════════════
+  function aggregateSegments(rows, segments, options) {
+    const o = options || {};
+    const cfg = o.classification || TC.classificationConfig({});
+    const index = buildRoadIndex(segments);
+    const maxDist = o.matchDistanceM || DEFAULT_MATCH_DISTANCE_M;
+    const out = {};
+    const prevByVehicle = new Map();
+    let matched = 0, unmatched = 0;
+
+    const cellKey = c => [c.direction, c.weekdayType, c.trafficPeriod, c.lightCondition || 'any', c.weather || ''].join('|');
+
+    (rows || []).forEach(r => {
+      if (!r || !Number.isFinite(r.lat) || !Number.isFinite(r.lng)) return;
+      const prev = prevByVehicle.get(r.vehicle || '');
+      prevByVehicle.set(r.vehicle || '', r);
+      let heading = null;
+      let dtSec = null;
+      if (prev && prev.date === r.date) {
+        const dt = CS.timeToSec(r.time) - CS.timeToSec(prev.time);
+        if (dt > 0 && dt <= CS.COLLECTION_GAP_SEC) dtSec = dt;
+        if (distanceM(prev.lat, prev.lng, r.lat, r.lng) >= 3) heading = bearingDeg(prev.lat, prev.lng, r.lat, r.lng);
+      }
+      const m = matchToRoad(index, r.lat, r.lng, heading, { maxDistanceM: maxDist });
+      if (!m) { unmatched++; return; }
+      matched++;
+      let acc = out[m.roadId];
+      if (!acc) {
+        acc = {
+          segmentId: m.roadId, recordCount: 0, collectionSec: 0,
+          visits: new Set(), dates: new Set(), lastVisitedAt: null,
+          speed: { count: 0, sumTenths: 0, slow: 0, stopped: 0 },
+          periods: {}, directions: { forward: 0, backward: 0, unknown: 0 },
+          cellMap: new Map(), issueRecordCount: 0,
+          vehicles: new Map(),
+          coveredCells: new Set(),   // 구간을 20m 칸으로 나눠 "실제로 지나간 칸
+        };
+        out[m.roadId] = acc;
+      }
+      acc.recordCount++;
+      acc.vehicles.set(r.vehicle || '', (acc.vehicles.get(r.vehicle || '') || 0) + 1);
+      // 구간 어디쯤을 지났는지(20m 칸) — 구간 Coverage 계산에 쓴다
+      if (Number.isFinite(m.alongM)) acc.coveredCells.add(Math.floor(m.alongM / SEGMENT_COVERAGE_CELL_M));
+      acc.visits.add(`${r.date}|${r.vehicle || ''}`);
+      acc.dates.add(r.date);
+      if ((Number(r.issueMask) || 0) & (2 | 4)) acc.issueRecordCount++;
+      const direction = m.direction || 'unknown';
+      acc.directions[direction]++;
+      const cls = TC.classifyRecord(r, cfg);
+      if (dtSec != null) {
+        acc.collectionSec += dtSec;
+        acc.periods[cls.trafficPeriod] = (acc.periods[cls.trafficPeriod] || 0) + dtSec;
+      }
+      const speed = parseFloat(r.speed);
+      if (Number.isFinite(speed) && speed >= 0) {
+        acc.speed.count++;
+        acc.speed.sumTenths += Math.round(speed * 10);
+        if (speed === 0) acc.speed.stopped++;
+        else if (speed < 10) acc.speed.slow++;
+      }
+      const cell = {
+        direction, weekdayType: cls.weekdayType, trafficPeriod: cls.trafficPeriod,
+        lightCondition: cls.lightCondition || null, weather: r.weather || '',
+      };
+      const key = cellKey(cell);
+      let c = acc.cellMap.get(key);
+      if (!c) { c = { ...cell, recordCount: 0, collectionSec: 0, visits: new Set(), lastVisitedAt: null }; acc.cellMap.set(key, c); }
+      c.recordCount++;
+      if (dtSec != null) c.collectionSec += dtSec;
+      c.visits.add(`${r.date}|${r.vehicle || ''}`);
+      const stamp = `${r.date}T${r.time || '00:00:00'}+09:00`;
+      if (!c.lastVisitedAt || stamp > c.lastVisitedAt) c.lastVisitedAt = stamp;
+      if (!acc.lastVisitedAt || stamp > acc.lastVisitedAt) acc.lastVisitedAt = stamp;
+    });
+
+    const lengthById = new Map((segments || []).map(s => [s.roadId || s.id, s.lengthM || 0]));
+    Object.values(out).forEach(acc => {
+      const lengthM = lengthById.get(acc.segmentId) || 0;
+      const totalCells = Math.max(1, Math.ceil(lengthM / SEGMENT_COVERAGE_CELL_M));
+      acc.coverage = {
+        cellSizeM: SEGMENT_COVERAGE_CELL_M,
+        coveredCells: acc.coveredCells.size,
+        totalCells,
+        percent: Math.round((Math.min(acc.coveredCells.size, totalCells) / totalCells) * 1000) / 10,
+      };
+      delete acc.coveredCells;
+      acc.vehicleCounts = [...acc.vehicles.entries()].sort((a, b) => b[1] - a[1]);
+      delete acc.vehicles;
+      acc.visitCount = acc.visits.size;
+      acc.uniqueDays = acc.dates.size;
+      acc.collectionMinutes = Math.round(acc.collectionSec / 60);
+      acc.speed = acc.speed.count ? {
+        count: acc.speed.count,
+        avgKmh: Math.round(acc.speed.sumTenths / acc.speed.count) / 10,
+        slowRatio: Math.round((acc.speed.slow / acc.speed.count) * 100) / 100,
+        stoppedRatio: Math.round((acc.speed.stopped / acc.speed.count) * 100) / 100,
+      } : null;
+      acc.cells = [...acc.cellMap.values()].map(c => ({
+        direction: c.direction, weekdayType: c.weekdayType, trafficPeriod: c.trafficPeriod,
+        lightCondition: c.lightCondition, weather: c.weather,
+        recordCount: c.recordCount, collectionSec: c.collectionSec,
+        collectionMinutes: Math.round(c.collectionSec / 60),
+        visitCount: c.visits.size, lastVisitedAt: c.lastVisitedAt,
+      })).sort((a, b) => b.collectionSec - a.collectionSec);
+      delete acc.cellMap;
+      delete acc.visits;
+      delete acc.dates;
+    });
+    return { stats: out, match: { matchedPoints: matched, unmatchedPoints: unmatched, maxDistanceM: maxDist } };
+  }
+
   return {
     SUBZONE_VERSION,
     HDMAP_PARENT_SOURCES, hdmapKeysFor,
     aggregateSubZone,
+    aggregateSegments,
     PLACE_TYPES, PLACE_TYPE_IDS, placeTypeLabel,
     SOURCE_TYPES, SOURCE_LABELS, EVIDENCE_LEVELS, evidenceLevel,
     UNNAMED_ROAD, isUsableRoadName, roadClassOf,
@@ -585,6 +718,6 @@
     polygonBounds, polygonCenter, pointInPolygon, pointToSegment,
     roadSegmentsIn, normalizeSubZone, candidatePeriods, expectedSituations, safetyNote,
     buildRoadIndex, matchToRoad, directionConfidence,
-    DEFAULT_MATCH_DISTANCE_M, DIRECTION_MIN_SAMPLES,
+    DEFAULT_MATCH_DISTANCE_M, DIRECTION_MIN_SAMPLES, SEGMENT_COVERAGE_CELL_M,
   };
 }));

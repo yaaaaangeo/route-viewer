@@ -127,6 +127,11 @@ function renderRecommendationResult(){
   const statusEl=document.getElementById('rec-status');
   if(statusEl){ statusEl.style.display='none'; statusEl.textContent=''; }
   renderRecommendationSummary(res);
+  // 자동 분석(도로 Segment·세부 구역)은 저장소가 캐시한다 — 탭을 옮겼다고 다시 계산하지 않는다
+  if (typeof renderAutoAnalysis === 'function') {
+    if (!autoAnalysis && !autoBusy) runAutoAnalysis({ force: false });
+    else renderAutoAnalysis();
+  }
   if (typeof renderSubZoneSection === 'function') renderSubZoneSection();
   renderDrivePlan();
   renderRecommendationFilters(res);

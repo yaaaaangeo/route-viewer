@@ -110,6 +110,10 @@
       setSubZoneActive: (id, active) => api.setSubZoneActive(id, active),
       deleteSubZone: id => api.deleteSubZone(id),
       getSubZoneStats: (list, o) => api.getSubZoneStats(list || [], o || {}),
+      getAutoAnalysis: (zone, o) => api.getAutoAnalysis(zone, o || {}),
+      listSubZoneOverrides: zone => api.listSubZoneOverrides(zone),
+      saveSubZoneOverride: ov => api.saveSubZoneOverride(ov),
+      deleteSubZoneOverride: id => api.deleteSubZoneOverride(id),
       getAccumBundle: (f, c) => api.getAccumBundle(f || {}, c),
       getBounds: f => api.getBounds(f || {}),
       getVisitedCellKeys: b => api.getVisitedCellKeys(b),
@@ -158,8 +162,8 @@
   // ══════════════════════════════════════════════════════
   const IDB_NAME = 'route-viewer';
   // v2: vehicles/zones 설정 저장소 추가 · v3: recordSources(GPS 레코드 ↔ Import 파일 출처) 추가
-  // v4: subZones(세부 수집 구역) 추가
-  const IDB_VERSION = 4;
+  // v4: subZones(세부 수집 구역) · v5: autoAnalysis(자동 분석 캐시) + subZoneOverrides(사용자 보정)
+  const IDB_VERSION = 5;
 
   function makeIdbBackend() {
     let dbp = null;   // open() 진행중 promise
@@ -190,6 +194,9 @@
           // (SQLite record_sources 의 PRIMARY KEY 와 같은 뜻). 예전 DB 를 열면 이 저장소만 새로 생긴다.
           // 세부 수집 구역(2단계) — 상위 구역 안의 생활권·장소 유형
           if (!db.objectStoreNames.contains('subZones')) db.createObjectStore('subZones', { keyPath: 'id' });
+          // 자동 분석 캐시(상위 구역별)와 사용자 보정(자동 구역 id 별)
+          if (!db.objectStoreNames.contains('autoAnalysis')) db.createObjectStore('autoAnalysis', { keyPath: 'parentZone' });
+          if (!db.objectStoreNames.contains('subZoneOverrides')) db.createObjectStore('subZoneOverrides', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('recordSources')) {
             const st = db.createObjectStore('recordSources', { keyPath: 'id' });
             st.createIndex('key', 'key');
@@ -1425,6 +1432,104 @@
         return out;
       },
 
+
+      // ── 자동 분석(도로 Segment + 세부 구역) — database.js 와 같은 규칙 ──
+      async listSubZoneOverrides(parentZone) {
+        const db = await ready();
+        const t = db.transaction(['subZoneOverrides'], 'readonly');
+        const rows = await reqp(t.objectStore('subZoneOverrides').getAll());
+        return parentZone ? rows.filter(r => !r.parentZone || r.parentZone === parentZone) : rows;
+      },
+
+      async saveSubZoneOverride(override) {
+        if (!override || !override.id) throw new Error('보정할 자동 구역 id 가 필요해요.');
+        const db = await ready();
+        const prev = await reqp(db.transaction(['subZoneOverrides'], 'readonly').objectStore('subZoneOverrides').get(override.id));
+        const next = { ...(prev || {}), ...override, updatedAt: new Date().toISOString() };
+        const t = db.transaction(['subZoneOverrides'], 'readwrite');
+        t.objectStore('subZoneOverrides').put(next);
+        await done(t);
+        return next;
+      },
+
+      async deleteSubZoneOverride(id) {
+        const db = await ready();
+        const t = db.transaction(['subZoneOverrides'], 'readwrite');
+        t.objectStore('subZoneOverrides').delete(id);
+        await done(t);
+        return { id, removed: true };
+      },
+
+      async autoRevisions(parentZone, polygon, issueFilter) {
+        const summaries = await this.listDateSummaries();
+        const snapshots = await this.listCoverageSnapshots();
+        const snap = (snapshots || []).find(s => s.zone === parentZone) || null;
+        const globals = { gangnam: 'HDMAP_GANGNAM_ROADS', seocho: 'HDMAP_SEOCHO_ROADS' };
+        const sources = global.SubZones.hdmapKeysFor(parentZone).map(k => global[globals[k]] || { source: k, lines: [] });
+        return {
+          parentZoneRevision: global.RoadGraph.fnv1a(JSON.stringify(polygon || [])),
+          mapDataRevision: global.RoadGraph.mapDataRevision(sources),
+          roadGraphRevision: `${global.RoadGraph.ROAD_GRAPH_VERSION}:${global.RoadGraph.DEFAULTS.maxSegmentM}:${global.RoadGraph.DEFAULTS.minSegmentM}`,
+          poiDataRevision: 'none',
+          gpsDataRevision: global.RoadGraph.fnv1a(summaries.map(s => `${s.date}:${s.count}`).join(';')),
+          coverageRevision: global.RoadGraph.fnv1a(snap ? JSON.stringify(snap) : 'none'),
+          issueFilter: global.IssueFilter.normalizeFilter(issueFilter),
+          algorithmVersion: global.AutoSubZones.AUTO_ANALYSIS_VERSION,
+        };
+      },
+
+      async getAutoAnalysis(parentZone, options) {
+        const o = options || {};
+        const polygons = await this.getZonePolygons();
+        const polygon = o.polygon || (polygons || {})[parentZone] || null;
+        const revisions = await this.autoRevisions(parentZone, polygon, o.issueFilter);
+        const graphKey = [revisions.parentZoneRevision, revisions.mapDataRevision, revisions.roadGraphRevision, revisions.algorithmVersion].join('|');
+        const statsKey = [graphKey, revisions.gpsDataRevision, revisions.issueFilter].join('|');
+        const db = await ready();
+        const cached = (await reqp(db.transaction(['autoAnalysis'], 'readonly').objectStore('autoAnalysis').get(parentZone))) || null;
+        const reuseGraph = !o.force && cached && cached.graphKey === graphKey;
+        const reuseStats = !o.force && cached && cached.statsKey === statsKey;
+        const stages = [];
+
+        let segments;
+        if (reuseGraph) { segments = cached.segments; stages.push('도로망 재사용'); }
+        else {
+          const lines = this.hdmapLinesFor(parentZone);
+          segments = global.RoadGraph.labelSegments(global.RoadGraph.buildSegments(global.RoadGraph.buildGraph(lines), { parentZone, polygon }));
+          stages.push(`도로망 새로 계산(${segments.length}구간)`);
+        }
+
+        let segmentStats, match;
+        if (reuseStats) { segmentStats = cached.segmentStats; match = cached.match; stages.push('GPS 집계 재사용'); }
+        else {
+          const bounds = global.SubZones.polygonBounds(polygon);
+          const index = await issueIndex();
+          const rows = [];
+          await scan(o.issueFilter && o.issueFilter !== 'all' ? { issueFilter: o.issueFilter } : {}, r => {
+            if (bounds && (r.lat < bounds.minLat || r.lat > bounds.maxLat || r.lng < bounds.minLng || r.lng > bounds.maxLng)) return;
+            rows.push({ ...r, issueMask: maskOf(index, r.key) });
+          });
+          rows.sort((a, b) => String(a.vehicle || '').localeCompare(String(b.vehicle || '')) || String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+          const agg = global.SubZones.aggregateSegments(rows, segments, { classification: await classificationConfig() });
+          segmentStats = agg.stats;
+          match = agg.match;
+          stages.push(`GPS 집계 새로 계산(${rows.length.toLocaleString('en-US')}건)`);
+        }
+
+        const analysis = global.AutoSubZones.buildAnalysis({
+          parentZone, segments: segments.map(s => ({ ...s })), segmentStats,
+          overrides: await this.listSubZoneOverrides(parentZone),
+          today: o.today || new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10),
+          poi: o.poi || null,
+          analyzedAt: reuseStats && cached ? cached.analyzedAt : new Date().toISOString(),
+        });
+
+        const t = db.transaction(['autoAnalysis'], 'readwrite');
+        t.objectStore('autoAnalysis').put({ parentZone, graphKey, statsKey, revisions, match, analyzedAt: analysis.analyzedAt, segments, segmentStats });
+        await done(t);
+        return { ...analysis, revisions, match, segmentStats, stages, cached: reuseGraph && reuseStats };
+      },
+
       async getIssueOverview(filter) {
         const index = await issueIndex();
         // 필터마다 따로 훑지 않는다 — 한 번 훑으면서 레코드의 마스크로 셋 다 센다
@@ -1592,7 +1697,7 @@
     'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveZone', 'setZoneActive',
     'saveZoneManualCells', 'setSettings', 'restoreBackupPayload', 'reclassifySummaries',
     'saveCoverageSnapshot', 'setRecommendationState', 'updateImportIssue', 'restoreImports',
-    'saveSubZone', 'setSubZoneActive', 'deleteSubZone',
+    'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'saveSubZoneOverride', 'deleteSubZoneOverride',
   ]);
 
   // 백엔드 메서드를 RouteDB 로 그대로 흘려보낸다
@@ -1609,6 +1714,7 @@
     'getImport', 'updateImportIssue', 'listDateImports', 'getIssueOverview', 'restoreImports',
     'getStatsBundle', 'getAccumBundle',
     'listSubZones', 'getSubZone', 'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'getSubZoneStats',
+    'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

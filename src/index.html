@@ -210,7 +210,8 @@
     <div id="rec-issue-filter" class="issue-filter-group" title="추천 계산에 쓸 데이터 상태"></div>
     <div id="rec-status" class="ir-note" style="display:none;margin:0;"></div>
     <section id="rec-summary" class="rec-section" aria-label="추천 요약"></section>
-    <section id="rec-subzones" class="rec-section" aria-label="세부 구역 추천"></section>
+    <section id="rec-auto" class="rec-section" aria-label="자동 분석 추천"></section>
+    <section id="rec-subzones" class="rec-section" aria-label="세부 구역 추천(직접 등록)"></section>
     <section id="rec-plan" class="rec-section" aria-label="주행 계획"></section>
     <section id="rec-filters" class="rec-filters" aria-label="추천 필터와 정렬"></section>
     <section id="rec-list" class="rec-list" aria-label="추천 카드 목록"></section>
@@ -377,6 +378,8 @@
 <script src="js/time-conditions.js"></script>
 <script src="js/issue-filter.js"></script>
 <script src="js/subzones.js"></script>
+<script src="js/road-graph.js"></script>
+<script src="js/auto-subzones.js"></script>
 <script src="js/condition-stats.js"></script>
 <!-- 추천 주행 엔진(통계·규칙 기반, 순수 함수) — SQLite/IndexedDB 설정 검증과 추천 탭이 함께 쓴다 -->
 <script src="js/recommendation.js"></script>
@@ -399,6 +402,7 @@
 <script src="js/statistics.js"></script>
 <script src="js/recommend-view.js"></script>
 <script src="js/subzone-view.js"></script>
+<script src="js/auto-analysis-view.js"></script>
 <script src="js/replay.js"></script>
 <script src="js/importer.js"></script>
 <script src="js/backup.js"></script>

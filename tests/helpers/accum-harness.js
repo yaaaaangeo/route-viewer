@@ -147,6 +147,8 @@ async function createAccumHarness() {
   load(ctx, 'src/js/recommendation.js');
   load(ctx, 'src/js/issue-filter.js');
   load(ctx, 'src/js/subzones.js');
+  load(ctx, 'src/js/road-graph.js');
+  load(ctx, 'src/js/auto-subzones.js');
   load(ctx, 'src/js/storage.js');
   load(ctx, 'src/js/map-capture.js');
   load(ctx, 'src/js/accum.js');

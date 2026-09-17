@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('routeAPI', {
   setSubZoneActive: (id, active) => call('db:setSubZoneActive', id, active),
   deleteSubZone: id => call('db:deleteSubZone', id),
   getSubZoneStats: (subZones, options) => call('db:getSubZoneStats', subZones, options),
+  // 자동 분석(도로 Segment·세부 구역)과 사용자 보정
+  getAutoAnalysis: (parentZone, options) => call('db:getAutoAnalysis', parentZone, options),
+  listSubZoneOverrides: parentZone => call('db:listSubZoneOverrides', parentZone),
+  saveSubZoneOverride: override => call('db:saveSubZoneOverride', override),
+  deleteSubZoneOverride: id => call('db:deleteSubZoneOverride', id),
   getAccumBundle: (filter, cell) => call('db:getAccumBundle', filter, cell),
   getBounds: filter => call('db:getBounds', filter),
   getVisitedCellKeys: box => call('db:getVisitedCellKeys', box),

@@ -25,6 +25,8 @@ const crypto = require('crypto');
 const { Database } = require('node-sqlite3-wasm');
 const CoverageGrid = require('../src/js/coverage-grid.js');
 const SubZones = require('../src/js/subzones.js');
+const RoadGraph = require('../src/js/road-graph.js');
+const AutoSubZones = require('../src/js/auto-subzones.js');
 const CollectionStats = require('../src/js/collection-stats.js');
 const TimeConditions = require('../src/js/time-conditions.js');
 const ConditionStats = require('../src/js/condition-stats.js');
@@ -261,6 +263,22 @@ class RouteDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_sub_zones_parent ON sub_zones(parent_zone, active);
+
+      -- 자동 분석 결과(도로 Segment + GPS 집계) — 탭을 열 때마다 다시 계산하지 않기 위한 캐시.
+      -- 무엇이 바뀌면 다시 계산할지는 data_json 안의 graphKey/statsKey 로 판단한다.
+      CREATE TABLE IF NOT EXISTS auto_analysis (
+        parent_zone   TEXT PRIMARY KEY,
+        revisions_json TEXT NOT NULL DEFAULT '{}',
+        analyzed_at   TEXT NOT NULL DEFAULT '',
+        data_json     TEXT NOT NULL DEFAULT '{}'
+      );
+
+      -- 자동 분류를 사람이 고친 것 — 자동 결과는 그대로 두고 이것만 위에 덮는다(다시 분석해도 유지).
+      CREATE TABLE IF NOT EXISTS subzone_overrides (
+        id          TEXT PRIMARY KEY,
+        parent_zone TEXT NOT NULL DEFAULT '',
+        data_json   TEXT NOT NULL DEFAULT '{}'
+      );
     `);
 
     // 예전 버전 DB(imports 테이블에 새 컬럼이 없는 경우) 업그레이드 대비.
@@ -968,6 +986,120 @@ class RouteDatabase {
         : SubZones.roadSegmentsIn(sz.polygon, this._hdmapLines(sz.parentZone), { subZoneId: sz.id });
       return SubZones.aggregateSubZone(sz, rows, { classification, roadSegments });
     });
+  }
+
+
+  // ══════════════════════════════════════════════════════
+  //  자동 분석 — 지도(HD Map) + GPS 로 도로 Segment 와 세부 구역을 스스로 만든다
+  //
+  //  비싼 건 GPS 를 도로에 맞추는 단계(10만 건 기준 약 2초)라, 두 단계로 나눠 캐시한다.
+  //    graphStage : 상위 구역 경계 · 지도 데이터 · 도로망 파라미터 · 알고리즘 버전
+  //    statsStage : graphStage + GPS 데이터 지문 + 이슈 필터
+  //  탭을 여는 것만으로는 다시 계산하지 않고, 위 지문이 달라졌을 때만 그 단계부터 다시 한다.
+  //  사용자 보정(overrides)은 따로 저장해서 읽을 때 덮어씌운다 — 다시 분석해도 살아남는다.
+  // ══════════════════════════════════════════════════════
+  _autoRevisions(parentZone, polygon, issueFilter) {
+    const summaries = this.db.all('SELECT date, record_count AS n FROM date_summaries ORDER BY date');
+    const hdmapSources = SubZones.hdmapKeysFor(parentZone).map(key => {
+      try { return require(`../src/data/hdmap_${key}_roads.json`); } catch (_) { return { source: key, lines: [] }; }
+    });
+    const snap = (this._jsonMeta('coverage_snapshots', {}) || {})[parentZone] || null;
+    return {
+      parentZoneRevision: RoadGraph.fnv1a(JSON.stringify(polygon || [])),
+      mapDataRevision: RoadGraph.mapDataRevision(hdmapSources),
+      roadGraphRevision: `${RoadGraph.ROAD_GRAPH_VERSION}:${RoadGraph.DEFAULTS.maxSegmentM}:${RoadGraph.DEFAULTS.minSegmentM}`,
+      poiDataRevision: 'none',
+      gpsDataRevision: RoadGraph.fnv1a(summaries.map(r => `${r.date}:${r.n}`).join(';')),
+      coverageRevision: RoadGraph.fnv1a(snap ? JSON.stringify(snap) : 'none'),
+      issueFilter: IssueFilter.normalizeFilter(issueFilter),
+      algorithmVersion: AutoSubZones.AUTO_ANALYSIS_VERSION,
+    };
+  }
+
+  listSubZoneOverrides(parentZone) {
+    const rows = parentZone
+      ? this.db.all('SELECT data_json AS json FROM subzone_overrides WHERE parent_zone = ?', [parentZone])
+      : this.db.all('SELECT data_json AS json FROM subzone_overrides');
+    return rows.map(r => { try { return JSON.parse(r.json); } catch (_) { return null; } }).filter(Boolean);
+  }
+
+  saveSubZoneOverride(override) {
+    const o = override && override.id ? override : null;
+    if (!o) throw new Error('보정할 자동 구역 id 가 필요해요.');
+    const prev = this.db.get('SELECT data_json AS json FROM subzone_overrides WHERE id = ?', [o.id]);
+    const before = prev ? JSON.parse(prev.json) : {};
+    const next = { ...before, ...o, updatedAt: new Date().toISOString() };
+    this.db.run(
+      `INSERT INTO subzone_overrides(id, parent_zone, data_json) VALUES(?,?,?)
+       ON CONFLICT(id) DO UPDATE SET parent_zone = excluded.parent_zone, data_json = excluded.data_json`,
+      [next.id, next.parentZone || '', JSON.stringify(next)]);
+    return next;
+  }
+
+  deleteSubZoneOverride(id) {
+    this.db.run('DELETE FROM subzone_overrides WHERE id = ?', [id]);
+    return { id, removed: true };
+  }
+
+  getAutoAnalysis(parentZone, options = {}) {
+    const polygon = options.polygon || (this.getZonePolygons() || {})[parentZone] || null;
+    const revisions = this._autoRevisions(parentZone, polygon, options.issueFilter);
+    const graphKey = [revisions.parentZoneRevision, revisions.mapDataRevision, revisions.roadGraphRevision, revisions.algorithmVersion].join('|');
+    const statsKey = [graphKey, revisions.gpsDataRevision, revisions.issueFilter].join('|');
+    const row = this.db.get('SELECT data_json AS json FROM auto_analysis WHERE parent_zone = ?', [parentZone]);
+    let cached = null;
+    try { cached = row ? JSON.parse(row.json) : null; } catch (_) { cached = null; }
+
+    const reuseGraph = !options.force && cached && cached.graphKey === graphKey;
+    const reuseStats = !options.force && cached && cached.statsKey === statsKey;
+    const stages = [];
+
+    let segments;
+    if (reuseGraph) { segments = cached.segments; stages.push('도로망 재사용'); }
+    else {
+      const lines = this._hdmapLines(parentZone);
+      segments = RoadGraph.labelSegments(RoadGraph.buildSegments(RoadGraph.buildGraph(lines), { parentZone, polygon }));
+      stages.push(`도로망 새로 계산(${segments.length}구간)`);
+    }
+
+    let segmentStats, match;
+    if (reuseStats) { segmentStats = cached.segmentStats; match = cached.match; stages.push('GPS 집계 재사용'); }
+    else {
+      const bounds = SubZones.polygonBounds(polygon) || null;
+      const { clause, params } = this._filterSql(options.issueFilter && options.issueFilter !== 'all' ? { issueFilter: options.issueFilter } : {});
+      const where = bounds
+        ? `${clause} ${clause ? 'AND' : 'WHERE'} latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?`
+        : clause;
+      const args = bounds ? [...params, bounds.minLat, bounds.maxLat, bounds.minLng, bounds.maxLng] : params;
+      const rows = this.db.all(
+        `SELECT date, time, vehicle, weather, speed, latitude AS lat, longitude AS lng, issue_mask AS issueMask
+           FROM driving_records ${where} ORDER BY vehicle, timestamp, id`, args);
+      const agg = SubZones.aggregateSegments(rows, segments, { classification: this._classificationConfig() });
+      segmentStats = agg.stats;
+      match = agg.match;
+      stages.push(`GPS 집계 새로 계산(${rows.length.toLocaleString('en-US')}건)`);
+    }
+
+    const analysis = AutoSubZones.buildAnalysis({
+      parentZone, segments: segments.map(s => ({ ...s })), segmentStats,
+      overrides: this.listSubZoneOverrides(parentZone),
+      today: options.today || new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10),
+      poi: options.poi || null,
+      analyzedAt: reuseStats && cached ? cached.analyzedAt : new Date().toISOString(),
+    });
+
+    const payload = {
+      parentZone, graphKey, statsKey, revisions, match,
+      analyzedAt: analysis.analyzedAt,
+      segments, segmentStats,
+    };
+    this.db.run(
+      `INSERT INTO auto_analysis(parent_zone, revisions_json, analyzed_at, data_json) VALUES(?,?,?,?)
+       ON CONFLICT(parent_zone) DO UPDATE SET revisions_json = excluded.revisions_json,
+         analyzed_at = excluded.analyzed_at, data_json = excluded.data_json`,
+      [parentZone, JSON.stringify(revisions), payload.analyzedAt, JSON.stringify(payload)]);
+
+    return { ...analysis, revisions, match, segmentStats, stages, cached: reuseGraph && reuseStats };
   }
 
   // 누적지도/통계 상단 요약

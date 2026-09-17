@@ -41,6 +41,7 @@ const API_METHODS = [
   'getImport', 'updateImportIssue', 'listDateImports', 'getIssueOverview', 'restoreImports', 'listImportRecordKeys',
   'getStatsBundle', 'getAccumBundle',
   'listSubZones', 'getSubZone', 'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'getSubZoneStats',
+  'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',
 ];
 
 function createDesktopApi(db) {
@@ -105,6 +106,8 @@ function createStorageContext({ api, indexedDB, IDBKeyRange }) {
   load(ctx, 'src/js/recommendation.js');
   load(ctx, 'src/js/issue-filter.js');
   load(ctx, 'src/js/subzones.js');
+  load(ctx, 'src/js/road-graph.js');
+  load(ctx, 'src/js/auto-subzones.js');
   load(ctx, 'src/js/storage.js');
   return ctx;
 }

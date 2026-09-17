@@ -1034,6 +1034,32 @@ async function main(win, dbFilePath) {
     `구간 레이어 ${await js(win, `subZoneRoadLayer.getLayers().length`)}개`);
   await shot(win, '19-subzone-recommend');
 
+  // 자동 분석 — 사용자가 아무것도 그리지 않아도 도로 구간까지 추천이 나와야 한다
+  await js(win, `(async()=>{
+    await RouteDB.saveZonePolygons({...(await RouteDB.getZonePolygons()), 강남:[[37.4940,127.0230],[37.5060,127.0230],[37.5060,127.0500],[37.4940,127.0500]]});
+    return true;
+  })()`);
+  await js(win, `runAutoAnalysis({force:true})`);
+  for (let i = 0; i < 60 && await js(win, `autoBusy`); i++) await sleep(500);
+  const auto = await js(win, `(()=>{
+    const r=(autoRecResult&&autoRecResult.recommendations||[])[0];
+    return {segments:(autoAnalysis&&autoAnalysis.segments||[]).length, zones:(autoAnalysis&&autoAnalysis.zones||[]).length,
+      cached:autoAnalysis&&autoAnalysis.cached, stages:(autoAnalysis&&autoAnalysis.stages)||[],
+      rec:r?{road:r.roadName,label:r.segmentLabel,cond:r.conditionLabel,time:r.timeWindow.text,dir:r.direction.label,
+        minutes:r.current.collectionMinutes,target:r.targets.minutes,conf:r.confidence.label}:null};
+  })()`);
+  check('자동 분석 — 세부 구역을 그리지 않아도 도로 구간까지 추천한다',
+    auto.segments > 50 && auto.zones > 0 && !!auto.rec && !!auto.rec.road
+    && /\d{2}:\d{2}~\d{2}:\d{2}/.test(auto.rec.time),
+    auto.rec ? `도로 ${auto.segments}구간 · 자동 구역 ${auto.zones}개 · 1위 ${auto.rec.label} · ${auto.rec.cond} ${auto.rec.time} · ${auto.rec.dir}` : '(추천 없음)');
+  check('   자동 분석 지도에 구간과 우선순위 색이 그려진다',
+    (await js(win, `!!autoMap && autoSegmentLayer.getLayers().length > 20`)),
+    `구간 레이어 ${await js(win, `autoSegmentLayer.getLayers().length`)}개`);
+  const cachedAgain = await js(win, `(async()=>{ await runAutoAnalysis({force:false}); return {cached:autoAnalysis.cached,stages:autoAnalysis.stages}; })()`);
+  check('   탭을 다시 열어도(같은 조건) 저장된 분석을 쓴다',
+    cachedAgain.cached === true && cachedAgain.stages.every(s => /재사용/.test(s)), cachedAgain.stages.join(' / '));
+  await shot(win, '20-auto-analysis');
+
   section('Test 4 — 앱 재실행 (창을 다시 로드해도 남아있는지)');
   const beforeReload = await js(win, `(async()=>await RouteDB.stats())()`);
   await new Promise(resolve => {

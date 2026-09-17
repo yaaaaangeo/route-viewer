@@ -26,11 +26,11 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'), require('./subzones.js'));
+    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'), require('./subzones.js'), require('./auto-subzones.js'));
   } else {
-    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter, root.SubZones);
+    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter, root.SubZones, root.AutoSubZones);
   }
-}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF, SZ) {
+}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF, SZ, SZA) {
   'use strict';
 
   const RECOMMENDATION_VERSION = 1;
@@ -1545,6 +1545,385 @@
     };
   }
 
+  // ══════════════════════════════════════════════════════
+  //  10) 도로 Segment 추천 — 자동 분석 결과로 "어디를 어느 방향으로 언제" 를 만든다
+  //
+  //  후보 = 도로 Segment × 요일 × 교통 시간대 × 조도 × 진행 방향.
+  //  점수는 여덟 가지 부족도의 가중합이고, 가중치는 설정에서 바꿀 수 있다(합계 100%).
+  //  모든 수치는 우리 데이터에서 나온 값이고, 없는 것은 "데이터 없음"으로 빼고 남은 가중치로 다시 나눈다.
+  // ══════════════════════════════════════════════════════
+  const SEGMENT_SCORE_KEYS = Object.freeze([
+    'timePeriod', 'segmentCoverage', 'direction', 'lightCondition',
+    'weatherDiversity', 'edgeCase', 'staleness', 'vehicleBias',
+  ]);
+  const SEGMENT_SCORE_LABELS = Object.freeze({
+    timePeriod: '시간대 부족도', segmentCoverage: '구간 Coverage 부족도', direction: '방향별 부족도',
+    lightCondition: '조도 조건 부족도', weatherDiversity: '날씨 다양성 부족도', edgeCase: 'Edge Case 가능성',
+    staleness: '최근 미방문 기간', vehicleBias: '차량 편중도',
+  });
+  const SEGMENT_DEFAULTS = Object.freeze({
+    weights: Object.freeze({
+      timePeriod: 20, segmentCoverage: 20, direction: 15, lightCondition: 10,
+      weatherDiversity: 10, edgeCase: 10, staleness: 10, vehicleBias: 5,
+    }),
+    targetMinutesPerCell: 60,     // 한 칸(구간×요일×시간대×조도×방향)의 목표 수집 시간
+    targetVisitsPerCell: 2,
+    staleDays: 21,
+    maxCandidatesPerSegment: 4,
+    resultCount: 12,
+    minSegmentM: 60,              // 이보다 짧은 구간은 추천 대상에서 뺀다(교차로 조각)
+  });
+
+  function segmentSettings(input) {
+    const s = input && typeof input === 'object' ? input : {};
+    const weights = { ...SEGMENT_DEFAULTS.weights, ...(s.weights || {}) };
+    return { ...SEGMENT_DEFAULTS, ...s, weights };
+  }
+
+  // 가중치 합계가 100이 아니면 저장하지 않는다(추천 설정과 같은 규칙)
+  function validateSegmentSettings(input) {
+    const s = segmentSettings(input);
+    const errors = [];
+    let sum = 0;
+    SEGMENT_SCORE_KEYS.forEach(k => {
+      const v = Number(s.weights[k]);
+      if (!Number.isFinite(v) || v < 0 || v > 100) errors.push(`${SEGMENT_SCORE_LABELS[k]} 가중치는 0~100 사이여야 해요.`);
+      else sum += v;
+    });
+    if (!errors.length && Math.round(sum) !== 100) errors.push(`가중치 합계가 ${Math.round(sum)}% 예요 — 100% 가 되어야 저장할 수 있어요.`);
+    if (!(s.targetMinutesPerCell > 0)) errors.push('한 칸 목표 수집 시간은 1분 이상이어야 해요.');
+    return { ok: !errors.length, errors, value: s };
+  }
+
+  // 그 칸(요일·시간대·조도·방향)의 현재 수집 상태
+  function cellStateOf(stat, cond, direction) {
+    const cells = (stat && stat.cells) || [];
+    let minutes = 0, visits = 0, records = 0, last = null;
+    const weather = {};
+    cells.forEach(c => {
+      if (c.weekdayType !== cond.weekdayType || c.trafficPeriod !== cond.trafficPeriod) return;
+      if (cond.lightCondition && c.lightCondition !== cond.lightCondition) return;
+      if (direction !== 'both' && c.direction !== direction) return;
+      minutes += c.collectionMinutes;
+      visits += c.visitCount;
+      records += c.recordCount;
+      if (c.weather) weather[c.weather] = (weather[c.weather] || 0) + c.collectionMinutes;
+      if (c.lastVisitedAt && (!last || c.lastVisitedAt > last)) last = c.lastVisitedAt;
+    });
+    return { minutes, visits, records, lastVisitedAt: last, weather };
+  }
+
+  function buildSegmentRecommendations(input) {
+    const o = input || {};
+    const analysis = o.analysis || { segments: [], zones: [] };
+    const stats = o.segmentStats || {};
+    const settings = segmentSettings(o.segmentSettings);
+    const cfg = TC.classificationConfig(o.settings || {});
+    const today = kstDate(o.now);
+    const zoneBySegment = new Map();
+    (analysis.zones || []).forEach(z => {
+      if (z.active === false) return;
+      (z.segmentIds || []).forEach(id => zoneBySegment.set(id, z));
+    });
+    const items = [];
+    const skipped = [];
+
+    (analysis.segments || []).forEach(seg => {
+      const zone = zoneBySegment.get(seg.id);
+      if (!zone) { return; }                       // 제외(보정)된 구역의 구간은 추천하지 않는다
+      // 너무 짧은 구간(교차로 꼭짓점 조각 등)은 "달리러 갈 곳"이 못 된다
+      if (seg.lengthM < settings.minSegmentM) { skipped.push({ segment: seg.label, reason: `구간이 ${seg.lengthM}m 로 너무 짧습니다.` }); return; }
+      const stat = stats[seg.id] || null;
+      const type = SZA.SEMANTIC_TYPES[zone.semanticType] || SZA.SEMANTIC_TYPES.unclassified;
+      // 후보 시간대 — 유형이 정한 시간대. 유형을 모르면 그 구간에 기록이 있는 시간대로.
+      let periods = (zone.candidateTimes || []).slice();
+      if (!periods.length && stat && stat.periods) {
+        periods = Object.entries(stat.periods).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([id]) => id);
+      }
+      if (!periods.length) periods = ['morning_peak', 'evening_peak'];
+      const weekdayTypes = ['weekday'];
+      const location = seg.center;
+      const perSegment = [];
+
+      weekdayTypes.forEach(weekdayType => {
+        const referenceDate = nextDateOfType(today, weekdayType);
+        const light = location ? lightIntervals(referenceDate, location, cfg) : null;
+        periods.forEach(periodId => {
+          const period = cfg.trafficPeriods.find(p => p.id === periodId);
+          if (!period) return;
+          const pIntervals = periodIntervals(period);
+          const lightOptions = light
+            ? TC.LIGHT_CONDITION_IDS.map(id => ({ id, segments: intersect(pIntervals, light.intervals[id] || []) }))
+              .filter(l => lengthOf(l.segments) >= MIN_CANDIDATE_WINDOW_MINUTES)
+            : [{ id: null, segments: pIntervals }];
+          lightOptions.forEach(lightOpt => {
+            const cond = { weekdayType, trafficPeriod: periodId, lightCondition: lightOpt.id };
+            // 방향 — 신뢰할 만하면 적게 모인 쪽, 아니면 양방향
+            const dirs = stat ? directionsOf(seg, stat) : [{ id: 'both', label: '양방향', confident: false, reason: '이 구간 주행 기록이 아직 없어 방향을 알 수 없어요.' }];
+            dirs.forEach(dir => {
+              const state = cellStateOf(stat, cond, dir.id);
+              const scored = scoreSegmentCandidate({ seg, zone, stat, state, cond, dir, settings, today, analysis });
+              perSegment.push({ seg, zone, stat, state, cond, dir, lightOpt, referenceDate, light, ...scored });
+            });
+          });
+        });
+      });
+
+      // 관련도 — 부족한 것만 보면 "한 번도 안 가봤고 성격도 모르는 골목"이 항상 1등이 된다.
+      // 우리가 실제로 다니는 구간(기록 있음)과 지도로 성격이 확인된 구간을 먼저 권한다.
+      // 낮춘 이유는 카드에 그대로 적는다(숨기지 않는다).
+      const confirmed = zone.semanticType !== 'unclassified';
+      const relevance = stat && stat.recordCount ? 1 : (confirmed ? 0.8 : 0.35);
+      const relevanceReason = stat && stat.recordCount
+        ? null
+        : (confirmed
+          ? '이 구간 주행 기록이 아직 없어 우선순위를 낮췄어요(지도로 성격은 확인됨).'
+          : '이 구간 주행 기록도 없고 지도에서 성격도 확인되지 않아 우선순위를 크게 낮췄어요.');
+      perSegment.forEach(c => {
+        c.rawScore = c.score;
+        c.relevance = relevance;
+        c.relevanceReason = relevanceReason;
+        c.score = round1(c.score * relevance);
+      });
+      perSegment.sort((a, b) => b.score - a.score);
+      perSegment.slice(0, settings.maxCandidatesPerSegment).forEach(c => items.push(makeSegmentRecommendation(c, settings, today)));
+      if (!perSegment.length) skipped.push({ segment: seg.label, reason: '후보 시간대를 정하지 못했습니다.' });
+    });
+
+    items.sort((a, b) => b.score - a.score
+      || b.need.additionalMinutes - a.need.additionalMinutes
+      || (a.id < b.id ? -1 : 1));
+    items.forEach((r, i) => { r.rank = i + 1; });
+    const visible = items.slice(0, settings.resultCount);
+    return {
+      version: RECOMMENDATION_VERSION,
+      algorithmVersion: SZA.AUTO_ANALYSIS_VERSION,
+      today,
+      generatedAt: new Date(toMs(o.now)).toISOString(),
+      issueFilter: IF.normalizeFilter(o.issueFilter === undefined ? 'clean' : o.issueFilter),
+      settings,
+      weights: settings.weights,
+      candidateCount: items.length,
+      recommendations: visible,
+      allRecommendations: items,
+      skipped,
+      dataLevels: analysis.dataLevels || null,
+      analysisNotes: analysis.notes || [],
+      limitations: [
+        '자동 분류는 지도 데이터와 우리 주행 기록에서 나온 근거만 씁니다 — 확인되지 않은 장소·시설 이름은 만들지 않습니다.',
+        '예상 상황은 조건에서 나온 가능성이며 실제 발생을 보장하지 않습니다.',
+        '방향은 25m 안의 도로에 맞춘 기록으로만 나눕니다. 표본이 적으면 양방향으로 봅니다.',
+        '진입 금지·보행자 전용·사유지 도로 정보는 지도 데이터에 없으면 알 수 없습니다 — 현장 표지와 교통법규를 우선하세요.',
+      ],
+    };
+  }
+
+  // 방향 후보 — 방향 판정이 믿을 만하면 적게 모인 쪽 하나, 아니면 양방향 하나
+  function directionsOf(seg, stat) {
+    const f = stat.directions.forward || 0;
+    const b = stat.directions.backward || 0;
+    const conf = SZ.directionConfidence(f, b, stat.directions.unknown || 0);
+    if (!conf.ok) return [{ id: 'both', label: '양방향', confident: false, reason: conf.reason }];
+    const less = f <= b ? 'forward' : 'backward';
+    const label = less === 'forward' ? `${seg.headingLabel}쪽 방향` : `${seg.backHeadingLabel}쪽 방향`;
+    return [{
+      id: less, label, confident: true,
+      reason: `${seg.headingLabel}쪽 ${f}건 · ${seg.backHeadingLabel}쪽 ${b}건 — 적게 모인 쪽을 권합니다.`,
+    }];
+  }
+
+  function scoreSegmentCandidate({ seg, zone, stat, state, cond, dir, settings, today }) {
+    const sub = {};
+    const details = {};
+    const t = settings.targetMinutesPerCell;
+
+    sub.timePeriod = clamp(100 * (1 - state.minutes / Math.max(1, t)), 0, 100);
+    details.timePeriod = `${state.minutes}분 / 목표 ${t}분`;
+
+    if (stat && stat.coverage) {
+      sub.segmentCoverage = clamp(100 - stat.coverage.percent, 0, 100);
+      details.segmentCoverage = `이 구간 ${stat.coverage.percent}% (20m 칸 ${stat.coverage.coveredCells}/${stat.coverage.totalCells})`;
+    } else {
+      sub.segmentCoverage = 100;
+      details.segmentCoverage = '이 구간 주행 기록 없음';
+    }
+
+    if (stat && dir.confident) {
+      const f = stat.directions.forward || 0, b = stat.directions.backward || 0;
+      const less = Math.min(f, b), more = Math.max(f, b);
+      sub.direction = more > 0 ? clamp(100 * (1 - less / more), 0, 100) : 100;
+      details.direction = `${seg.headingLabel}쪽 ${f}건 · ${seg.backHeadingLabel}쪽 ${b}건`;
+    } else {
+      sub.direction = null;
+      details.direction = dir.reason || '방향을 확인할 수 없음';
+    }
+
+    if (cond.lightCondition) {
+      const lightMinutes = cellStateOf(stat, { ...cond }, dir.id).minutes;
+      sub.lightCondition = clamp(100 * (1 - lightMinutes / Math.max(1, t)), 0, 100);
+      details.lightCondition = `${TC.LIGHT_CONDITION_LABELS[cond.lightCondition]} ${lightMinutes}분 / 목표 ${t}분`;
+    } else {
+      sub.lightCondition = null;
+      details.lightCondition = '구역 좌표가 없어 조도를 계산하지 못함';
+    }
+
+    const weathers = Object.keys(state.weather || {});
+    if (stat && stat.recordCount) {
+      sub.weatherDiversity = weathers.length >= 2 ? 0 : weathers.length === 1 ? 60 : 100;
+      details.weatherDiversity = weathers.length ? `${weathers.join(', ')} 만 수집됨` : '이 조건 날씨 기록 없음';
+    } else {
+      sub.weatherDiversity = null;
+      details.weatherDiversity = '이 구간 기록이 없어 날씨 다양성을 알 수 없음';
+    }
+
+    const expects = zone.expects || [];
+    sub.edgeCase = expects.length ? clamp(40 + expects.length * 10, 0, 100) : null;
+    details.edgeCase = expects.length
+      ? `${zone.semanticLabel} 조건에서 볼 가능성이 있는 상황 ${expects.length}가지`
+      : '유형을 확인하지 못해 기대 상황을 정하지 못함';
+
+    const lastDate = state.lastVisitedAt ? String(state.lastVisitedAt).slice(0, 10) : null;
+    const days = lastDate ? Math.max(0, daysBetween(lastDate, today)) : null;
+    sub.staleness = days == null ? 100 : clamp(100 * (days / Math.max(1, settings.staleDays)), 0, 100);
+    details.staleness = days == null ? '이 조건 기록 없음' : `마지막 수집 ${days}일 전`;
+
+    if (stat && stat.vehicleCounts && stat.vehicleCounts.length) {
+      const total = stat.vehicleCounts.reduce((a, v) => a + v[1], 0);
+      const top = stat.vehicleCounts[0][1] / total;
+      sub.vehicleBias = clamp((top - 1 / Math.max(1, stat.vehicleCounts.length)) * 150, 0, 100);
+      details.vehicleBias = `${stat.vehicleCounts[0][0]} 비중 ${Math.round(top * 100)}% (차량 ${stat.vehicleCounts.length}대)`;
+    } else {
+      sub.vehicleBias = null;
+      details.vehicleBias = '차량별 기록 없음';
+    }
+
+    // 데이터가 없는 항목은 빼고 남은 가중치로 다시 나눈다(없는 것을 0점으로 깎지 않는다)
+    let sum = 0, available = 0;
+    const breakdown = SEGMENT_SCORE_KEYS.map(key => {
+      const w = settings.weights[key] || 0;
+      const v = sub[key];
+      const excluded = v == null;
+      if (!excluded) { sum += v * w; available += w; }
+      return { key, label: SEGMENT_SCORE_LABELS[key], weight: w, value: excluded ? null : round1(v), excluded, current: details[key] };
+    });
+    const score = available > 0 ? round1(sum / available) : 0;
+    breakdown.forEach(b => { b.contribution = b.excluded ? 0 : round2((b.value * b.weight) / Math.max(1, available)); });
+    return { score, subScores: sub, breakdown, availableWeight: available, details };
+  }
+
+  function makeSegmentRecommendation(c, settings, today) {
+    const { seg, zone, stat, state, cond, dir, lightOpt } = c;
+    const period = TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod];
+    const window = (() => {
+      const segs = lightOpt && lightOpt.segments && lightOpt.segments.length ? lightOpt.segments : null;
+      if (!segs) return { text: '시간대 전체', note: null };
+      const longest = segs.slice().sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))[0];
+      const r = roundSegment(longest);
+      return {
+        start: TC.formatClock(r[0]), end: TC.formatClock(r[1]),
+        text: `${TC.formatClock(r[0])}~${TC.formatClock(r[1])}`,
+        note: (cond.lightCondition === 'sunset' || cond.lightCondition === 'sunrise')
+          ? '실제 일출·일몰 시각에 따라 ±30분 조정하세요.' : null,
+      };
+    })();
+    const needMinutes = Math.max(0, settings.targetMinutesPerCell - state.minutes);
+    const passMinutes = Math.max(6, Math.round((seg.lengthM / 1000) / 20 * 60));  // 혼잡 구간 20km/h 가정
+    const passes = needMinutes > 0 ? Math.max(1, Math.ceil(needMinutes / passMinutes)) : 0;
+    const priority = priorityOf(c.score);
+    const days = state.lastVisitedAt ? daysBetween(String(state.lastVisitedAt).slice(0, 10), today) : null;
+    const confidence = segmentConfidence(c);
+    return {
+      id: `${seg.id}|${cond.weekdayType}|${cond.trafficPeriod}|${cond.lightCondition || 'any'}|${dir.id}`,
+      rank: null,
+      parentZone: seg.parentZone,
+      subZoneId: zone.id,
+      subZoneName: zone.name,
+      subZoneAuto: zone.auto !== false,
+      semanticType: zone.semanticType,
+      semanticLabel: zone.semanticLabel,
+      segmentId: seg.id,
+      segmentLabel: seg.label,
+      roadName: seg.roadName,
+      roadNamed: seg.named,
+      lengthM: seg.lengthM,
+      lengthKm: round1(seg.lengthM / 1000),
+      start: seg.start,
+      end: seg.end,
+      startLabel: seg.startJunction ? '교차로' : '구간 시작',
+      endLabel: seg.endJunction ? '교차로' : '구간 끝',
+      geometry: seg.geometry,
+      direction: { id: dir.id, label: dir.label, confident: dir.confident, reason: dir.reason },
+      condition: cond,
+      conditionLabel: [TC.WEEKDAY_TYPE_LABELS[cond.weekdayType], period,
+        cond.lightCondition ? TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : null].filter(Boolean).join(' · '),
+      timeWindow: window,
+      current: {
+        collectionMinutes: state.minutes, visitCount: state.visits, recordCount: state.records,
+        lastVisitedAt: state.lastVisitedAt, daysSinceLastVisit: days,
+        coveragePercent: stat && stat.coverage ? stat.coverage.percent : null,
+        segmentTotalMinutes: stat ? stat.collectionMinutes : 0,
+        weatherMinutes: state.weather,
+        vehicles: stat ? stat.vehicleCounts : [],
+      },
+      targets: { minutes: settings.targetMinutesPerCell, visits: settings.targetVisitsPerCell },
+      need: {
+        additionalMinutes: needMinutes,
+        passes, passMinutes,
+        text: passes ? `${dir.label} ${passes}회(편도 약 ${passMinutes}분)` : '이 조건은 목표를 채웠어요',
+      },
+      score: c.score,
+      rawScore: c.rawScore != null ? c.rawScore : c.score,
+      relevance: c.relevance != null ? c.relevance : 1,
+      relevanceReason: c.relevanceReason || null,
+      breakdown: c.breakdown,
+      availableWeight: c.availableWeight,
+      priority: priority.id,
+      priorityLabel: priority.label,
+      confidence,
+      expects: zone.expects || [],
+      safetyFirst: !!zone.safetyFirst,
+      classificationBasis: zone.basis || [],
+      nameBasis: zone.nameBasis,
+      evidence: zone.evidence || seg.evidence,
+      dataSources: [
+        seg.source && seg.source.type === 'hdmap' ? 'HD Map 도로 구간' : null,
+        stat ? `이 구간 GPS 기록 ${stat.recordCount.toLocaleString('en-US')}건` : '이 구간 GPS 기록 없음',
+        zone.override ? '사용자 보정' : null,
+      ].filter(Boolean),
+      reason: segmentReason({ seg, zone, state, cond, dir, c, days }),
+      edgeCaseDisclaimer: EDGE_CASE_DISCLAIMER,
+      safetyNote: zone.safetyFirst
+        ? '어린이보호구역·학교 주변은 데이터 수집보다 안전과 법규 준수가 먼저입니다. 제한속도를 지키고, 정문 앞 정차나 반복 배회 없이 정상 통과 주행으로만 수집하세요.'
+        : null,
+    };
+  }
+
+  function segmentConfidence(c) {
+    const reasons = [];
+    const stat = c.stat;
+    if (!stat || !stat.recordCount) reasons.push({ severity: 'major', text: '이 구간 주행 기록이 아직 없어 현재 수집량을 비교할 수 없음' });
+    else if (stat.recordCount < 50) reasons.push({ severity: 'minor', text: `이 구간 기록이 ${stat.recordCount}건으로 적음` });
+    if (!c.dir.confident) reasons.push({ severity: 'minor', text: '방향을 확정할 만큼 표본이 많지 않아 양방향으로 봄' });
+    if (c.zone.semanticType === 'unclassified') reasons.push({ severity: 'major', text: '지도 POI·도로 등급이 없어 구간 성격을 확인하지 못함' });
+    else if ((c.zone.evidence || {}).id === 'low') reasons.push({ severity: 'minor', text: '장소 근거가 약함(지도 정보 제한적)' });
+    if (!c.cond.lightCondition) reasons.push({ severity: 'minor', text: '조도 조건을 계산하지 못함' });
+    const majors = reasons.filter(r => r.severity === 'major').length;
+    const level = majors ? 'low' : (reasons.length ? 'medium' : 'high');
+    if (!reasons.length) reasons.push({ severity: 'ok', text: '지도 구간·주행 기록·방향 표본이 모두 있음' });
+    return { level, label: CONFIDENCE_LEVELS[level].label, rank: CONFIDENCE_LEVELS[level].rank, reasons };
+  }
+
+  function segmentReason({ seg, zone, state, cond, dir, c, days }) {
+    const worst = c.breakdown.filter(b => !b.excluded).sort((a, b) => b.contribution - a.contribution)[0];
+    const parts = [];
+    parts.push(`${seg.label}(${zone.semanticLabel})의 ${TC.WEEKDAY_TYPE_LABELS[cond.weekdayType]} ${TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod]}${cond.lightCondition ? ` · ${TC.LIGHT_CONDITION_LABELS[cond.lightCondition]}` : ''} 수집은 ${state.minutes}분입니다.`);
+    if (dir.confident) parts.push(`${dir.reason}`);
+    if (days != null) parts.push(`마지막 수집은 ${days}일 전입니다.`);
+    if (c.relevanceReason) parts.push(c.relevanceReason);
+    if (worst) parts.push(`점수를 가장 많이 올린 항목은 ${worst.label}(${worst.value}점 — ${worst.current})입니다.`);
+    return parts.join(' ');
+  }
+
   // ── 정렬 · 필터 · 상태(숨김/제외/완료) ─────────────────
   const idCompare = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const SORTS = {
@@ -1689,6 +2068,12 @@
     PLAN_DEFAULTS,
     buildSubZoneRecommendations,
     SUBZONE_TARGET_DEFAULTS,
+    buildSegmentRecommendations,
+    validateSegmentSettings,
+    segmentSettings,
+    SEGMENT_SCORE_KEYS,
+    SEGMENT_SCORE_LABELS,
+    SEGMENT_DEFAULTS,
     sortRecommendations,
     filterRecommendations,
     applyRecommendationStates,

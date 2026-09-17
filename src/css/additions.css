@@ -539,3 +539,15 @@
 .subzone-safety{margin:0;}
 .subzone-foot{display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px;color:var(--text-faint);}
 .subzone-warn{color:var(--amber);}
+
+/* ── 자동 분석 추천 ───────────────────────────────────── */
+.auto-head{align-items:center;}
+.auto-meta{font-size:10.5px;color:var(--text-faint);}
+.auto-levels{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center;}
+.auto-level{font-size:10.5px;border:1px solid var(--line);border-radius:5px;padding:2px 7px;color:var(--text-faint);}
+.auto-level.on{color:var(--teal);border-color:var(--teal-dim);}
+.auto-note{flex:1 1 100%;font-size:10.5px;color:var(--amber);line-height:1.5;}
+.auto-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:10.5px;color:var(--text-dim);margin:-4px 0 10px;}
+.auto-legend-item{display:inline-flex;align-items:center;gap:4px;}
+.auto-legend-item i{width:14px;height:4px;border-radius:2px;display:inline-block;}
+.auto-card .rec-detail{margin-top:8px;}
