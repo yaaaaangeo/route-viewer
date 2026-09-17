@@ -223,7 +223,9 @@ async function renderStatsView(){
   // '이슈 없음'을 보고 있으면 회색으로 그릴 이슈 몫이 없으니 그 계산은 건너뛴다.
   const bundle=await RouteDB.getStatsBundle(filter,{
     withIssueShare:currentIssueFilter()!=='clean',
-    withIssueOverview:true,
+    // 이슈 현황 표는 "전체"를 보고 있을 때만 쓸모가 있다 — 이슈 없음/이슈만을 고른 화면에서는
+    // 그 표가 지금 보고 있는 숫자와 어긋나 보여서 아예 빼고, 계산도 하지 않는다.
+    withIssueOverview:currentIssueFilter()==='all',
   });
   if(token!==statsRenderToken) return;
   const overview={points:bundle.points,days:bundle.days,zones:bundle.zones,vehicles:bundle.vehicles};
@@ -370,7 +372,8 @@ function conditionMatrixCardHTML(summaries,filter,rowDim,colDim,signature){
 //  "이슈 데이터"는 이슈 파일에서 온 기록이고, 한 기록이 정상 파일에서도 왔다면
 //  '이슈 없음'과 '이슈 데이터' 양쪽에 모두 들어간다 — 합이 전체보다 클 수 있다.
 // ══════════════════════════════════════════════════════════
-// ov: getStatsBundle 이 같은 스캔에서 만들어 준 이슈 현황(따로 조회하지 않는다)
+// ov: getStatsBundle 이 같은 스캔에서 만들어 준 이슈 현황(따로 조회하지 않는다).
+// "전체 데이터"를 보고 있을 때만 그린다(ov 가 null 이면 표를 비운다).
 function renderIssueOverview(ov){
   const box=document.getElementById('stats-issue-overview');
   if(!box) return;
@@ -397,8 +400,8 @@ function renderIssueOverview(ov){
           </tbody>
         </table>
       </div>
-      <div class="cond-note">${escapeHtml(issueFilterBasis())} · 지금 보고 있는 분포는 <b>${escapeHtml(issueFilterLabel())}</b> 기준이에요.
-        아래 막대의 <span class="dc-issue-swatch" style="vertical-align:middle;"></span> 회색 부분이 이슈 데이터 몫이에요(누적 지도의 회색 칸과 같은 뜻).
+      <div class="cond-note">아래 막대의 <span class="dc-issue-swatch" style="vertical-align:middle;"></span> 회색 부분이 이슈 데이터 몫이에요(누적 지도의 회색 점과 같은 뜻).
+        위 <b>데이터 상태</b> 버튼으로 '이슈 없음'·'이슈만'을 고르면 아래 분포가 그 기준으로 다시 계산돼요(그때는 이 표를 숨깁니다).
         한 기록이 이슈 파일과 정상 파일 양쪽에서 왔을 수 있어서 '이슈 없음'과 '이슈 데이터'의 합은 전체보다 클 수 있어요.${
         ov.unlinkedRecords?` 출처 기록이 없는 예전 데이터 ${fmtNum(ov.unlinkedRecords)}개는 어떤 이슈에도 묶이지 않고 '이슈 없는 데이터'에 남아요.`:''}
         ${ov.conflictCount?`동기화 중 이슈가 겹쳐 최신 값으로 정리된 파일이 ${fmtNum(ov.conflictCount)}개 있어요([데이터 관리] 탭에서 확인).`:''}</div>

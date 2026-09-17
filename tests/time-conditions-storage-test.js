@@ -503,6 +503,22 @@ async function main() {
       && !!ev0 && ev0.min === expectMinutes(TC.classificationConfig({}), 'evening_peak') && /구역별 교통 시간대/.test(statsBefore) && /파일 원본 시간대/.test(statsBefore),
       ev0 && `퇴근 피크 ${ev0.min}분 · ${ev0.n}개`);
 
+    // 이슈 현황 표는 "전체 데이터"를 보고 있을 때만 — 이슈 없음/이슈만 화면에서는 지금 보는 숫자와
+    // 어긋나 보여서 아예 뺀다(계산도 하지 않는다)
+    check('통계: 이슈 현황 표는 데이터 상태가 "전체"일 때만 보인다',
+      /이슈 현황/.test(doc.getElementById('stats-issue-overview').innerHTML));
+    for (const f of ['clean', 'issue_all']) {
+      run(`setIssueFilter('${f}')`);
+      await run('renderStatsView()');
+      check(`   '${f}' 을 고르면 이슈 현황 표를 숨긴다`,
+        doc.getElementById('stats-issue-overview').innerHTML === '',
+        doc.getElementById('stats-issue-overview').innerHTML.slice(0, 40) || '(비어 있음)');
+    }
+    run("setIssueFilter('all')");
+    await run('renderStatsView()');
+    check('   다시 "전체"로 돌아오면 표가 돌아온다',
+      /이슈 현황/.test(doc.getElementById('stats-issue-overview').innerHTML));
+
     await run('renderSettingsView()');
     const rowsHtml = doc.getElementById('settings-traffic-periods').innerHTML;
     check('설정 탭: 8개 교통 시간대의 시작·종료 시각 입력(HH:mm) 표시 · 상태 "현재 기준"',
