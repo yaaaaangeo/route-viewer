@@ -24,6 +24,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Database } = require('node-sqlite3-wasm');
 const CoverageGrid = require('../src/js/coverage-grid.js');
+const SubZones = require('../src/js/subzones.js');
 const CollectionStats = require('../src/js/collection-stats.js');
 const TimeConditions = require('../src/js/time-conditions.js');
 const ConditionStats = require('../src/js/condition-stats.js');
@@ -247,6 +248,19 @@ class RouteDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_rs_import ON record_sources(import_id);
+
+      -- 세부 수집 구역(2단계) — 상위 구역 안의 생활권·장소 유형. 사용자가 직접 등록하거나
+      -- 지도 데이터에서 찾은 것을 담는다(json 한 덩어리로 두고, 화면·집계가 같은 모양으로 읽는다).
+      CREATE TABLE IF NOT EXISTS sub_zones (
+        id          TEXT PRIMARY KEY,
+        parent_zone TEXT NOT NULL DEFAULT '',
+        name        TEXT NOT NULL DEFAULT '',
+        type        TEXT NOT NULL DEFAULT 'manual_custom_zone',
+        active      INTEGER NOT NULL DEFAULT 1,
+        data_json   TEXT NOT NULL DEFAULT '{}'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sub_zones_parent ON sub_zones(parent_zone, active);
     `);
 
     // 예전 버전 DB(imports 테이블에 새 컬럼이 없는 경우) 업그레이드 대비.
@@ -865,6 +879,95 @@ class RouteDatabase {
       cells: this.getDensityCells(filter, cell),
       bounds: this.getBounds(filter),
     };
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  세부 수집 구역 (2단계) — 등록·수정·비활성화와 구역별 집계
+  // ══════════════════════════════════════════════════════
+  listSubZones(options = {}) {
+    const rows = this.db.all(
+      `SELECT data_json AS json FROM sub_zones ${options.includeInactive ? '' : 'WHERE active = 1'}
+        ORDER BY parent_zone, name`);
+    return rows.map(r => { try { return JSON.parse(r.json); } catch (_) { return null; } }).filter(Boolean);
+  }
+
+  getSubZone(id) {
+    const row = this.db.get('SELECT data_json AS json FROM sub_zones WHERE id = ?', [id]);
+    if (!row) return null;
+    try { return JSON.parse(row.json); } catch (_) { return null; }
+  }
+
+  // 잘못된 입력(이름 없음·경계 3점 미만 등)이면 이유를 담아 던진다 — 저장하지 않는다
+  saveSubZone(input) {
+    const prev = input && input.id ? this.getSubZone(input.id) : null;
+    const v = SubZones.normalizeSubZone(input, prev);
+    if (!v.ok) {
+      const err = new Error(v.errors.join('\n'));
+      err.errors = v.errors;
+      throw err;
+    }
+    const z = v.value;
+    this.db.run(
+      `INSERT INTO sub_zones(id, parent_zone, name, type, active, data_json) VALUES(?,?,?,?,?,?)
+       ON CONFLICT(id) DO UPDATE SET parent_zone = excluded.parent_zone, name = excluded.name,
+         type = excluded.type, active = excluded.active, data_json = excluded.data_json`,
+      [z.id, z.parentZone, z.name, z.type, z.active ? 1 : 0, JSON.stringify(z)]
+    );
+    return z;
+  }
+
+  setSubZoneActive(id, active) {
+    const z = this.getSubZone(id);
+    if (!z) throw new Error('그 세부 구역을 찾지 못했어요.');
+    const next = { ...z, active: !!active, updatedAt: new Date().toISOString() };
+    this.db.run('UPDATE sub_zones SET active = ?, data_json = ? WHERE id = ?', [next.active ? 1 : 0, JSON.stringify(next), id]);
+    return next;
+  }
+
+  deleteSubZone(id) {
+    const before = this.getSubZone(id);
+    this.db.run('DELETE FROM sub_zones WHERE id = ?', [id]);
+    return { id, removed: !!before };
+  }
+
+  // 그 상위 구역에서 쓸 수 있는 HD Map 도로(이름이 실제로 적힌 데이터만) — 없으면 빈 배열
+  _hdmapLines(parentZone) {
+    if (!this._hdmapCache) this._hdmapCache = {};
+    const keys = SubZones.hdmapKeysFor(parentZone);
+    const lines = [];
+    keys.forEach(key => {
+      if (!(key in this._hdmapCache)) {
+        try {
+          this._hdmapCache[key] = require(`../src/data/hdmap_${key}_roads.json`).lines || [];
+        } catch (err) {
+          console.warn('[route-viewer] HD map 데이터를 읽지 못했어요:', key, err.message);
+          this._hdmapCache[key] = [];
+        }
+      }
+      (this._hdmapCache[key] || []).forEach(l => lines.push(l));
+    });
+    return lines;
+  }
+
+  // 세부 구역별 수집 현황 — 기록은 구역 bbox 로 먼저 줄이고(위경도 색인), 경계 안 판정과
+  // 조건·도로·방향 집계는 subzones.js 가 한다(IndexedDB 와 같은 함수 = 같은 결과).
+  getSubZoneStats(subZones, options = {}) {
+    const list = (subZones && subZones.length ? subZones : this.listSubZones());
+    const classification = this._classificationConfig();
+    const { clause, params } = this._filterSql(options.filter || {});
+    return list.map(sz => {
+      const bounds = SubZones.polygonBounds(sz.polygon);
+      if (!bounds) return { id: sz.id, recordCount: 0, conditions: [], roads: [], match: { segments: 0, note: '경계가 없어 집계할 수 없어요.' } };
+      const rows = this.db.all(
+        `SELECT date, time, vehicle, weather, speed, latitude AS lat, longitude AS lng, issue_mask AS issueMask
+           FROM driving_records ${clause} ${clause ? 'AND' : 'WHERE'}
+                latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+          ORDER BY vehicle, timestamp, id`,
+        [...params, bounds.minLat, bounds.maxLat, bounds.minLng, bounds.maxLng]);
+      const roadSegments = options.withRoads === false ? []
+        : SubZones.roadSegmentsIn(sz.polygon, this._hdmapLines(sz.parentZone), { subZoneId: sz.id });
+      return SubZones.aggregateSubZone(sz, rows, { classification, roadSegments });
+    });
   }
 
   // 누적지도/통계 상단 요약

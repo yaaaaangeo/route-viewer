@@ -292,6 +292,12 @@ function registerIpc() {
   handle('db:getOverview', filter => openDatabase().getOverview(filter));
   handle('db:getDensityCells', (filter, cell) => openDatabase().getDensityCells(filter, cell));
   handle('db:getStatsBundle', (filter, options) => openDatabase().getStatsBundle(filter, options));
+  handle('db:listSubZones', options => openDatabase().listSubZones(options));
+  handle('db:getSubZone', id => openDatabase().getSubZone(id));
+  handle('db:saveSubZone', subZone => openDatabase().saveSubZone(subZone));
+  handle('db:setSubZoneActive', (id, active) => openDatabase().setSubZoneActive(id, active));
+  handle('db:deleteSubZone', id => openDatabase().deleteSubZone(id));
+  handle('db:getSubZoneStats', (subZones, options) => openDatabase().getSubZoneStats(subZones, options));
   handle('db:getAccumBundle', (filter, cell) => openDatabase().getAccumBundle(filter, cell));
   handle('db:getBounds', filter => openDatabase().getBounds(filter));
   handle('db:getVisitedCellKeys', box => openDatabase().getVisitedCellKeys(box));

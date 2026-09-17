@@ -28,6 +28,13 @@ contextBridge.exposeInMainWorld('routeAPI', {
   getDensityCells: (filter, cell) => call('db:getDensityCells', filter, cell),
   // 화면 한 번에 필요한 집계 묶음 — 브라우저 모드와 같은 모양으로 답한다
   getStatsBundle: (filter, options) => call('db:getStatsBundle', filter, options),
+  // 세부 수집 구역(2단계) — 등록·수정·비활성화와 구역별 집계
+  listSubZones: options => call('db:listSubZones', options),
+  getSubZone: id => call('db:getSubZone', id),
+  saveSubZone: subZone => call('db:saveSubZone', subZone),
+  setSubZoneActive: (id, active) => call('db:setSubZoneActive', id, active),
+  deleteSubZone: id => call('db:deleteSubZone', id),
+  getSubZoneStats: (subZones, options) => call('db:getSubZoneStats', subZones, options),
   getAccumBundle: (filter, cell) => call('db:getAccumBundle', filter, cell),
   getBounds: filter => call('db:getBounds', filter),
   getVisitedCellKeys: box => call('db:getVisitedCellKeys', box),
