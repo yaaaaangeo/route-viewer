@@ -100,6 +100,8 @@ async function renderRecommendView(){
   });
   recStates=inputs.states||{};
   recCache={key,result,appSettings:inputs.settings,zones:inputs.zones};
+  // 세부 구역(2단계) 집계·추천은 따로 계산한다 — 구역 경계 안 기록을 훑어야 해서 시간이 더 든다
+  if (typeof refreshSubZones === 'function') refreshSubZones({ quiet: true });
   renderRecommendationResult();
   return result;
 }
@@ -125,6 +127,7 @@ function renderRecommendationResult(){
   const statusEl=document.getElementById('rec-status');
   if(statusEl){ statusEl.style.display='none'; statusEl.textContent=''; }
   renderRecommendationSummary(res);
+  if (typeof renderSubZoneSection === 'function') renderSubZoneSection();
   renderDrivePlan();
   renderRecommendationFilters(res);
   const view=currentRecommendationView();

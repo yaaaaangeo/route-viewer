@@ -26,11 +26,11 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'));
+    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'), require('./subzones.js'));
   } else {
-    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter);
+    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter, root.SubZones);
   }
-}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF) {
+}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF, SZ) {
   'use strict';
 
   const RECOMMENDATION_VERSION = 1;
@@ -1256,6 +1256,295 @@
     };
   }
 
+  // ══════════════════════════════════════════════════════
+  //  9) 세부 구역 추천 — "강남"이 아니라 "테헤란로 업무지구 / 테헤란로 구간"으로
+  //
+  //  입력은 subzones.js 가 낸 구역별 집계(getSubZoneStats)다. 여기서는
+  //    · 그 구역의 장소 유형이 볼 만한 시간대(후보)와
+  //    · 실제로 부족한 조건(수집 시간·방문·마지막 방문)을 맞춰 보고
+  //    · 부족한 쪽만 추천으로 올린다(시간 규칙만으로는 추천하지 않는다).
+  //
+  //  도로·구간·방향은 지도 데이터에 실제로 있는 것만 쓴다. 이름을 못 찾으면 '확인 불가'로 둔다.
+  // ══════════════════════════════════════════════════════
+  const SUBZONE_TARGET_DEFAULTS = Object.freeze({
+    minutesPerCondition: 120,   // 세부 구역 한 칸(요일×교통 시간대×조도)의 기본 목표 수집 시간
+    visitsPerCondition: 3,
+    staleDays: 14,
+  });
+
+  function subZoneConditionKey(c) {
+    return [c.weekdayType, c.trafficPeriod, c.lightCondition || 'any'].join('|');
+  }
+
+  // 조건 칸을 날씨 구분 없이 합친다(날씨는 따로 "부족한 날씨"로 본다)
+  function foldConditions(conditions) {
+    const map = new Map();
+    (conditions || []).forEach(c => {
+      const key = subZoneConditionKey(c);
+      let acc = map.get(key);
+      if (!acc) {
+        acc = {
+          weekdayType: c.weekdayType, trafficPeriod: c.trafficPeriod, lightCondition: c.lightCondition,
+          collectionSec: 0, collectionMinutes: 0, recordCount: 0, visitCount: 0, uniqueDays: 0,
+          lastVisitedAt: null, weather: {},
+        };
+        map.set(key, acc);
+      }
+      acc.collectionSec += c.collectionSec;
+      acc.recordCount += c.recordCount;
+      acc.visitCount += c.visitCount;
+      acc.uniqueDays = Math.max(acc.uniqueDays, c.uniqueDays || 0);
+      if (c.weather) acc.weather[c.weather] = (acc.weather[c.weather] || 0) + Math.round(c.collectionSec / 60);
+      if (c.lastVisitedAt && (!acc.lastVisitedAt || c.lastVisitedAt > acc.lastVisitedAt)) acc.lastVisitedAt = c.lastVisitedAt;
+    });
+    map.forEach(acc => { acc.collectionMinutes = Math.round(acc.collectionSec / 60); });
+    return map;
+  }
+
+  // 그 구역에서 지금 볼 만한 조건 후보 — 장소 유형의 후보 시간대 × 요일 × (그 시간에 실제로 생기는 조도)
+  function subZoneCandidates(subZone, features, today) {
+    const periods = SZ.candidatePeriods(subZone);
+    const type = SZ.PLACE_TYPES[subZone.type] || {};
+    const weekdayTypes = type.weekdayTypes && type.weekdayTypes.length ? type.weekdayTypes : TC.WEEKDAY_TYPE_IDS;
+    const cfg = features.classification;
+    const out = [];
+    weekdayTypes.forEach(weekdayType => {
+      const referenceDate = nextDateOfType(today, weekdayType);
+      const location = subZone.center && Number.isFinite(subZone.center.lat) ? subZone.center : null;
+      const light = location ? lightIntervals(referenceDate, location, cfg) : null;
+      periods.forEach(periodId => {
+        const period = cfg.trafficPeriods.find(p => p.id === periodId);
+        if (!period) return;
+        const pIntervals = periodIntervals(period);
+        const lights = light ? TC.LIGHT_CONDITION_IDS.map(id => {
+          const segments = intersect(pIntervals, light.intervals[id] || []);
+          return { id, minutes: lengthOf(segments), segments };
+        }).filter(l => l.minutes >= 15) : [];
+        if (!lights.length) {
+          out.push({ subZone, weekdayType, trafficPeriod: periodId, lightCondition: null, referenceDate, period, window: null, sun: light && light.sun });
+          return;
+        }
+        lights.forEach(l => out.push({
+          subZone, weekdayType, trafficPeriod: periodId, lightCondition: l.id, referenceDate, period,
+          window: { segments: l.segments, overlapMinutes: l.minutes, periodMinutes: lengthOf(pIntervals), sun: light.sun },
+          sun: light.sun,
+        }));
+      });
+    });
+    return out;
+  }
+
+  // 부족도 — 0(충분) ~ 100(전혀 없음). 세부 구역은 칸이 작아서 시간·방문·최신성만 본다.
+  function subZoneDeficit(candidate, folded, settings, today) {
+    const key = subZoneConditionKey(candidate);
+    const row = folded.get(key) || { collectionMinutes: 0, visitCount: 0, uniqueDays: 0, lastVisitedAt: null, weather: {} };
+    const targetMinutes = settings.minutesPerCondition;
+    const targetVisits = settings.visitsPerCondition;
+    const minuteScore = clamp(100 * (1 - row.collectionMinutes / Math.max(1, targetMinutes)), 0, 100);
+    const visitScore = clamp(100 * (1 - row.visitCount / Math.max(1, targetVisits)), 0, 100);
+    const lastDate = row.lastVisitedAt ? String(row.lastVisitedAt).slice(0, 10) : null;
+    const daysSince = lastDate ? Math.max(0, daysBetween(lastDate, today)) : null;
+    const staleScore = daysSince == null ? 100 : clamp(100 * (daysSince / Math.max(1, settings.staleDays)), 0, 100);
+    const score = round1(minuteScore * 0.5 + visitScore * 0.3 + staleScore * 0.2);
+    return {
+      row, score, daysSince, targetMinutes, targetVisits,
+      parts: [
+        { key: 'minutes', label: '수집 시간 부족', value: round1(minuteScore), current: `${row.collectionMinutes}분 / 목표 ${targetMinutes}분` },
+        { key: 'visits', label: '방문 횟수 부족', value: round1(visitScore), current: `${row.visitCount}회 / 목표 ${targetVisits}회` },
+        { key: 'staleness', label: '오래됨', value: round1(staleScore), current: daysSince == null ? '이 조건 기록 없음' : `마지막 수집 ${daysSince}일 전` },
+      ],
+      needMinutes: Math.max(0, targetMinutes - row.collectionMinutes),
+      needVisits: Math.max(0, targetVisits - row.visitCount),
+    };
+  }
+
+  // 그 조건에서 실제로 부족한 도로 구간과 방향 — 지도에 있는 도로만, 방향은 믿을 만할 때만
+  function pickRoads(stats, candidate, limit) {
+    const key = subZoneConditionKey(candidate);
+    const roads = (stats.roads || []).slice(0, Math.max(1, limit || 3));
+    return roads.map(r => {
+      const cond = (r.conditions || []).find(c => [c.weekdayType, c.trafficPeriod, c.lightCondition || 'any'].join('|') === key)
+        || { recordCount: 0, forward: 0, backward: 0 };
+      const forwardLabel = SZ.compassOf(r.bearing);
+      const backwardLabel = SZ.compassOf((r.bearing + 180) % 360);
+      let recommendedDirection = { id: 'both', label: '양방향', reason: r.direction.reason };
+      if (r.direction.ok) {
+        // 방향별로 모인 양이 다르면 적게 모인 쪽을 권한다
+        if (cond.forward + cond.backward > 0 && cond.forward !== cond.backward) {
+          const less = cond.forward < cond.backward ? 'forward' : 'backward';
+          recommendedDirection = {
+            id: less,
+            label: `${less === 'forward' ? forwardLabel : backwardLabel}쪽 방향`,
+            reason: `이 조건에서 ${forwardLabel}쪽 ${cond.forward}건 · ${backwardLabel}쪽 ${cond.backward}건 — 적은 쪽을 권합니다.`,
+          };
+        } else if (r.forward !== r.backward) {
+          const less = r.forward < r.backward ? 'forward' : 'backward';
+          recommendedDirection = {
+            id: less,
+            label: `${less === 'forward' ? forwardLabel : backwardLabel}쪽 방향`,
+            reason: `이 구간 전체에서 ${forwardLabel}쪽 ${r.forward}건 · ${backwardLabel}쪽 ${r.backward}건 — 적은 쪽을 권합니다.`,
+          };
+        }
+      }
+      return {
+        roadId: r.roadId, name: r.name, named: r.named,
+        lengthM: r.lengthM, lengthKm: r.lengthM != null ? round1(r.lengthM / 1000) : null,
+        start: r.start, end: r.end,
+        headingLabel: forwardLabel ? `${forwardLabel}쪽` : null,
+        recordCount: r.recordCount,
+        conditionRecordCount: cond.recordCount,
+        forward: r.forward, backward: r.backward,
+        directionConfidence: r.direction,
+        recommendedDirection,
+        lastVisitedAt: r.lastVisitedAt,
+      };
+    });
+  }
+
+  // 권장 수집량 — 부족한 분을 회당 주행 시간으로 나눠서 "몇 회"로 바꾼다(회당 최대 2회씩 단계로)
+  function subZoneNeed(deficit, roads, candidate) {
+    const perPass = roads.length && roads[0].lengthKm
+      ? Math.max(10, Math.round((roads[0].lengthKm / 20) * 60))   // 혼잡 구간 평균 20km/h 가정
+      : 30;
+    const passes = deficit.needMinutes > 0 ? Math.max(1, Math.ceil(deficit.needMinutes / perPass)) : 0;
+    const thisStage = Math.min(passes, 3);
+    const direction = roads.length ? roads[0].recommendedDirection : null;
+    return {
+      additionalMinutes: deficit.needMinutes,
+      additionalVisits: Math.max(deficit.needVisits, passes ? 1 : 0),
+      perPassMinutes: perPass,
+      passesTotal: passes,
+      passesThisStage: thisStage,
+      estimatedMinutesThisStage: thisStage * perPass,
+      directionPlan: direction && direction.id !== 'both'
+        ? `${direction.label} ${Math.max(1, Math.ceil(thisStage * 0.67))}회 · 반대 방향 ${Math.max(1, thisStage - Math.ceil(thisStage * 0.67))}회`
+        : `양방향 각 ${Math.max(1, Math.ceil(thisStage / 2))}회`,
+    };
+  }
+
+  function subZoneTimeWindow(candidate) {
+    if (!candidate.window || !candidate.window.segments.length) {
+      return {
+        start: candidate.period.start, end: candidate.period.end,
+        text: `${candidate.period.start}~${candidate.period.end}`,
+        note: '교통 시간대 구간 전체입니다(조도 조건 없음).',
+      };
+    }
+    const longest = candidate.window.segments.slice().sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))[0];
+    const r = roundSegment(longest);
+    return {
+      start: TC.formatClock(r[0]), end: TC.formatClock(r[1]),
+      text: `${TC.formatClock(r[0])}~${TC.formatClock(r[1])}`,
+      note: candidate.lightCondition === 'sunset' || candidate.lightCondition === 'sunrise'
+        ? '실제 일출·일몰 시각에 따라 ±30분 조정하세요.'
+        : null,
+    };
+  }
+
+  // input: { subZones, stats, settings, now, issueFilter, targets }
+  function buildSubZoneRecommendations(input) {
+    const o = input || {};
+    const settings = { ...SUBZONE_TARGET_DEFAULTS, ...(o.targets || {}) };
+    const cfg = TC.classificationConfig(o.settings || {});
+    const today = kstDate(o.now);
+    const features = { classification: cfg };
+    const statsById = new Map((o.stats || []).map(s => [s.id, s]));
+    const items = [];
+    const skipped = [];
+
+    (o.subZones || []).forEach(subZone => {
+      if (!subZone || subZone.active === false) return;
+      const stats = statsById.get(subZone.id);
+      if (!stats) { skipped.push({ subZone: subZone.name, reason: '집계 결과가 없어요.' }); return; }
+      const folded = foldConditions(stats.conditions);
+      const candidates = subZoneCandidates(subZone, features, today);
+      if (!candidates.length) {
+        skipped.push({ subZone: subZone.name, reason: '이 장소 유형에 정해 둔 후보 시간대가 없어요(설정에서 관심 시간대를 골라주세요).' });
+        return;
+      }
+      const evidence = SZ.evidenceLevel({
+        hdmap: (stats.roads || []).some(r => r.named),
+        osm: !!subZone.sourceIdentifiers && subZone.sourceType === 'osm',
+        gps: stats.recordCount > 0,
+        manual: subZone.sourceType === 'manual',
+      });
+      candidates.forEach(candidate => {
+        const deficit = subZoneDeficit(candidate, folded, settings, today);
+        const roads = pickRoads(stats, candidate, 3);
+        const need = subZoneNeed(deficit, roads, candidate);
+        const window = subZoneTimeWindow(candidate);
+        const priority = priorityOf(deficit.score);
+        const row = deficit.row;
+        const weatherGaps = Object.keys(row.weather || {});
+        items.push({
+          id: `${subZone.id}|${candidate.weekdayType}|${candidate.trafficPeriod}|${candidate.lightCondition || 'any'}`,
+          parentZone: subZone.parentZone,
+          subZoneId: subZone.id,
+          subZoneName: subZone.name,
+          placeType: subZone.type,
+          placeTypeLabel: SZ.placeTypeLabel(subZone.type),
+          condition: { weekdayType: candidate.weekdayType, trafficPeriod: candidate.trafficPeriod, lightCondition: candidate.lightCondition },
+          conditionLabel: [TC.WEEKDAY_TYPE_LABELS[candidate.weekdayType], TC.TRAFFIC_PERIOD_LABELS[candidate.trafficPeriod],
+            candidate.lightCondition ? TC.LIGHT_CONDITION_LABELS[candidate.lightCondition] : null].filter(Boolean).join(' · '),
+          referenceDate: candidate.referenceDate,
+          timeWindow: window,
+          sun: candidate.sun && !candidate.sun.polar
+            ? { sunrise: TC.formatClock(candidate.sun.sunriseMinutes), sunset: TC.formatClock(candidate.sun.sunsetMinutes) } : null,
+          roads,
+          roadNote: roads.length
+            ? (roads.every(r => r.named) ? null : '이름이 지도 데이터에 없는 도로가 있어 "이름 없는 도로"로 표시했습니다.')
+            : 'HD Map 도로 데이터가 없어 구간을 표시하지 못했어요(구역 단위로만 추천합니다).',
+          current: {
+            collectionMinutes: row.collectionMinutes, visitCount: row.visitCount, uniqueDays: row.uniqueDays,
+            lastVisitedAt: row.lastVisitedAt, daysSinceLastVisit: deficit.daysSince,
+            weatherMinutes: row.weather || {},
+            subZoneTotalMinutes: stats.collectionMinutes, subZoneVisits: stats.visitCount,
+          },
+          targets: { minutes: deficit.targetMinutes, visits: deficit.targetVisits },
+          need,
+          score: deficit.score,
+          breakdown: deficit.parts,
+          priority: priority.id,
+          priorityLabel: priority.label,
+          evidence,
+          expects: SZ.expectedSituations(subZone),
+          safetyNote: SZ.safetyNote(subZone),
+          typeNote: (SZ.PLACE_TYPES[subZone.type] || {}).note || null,
+          weatherSeen: weatherGaps,
+          issueRecordCount: stats.issueRecordCount || 0,
+          matchNote: stats.match ? stats.match.note : null,
+          dataSources: [
+            roads.some(r => r.named) ? 'HD Map 도로 구간' : null,
+            stats.recordCount ? `이 구역 GPS 기록 ${stats.recordCount.toLocaleString('en-US')}건` : null,
+            subZone.sourceType === 'manual' ? '사용자 직접 등록 구역' : null,
+            subZone.sourceType === 'osm' ? 'OpenStreetMap 조회 결과' : null,
+          ].filter(Boolean),
+          edgeCaseDisclaimer: EDGE_CASE_DISCLAIMER,
+        });
+      });
+    });
+
+    items.sort((a, b) => b.score - a.score
+      || b.need.additionalMinutes - a.need.additionalMinutes
+      || (a.id < b.id ? -1 : 1));
+    items.forEach((r, i) => { r.rank = i + 1; });
+    return {
+      version: RECOMMENDATION_VERSION,
+      today,
+      generatedAt: new Date(toMs(o.now)).toISOString(),
+      issueFilter: IF.normalizeFilter(o.issueFilter === undefined ? 'clean' : o.issueFilter),
+      targets: settings,
+      recommendations: items,
+      skipped,
+      limitations: [
+        '세부 구역은 등록된 구역만 봅니다 — 지도 전체를 자동으로 나누지 않습니다.',
+        '도로 이름과 구간은 HD Map 에 실제로 있는 것만 씁니다(없으면 "이름 없는 도로" 또는 구간 생략).',
+        '방향은 25m 안의 도로에 맞춘 기록으로만 나눕니다. 표본이 적으면 방향을 단정하지 않고 양방향으로 봅니다.',
+        '예상 상황은 조건에서 나온 가능성이며 실제 발생을 보장하지 않습니다.',
+      ],
+    };
+  }
+
   // ── 정렬 · 필터 · 상태(숨김/제외/완료) ─────────────────
   const idCompare = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const SORTS = {
@@ -1398,6 +1687,8 @@
     buildRecommendations,
     buildDrivePlan,
     PLAN_DEFAULTS,
+    buildSubZoneRecommendations,
+    SUBZONE_TARGET_DEFAULTS,
     sortRecommendations,
     filterRecommendations,
     applyRecommendationStates,

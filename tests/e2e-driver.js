@@ -1007,6 +1007,33 @@ async function main(win, dbFilePath) {
     `${earlier.first}(${earlier.cond}) · +${earlier.diff}분 · ${earlier.added.join(', ')}`);
   await shot(win, '18-drive-plan');
 
+  // 세부 수집 구역 — 지도에서 경계를 찍어 등록하면 "강남"이 아니라 "테헤란로 업무지구 · 도로 구간"으로 추천
+  await js(win, `(async()=>{
+    startSubZoneCreate();
+    subZoneForm.name='테헤란로 업무지구';
+    subZoneForm.parentZone='강남';
+    subZoneForm.type='office_district';
+    subZoneDraft=[[37.4955,127.0250],[37.5015,127.0250],[37.5100,127.0640],[37.5040,127.0640]];
+    await saveSubZoneForm();
+    return true;
+  })()`);
+  await sleep(4000);
+  const subZoneText = await js(win, `document.getElementById('rec-subzones').innerText.replace(/\s+/g,' ')`);
+  const topRec = await js(win, `(()=>{ const r=(subZoneRecResult&&subZoneRecResult.recommendations||[])[0];
+    return r?{zone:r.parentZone,sub:r.subZoneName,road:(r.roads[0]||{}).name,cond:r.conditionLabel,
+      time:r.timeWindow.text,dir:(r.roads[0]||{}).recommendedDirection.label,evidence:r.evidence.label}:null; })()`);
+  check('세부 구역을 등록하면 "상위 구역 → 세부 구역 → 도로 구간"으로 추천한다',
+    !!topRec && topRec.zone === '강남' && topRec.sub === '테헤란로 업무지구' && !!topRec.road
+    && /\d{2}:\d{2}~\d{2}:\d{2}/.test(topRec.time),
+    topRec ? `${topRec.zone} → ${topRec.sub} → ${topRec.road} · ${topRec.cond} ${topRec.time} · ${topRec.dir} · 근거 ${topRec.evidence}` : '(추천 없음)');
+  check('   추천 카드에 권장 구간·방향·시간·현재 데이터·예상 상황·근거가 함께 나온다',
+    ['추천 구간', '권장 방향', '권장 조건', '권장 시간', '권장 수집', '현재 데이터', '장소 근거']
+      .every(k => subZoneText.includes(k)), subZoneText.slice(0, 120));
+  check('   추천 지도에 세부 구역과 추천 구간이 그려진다',
+    (await js(win, `!!subZoneMap && subZoneRoadLayer.getLayers().length > 0 && subZoneLayer.getLayers().length > 0`)),
+    `구간 레이어 ${await js(win, `subZoneRoadLayer.getLayers().length`)}개`);
+  await shot(win, '19-subzone-recommend');
+
   section('Test 4 — 앱 재실행 (창을 다시 로드해도 남아있는지)');
   const beforeReload = await js(win, `(async()=>await RouteDB.stats())()`);
   await new Promise(resolve => {
