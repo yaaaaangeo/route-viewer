@@ -247,8 +247,8 @@ async function main() {
       earlier.diff === 60 && earlier.first.from === '08:00' && earlier.new.length > 0
       && /지금\(09:00~18:00\)보다/.test(planHtml()),
       `+${earlier.diff}분 · 08:00 ${earlier.first.zone}(${earlier.first.conditionLabel}) · 새 조건 ${earlier.new.join(', ')}`);
-    ui.run("applyPlanPreset('default')");
-    check('   프리셋으로 기본 운행 시간(09:00~18:00)으로 되돌린다',
+    ui.run("onPlanInput('startTime','09:00')");
+    check('   운행 시간을 되돌리면 계획도 그 시간으로 다시 만들어진다',
       ui.run('recPlanResult.window.start') === '09:00' && ui.run('recPlanResult.window.end') === '18:00');
 
     const firstId = ui.run('recCache.result.recommendations[0].id');

@@ -541,25 +541,6 @@ function togglePlanZone(zone,on){
   renderDrivePlan();
 }
 
-// 프리셋 — 사용자가 가장 자주 묻는 "한 시간 일찍/늦게"를 한 번에
-function applyPlanPreset(kind){
-  const d=Recommendation.PLAN_DEFAULTS;
-  if(kind==='default'){ recPlanForm.startTime=d.startTime; recPlanForm.endTime=d.endTime; }
-  else if(kind==='earlier'){ recPlanForm.startTime=shiftClock(recPlanForm.baselineStartTime||d.startTime,-60); recPlanForm.endTime=recPlanForm.baselineEndTime||d.endTime; }
-  else if(kind==='later'){ recPlanForm.startTime=recPlanForm.baselineStartTime||d.startTime; recPlanForm.endTime=shiftClock(recPlanForm.baselineEndTime||d.endTime,60); }
-  else if(kind==='wider'){ recPlanForm.startTime=shiftClock(recPlanForm.baselineStartTime||d.startTime,-60); recPlanForm.endTime=shiftClock(recPlanForm.baselineEndTime||d.endTime,60); }
-  savePlanForm();
-  renderDrivePlan();
-}
-
-function shiftClock(hhmm,deltaMinutes){
-  const m=/^(\d{1,2}):(\d{2})$/.exec(String(hhmm||''));
-  if(!m) return hhmm;
-  const total=Math.max(0,Math.min(1440,Number(m[1])*60+Number(m[2])+deltaMinutes));
-  const p=n=>String(n).padStart(2,'0');
-  return `${p(Math.floor(total/60))}:${p(total%60)}`;
-}
-
 function renderDrivePlan(){
   const el=document.getElementById('rec-plan');
   if(!el) return;
@@ -591,12 +572,6 @@ function renderDrivePlan(){
         <input type="time" value="${recEsc(recPlanForm.endTime)}" onchange="onPlanInput('endTime',this.value)"/></label>
       <label class="rec-filter"><span>차량</span>
         <input type="number" min="1" max="8" value="${recPlanForm.vehicleCount}" onchange="onPlanInput('vehicleCount',this.value)"/></label>
-      <span class="plan-presets">
-        <button class="btn ghost" type="button" onclick="applyPlanPreset('earlier')">1시간 일찍 시작</button>
-        <button class="btn ghost" type="button" onclick="applyPlanPreset('later')">1시간 늦게 종료</button>
-        <button class="btn ghost" type="button" onclick="applyPlanPreset('wider')">앞뒤 1시간씩</button>
-        <button class="btn ghost" type="button" onclick="applyPlanPreset('default')">기본으로</button>
-      </span>
     </div>
     <div class="plan-form">
       <label class="rec-filter"><span>비교 기준(지금 운행)</span>
