@@ -33,24 +33,30 @@
 }(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF, SZ, SZA) {
   'use strict';
 
-  const RECOMMENDATION_VERSION = 1;
+  const RECOMMENDATION_VERSION = 2;
 
   // ── 점수 항목 ─────────────────────────────────────────
-  const SCORE_KEYS = Object.freeze(['timePeriod', 'coverage', 'lightCondition', 'weatherDiversity', 'staleness', 'vehicleImbalance']);
+  const SCORE_KEYS = Object.freeze(['timePeriod', 'coverage', 'lightCondition', 'weatherDiversity', 'maneuver', 'roadContext', 'staleness', 'vehicleImbalance']);
   const SCORE_LABELS = Object.freeze({
     timePeriod: '시간대 부족도', coverage: 'Coverage 부족도', lightCondition: '조도 조건 부족도',
-    weatherDiversity: '날씨 다양성 부족도', staleness: '최근 미방문 기간', vehicleImbalance: '차량 편중도',
+    weatherDiversity: '날씨 다양성 부족도', maneuver: '자차 행동 부족도', roadContext: '도로 Context 부족도',
+    staleness: '최근 미방문 기간', vehicleImbalance: '차량 편중도',
   });
   // LLM·외부로 넘기는 이름(scoreBreakdown)
   const SCORE_EXPORT_NAMES = Object.freeze({
     timePeriod: 'timePeriodDeficit', coverage: 'coverageDeficit', lightCondition: 'lightConditionDeficit',
-    weatherDiversity: 'weatherDiversityDeficit', staleness: 'staleness', vehicleImbalance: 'vehicleImbalance',
+    weatherDiversity: 'weatherDiversityDeficit', maneuver: 'maneuverDeficit', roadContext: 'roadContextDeficit', staleness: 'staleness', vehicleImbalance: 'vehicleImbalance',
   });
 
   // 부족도 = 100 × (1 − (수집 시간 달성률×0.5 + 방문 횟수 달성률×0.3 + 고유 수집일 달성률×0.2))
   // 기록 수(GPS 포인트 수)는 쓰지 않는다 — 하루 한 번 오래 모은 것을 다양하다고 보지 않기 위해
   // 방문 횟수와 고유 수집일을 함께 본다. 달성률은 각각 1(100%)에서 자른다.
   const DEFICIT_MIX = Object.freeze({ minutes: 0.5, visits: 0.3, days: 0.2 });
+  const MANEUVER_EVENT_MIX = Object.freeze({ events: 0.7, days: 0.3 });
+  const MANEUVER_EVENT_IDS = Object.freeze(['LEFT_TURN', 'RIGHT_TURN', 'U_TURN', 'MERGE', 'DIVERGE']);
+  const MANEUVER_DURATION_IDS = Object.freeze(['STRAIGHT']);
+  const DRIVING_STATE_IDS = Object.freeze(['MOVING', 'SLOW', 'STOPPED']);
+  const ROAD_CONTEXT_IDS = Object.freeze(['NORMAL_ROAD', 'INTERSECTION', 'MERGE_AREA', 'DIVERGE_AREA', 'HIGHWAY', 'RAMP', 'SCHOOL_ZONE']);
 
   const PRIORITY_BANDS = Object.freeze([
     { min: 80, id: 'very_high', label: '매우 높음' },
@@ -89,7 +95,7 @@
   // 아니라 첫 버전의 정책 기본값이라, 설정에서 운영 목표에 맞게 바꾸는 것을 전제로 한다(피크 3시간 구간 = 회당
   // 약 60분 × 4회 → 240분). 분이 0이면 "목표 없음"으로 보고 같은 구역·같은 요일 유형의 다른 시간대 중앙값과 비교한다.
   const DEFAULT_SETTINGS = Object.freeze({
-    weights: Object.freeze({ timePeriod: 30, coverage: 25, lightCondition: 15, weatherDiversity: 15, staleness: 10, vehicleImbalance: 5 }),
+    weights: Object.freeze({ timePeriod: 20, coverage: 15, lightCondition: 10, weatherDiversity: 10, maneuver: 15, roadContext: 15, staleness: 10, vehicleImbalance: 5 }),
     periodTargets: Object.freeze({
       late_night: Object.freeze({ minutes: 60, visits: 2 }),
       early_morning: Object.freeze({ minutes: 120, visits: 2 }),
@@ -101,6 +107,19 @@
       night: Object.freeze({ minutes: 120, visits: 3 }),
     }),
     zoneCoverageTargets: Object.freeze({ default: 80, zones: Object.freeze({}) }),
+    maneuverTargets: Object.freeze({
+      LEFT_TURN: Object.freeze({ events: 100, days: 5 }), RIGHT_TURN: Object.freeze({ events: 100, days: 5 }),
+      U_TURN: Object.freeze({ events: 20, days: 3 }), MERGE: Object.freeze({ events: 50, days: 4 }), DIVERGE: Object.freeze({ events: 50, days: 4 }),
+      STRAIGHT: Object.freeze({ minutes: 300, visits: 5, days: 5 }),
+    }),
+    drivingStateTargets: Object.freeze({
+      MOVING: Object.freeze({ minutes: 300, visits: 5, days: 5 }), SLOW: Object.freeze({ minutes: 120, visits: 4, days: 4 }), STOPPED: Object.freeze({ minutes: 60, visits: 3, days: 3 }),
+    }),
+    roadContextTargets: Object.freeze({
+      NORMAL_ROAD: Object.freeze({ minutes: 300, visits: 5, days: 5 }), INTERSECTION: Object.freeze({ minutes: 300, visits: 15, days: 8 }),
+      MERGE_AREA: Object.freeze({ minutes: 60, visits: 5, days: 4 }), DIVERGE_AREA: Object.freeze({ minutes: 60, visits: 5, days: 4 }),
+      HIGHWAY: Object.freeze({ minutes: 180, visits: 4, days: 3 }), RAMP: Object.freeze({ minutes: 60, visits: 5, days: 4 }), SCHOOL_ZONE: Object.freeze({ minutes: 90, visits: 5, days: 4 }),
+    }),
     minUniqueDays: 3,
     staleDays: 14,
     maxVisitsPerRecommendation: 3,
@@ -119,10 +138,22 @@
     const d = defaultRecommendationSettings();
     const src = s && typeof s === 'object' ? s : {};
     const out = { ...d, ...src };
-    out.weights = { ...d.weights, ...(src.weights || {}) };
+    const legacyWeights = src.weights || {};
+    const isLegacy = !Object.prototype.hasOwnProperty.call(legacyWeights, 'maneuver') || !Object.prototype.hasOwnProperty.call(legacyWeights, 'roadContext');
+    if (isLegacy && Object.keys(legacyWeights).length) {
+      const oldKeys = SCORE_KEYS.filter(k => k !== 'maneuver' && k !== 'roadContext');
+      const oldSum = oldKeys.reduce((a, k) => a + (Number(legacyWeights[k]) || 0), 0);
+      out.weights = { ...d.weights };
+      if (oldSum > 0) oldKeys.forEach(k => { out.weights[k] = Math.round(((Number(legacyWeights[k]) || 0) / oldSum) * 70 * 100) / 100; });
+      const rounding = 100 - SCORE_KEYS.reduce((a, k) => a + out.weights[k], 0);
+      out.weights.timePeriod = Math.round((out.weights.timePeriod + rounding) * 100) / 100;
+    } else out.weights = { ...d.weights, ...legacyWeights };
     out.periodTargets = {};
     TC.TRAFFIC_PERIOD_IDS.forEach(id => { out.periodTargets[id] = { ...d.periodTargets[id], ...((src.periodTargets || {})[id] || {}) }; });
     out.zoneCoverageTargets = { ...d.zoneCoverageTargets, ...(src.zoneCoverageTargets || {}), zones: { ...((src.zoneCoverageTargets || {}).zones || {}) } };
+    out.maneuverTargets = {}; Object.keys(d.maneuverTargets).forEach(id => { out.maneuverTargets[id] = { ...d.maneuverTargets[id], ...((src.maneuverTargets || {})[id] || {}) }; });
+    out.drivingStateTargets = {}; Object.keys(d.drivingStateTargets).forEach(id => { out.drivingStateTargets[id] = { ...d.drivingStateTargets[id], ...((src.drivingStateTargets || {})[id] || {}) }; });
+    out.roadContextTargets = {}; Object.keys(d.roadContextTargets).forEach(id => { out.roadContextTargets[id] = { ...d.roadContextTargets[id], ...((src.roadContextTargets || {})[id] || {}) }; });
     return out;
   }
 
@@ -149,6 +180,24 @@
       if (!isInt(visits, 0, 1000)) errors.push(`${label} 목표 방문 횟수는 0 이상의 정수여야 해요.`);
       periodTargets[id] = { minutes, visits };
     });
+    const validateTargets = (source, ids, fields, label) => {
+      const result = {};
+      ids.forEach(id => {
+        const row = source[id] || {}; result[id] = {};
+        fields.forEach(field => {
+          const value = toNum(row[field]);
+          if (!isInt(value, 0, 100000)) errors.push(`${label} ${id} 목표 ${field} 값은 0 이상의 정수여야 해요.`);
+          result[id][field] = value;
+        });
+      });
+      return result;
+    };
+    const maneuverTargets = {
+      ...validateTargets(s.maneuverTargets, MANEUVER_EVENT_IDS, ['events', 'days'], 'Ego Maneuver'),
+      ...validateTargets(s.maneuverTargets, MANEUVER_DURATION_IDS, ['minutes', 'visits', 'days'], 'Ego Maneuver'),
+    };
+    const drivingStateTargets = validateTargets(s.drivingStateTargets, DRIVING_STATE_IDS, ['minutes', 'visits', 'days'], 'Driving State');
+    const roadContextTargets = validateTargets(s.roadContextTargets, ROAD_CONTEXT_IDS, ['minutes', 'visits', 'days'], 'Road Context');
     const covDefault = toNum(s.zoneCoverageTargets.default);
     if (typeof covDefault !== 'number' || !(covDefault > 0 && covDefault <= 100)) errors.push('기본 목표 Coverage는 0 초과 100 이하(%)여야 해요.');
     const zones = {};
@@ -172,7 +221,7 @@
     if (typeof s.showLowConfidence !== 'boolean') errors.push('낮은 신뢰도 추천 표시 여부는 켬/끔이어야 해요.');
     // 키 순서를 기본값과 같게 맞춘다 — 저장·백업·동기화에서 같은 설정이면 JSON 도 같아진다
     const out = {
-      weights: w, periodTargets, zoneCoverageTargets: { default: covDefault, zones },
+      weights: w, periodTargets, zoneCoverageTargets: { default: covDefault, zones }, maneuverTargets, drivingStateTargets, roadContextTargets,
       minUniqueDays: values.minUniqueDays, staleDays: values.staleDays,
       maxVisitsPerRecommendation: values.maxVisitsPerRecommendation, resultCount: values.resultCount,
       showLowConfidence: s.showLowConfidence, snoozeDays: values.snoozeDays,
@@ -224,6 +273,15 @@
       ? fnv1a(zone.polygon.map(([la, lo]) => `${Number(la).toFixed(7)},${Number(lo).toFixed(7)}`).join(';')) : 'none';
     const manual = fnv1a(JSON.stringify((zone && zone.manualCells) || {}));
     return { data, polygon: poly, manual };
+  }
+  function recommendationDataFingerprint(summaries) {
+    const compact = (summaries || []).map(s => ({
+      date: s.date, count: s.count,
+      conditionCells: (s.conditionCells || []).map(c => [c.zone,c.weekdayType,c.trafficPeriod,c.lightCondition,c.recordCount,c.collectionSec]),
+      maneuverCells: (s.maneuverCells || []).map(c => [c.zone,c.weekdayType,c.trafficPeriod,c.lightCondition,c.egoManeuver,c.drivingState,c.confidence,c.recordCount,c.collectionSec,c.eventCount]),
+      roadContextCells: (s.roadContextCells || []).map(c => [c.zone,c.weekdayType,c.trafficPeriod,c.lightCondition,c.roadContext,c.confidence,c.recordCount,c.collectionSec,c.eventCount]),
+    }));
+    return fnv1a(`${RECOMMENDATION_VERSION}|${JSON.stringify(compact)}`);
   }
   // 저장된 스냅샷이 지금 데이터·경계·수동 셀과 같은 상태에서 계산됐는지
   function coverageSnapshotFreshness(snapshot, currentFingerprint) {
@@ -402,6 +460,23 @@
       && [...snapshots.values()].some(s => IF.normalizeFilter(s.issueFilter || 'all') !== issueFilter);
     const zoneRows = index(agg(['zone']).rows);
     const dataZonesNotActive = [...zoneRows.values()].map(r => r.zone).filter(z => z && !zoneNames.has(z));
+    const analysisFilter = { ...filter };
+    const analysisKey = (r, fields) => fields.map(k => r[k]).join('\u0001');
+    const maneuverFields = ['zone', 'weekdayType', 'trafficPeriod', 'lightCondition', 'egoManeuver'];
+    const stateFields = ['zone', 'weekdayType', 'trafficPeriod', 'lightCondition', 'drivingState'];
+    const contextFields = ['zone', 'weekdayType', 'trafficPeriod', 'lightCondition', 'roadContext'];
+    const maneuverRows = CSt.aggregateAnalysis(summaries, { kind: 'maneuver', filter: analysisFilter, groupBy: maneuverFields }).rows;
+    const stateRows = CSt.aggregateAnalysis(summaries, { kind: 'maneuver', filter: analysisFilter, groupBy: stateFields }).rows;
+    const contextRows = CSt.aggregateAnalysis(summaries, { kind: 'roadContext', filter: analysisFilter, groupBy: contextFields }).rows;
+    const allManeuverQuality = CSt.aggregateAnalysis(summaries, { kind: 'maneuver', filter: analysisFilter, groupBy: ['egoManeuver', 'confidence'], excludeLow: false }).rows;
+    const allContextQuality = CSt.aggregateAnalysis(summaries, { kind: 'roadContext', filter: analysisFilter, groupBy: ['roadContext', 'confidence'], excludeLow: false }).rows;
+    const qualityShape = (rows, valueKey) => {
+      const total = rows.reduce((a, r) => a + r.recordCount, 0);
+      const unknown = rows.filter(r => r[valueKey] === 'UNKNOWN').reduce((a, r) => a + r.recordCount, 0);
+      const confidence = { HIGH: 0, MEDIUM: 0, LOW: 0 };
+      rows.forEach(r => { confidence[r.confidence] = (confidence[r.confidence] || 0) + r.recordCount; });
+      return { total, validRatio: total ? (total - unknown) / total : 0, unknownRatio: total ? unknown / total : 0, confidence };
+    };
 
     return {
       version: RECOMMENDATION_VERSION,
@@ -409,6 +484,7 @@
       now: new Date(toMs(o.now)).toISOString(),
       vehicleFilter,
       issueFilter,
+      dataFingerprint: recommendationDataFingerprint(summaries),
       coverageIssueMismatch,
       classification,
       signature,
@@ -430,6 +506,7 @@
         quality: { gaps, teleports, records, per1000: records ? ((gaps + teleports) / records) * 1000 : 0 },
         speed: totals.speed || null,
         dataZonesNotActive,
+        analysisQuality: { maneuver: qualityShape(allManeuverQuality, 'egoManeuver'), roadContext: qualityShape(allContextQuality, 'roadContext') },
       },
       zones,
       coverage: snapshots,
@@ -438,6 +515,9 @@
         period: index(agg(['zone', 'weekdayType', 'trafficPeriod']).rows),
         light: index(agg(['zone', 'weekdayType', 'trafficPeriod', 'lightCondition']).rows),
         weather: index(agg(['zone', 'weekdayType', 'trafficPeriod', 'lightCondition', 'weather']).rows),
+        maneuver: new Map(maneuverRows.map(r => [analysisKey(r, maneuverFields), r])),
+        drivingState: new Map(stateRows.map(r => [analysisKey(r, stateFields), r])),
+        roadContext: new Map(contextRows.map(r => [analysisKey(r, contextFields), r])),
       },
       // 분석 단위(구역×요일×교통×조도×날씨) 표 — 추천 탭 "데이터 부족 현황"과 외부 활용용
       analysisUnits: agg(['zone', 'weekdayType', 'trafficPeriod', 'lightCondition', 'weather']).rows,
@@ -447,6 +527,9 @@
         lightCondition: agg(['lightCondition']).rows,
         weather: agg(['weather']).rows,
         vehicle: CSt.aggregate(summaries, { groupBy: ['vehicle'], details: true }).rows,
+        maneuver: CSt.aggregateAnalysis(summaries, { kind: 'maneuver', filter: analysisFilter, groupBy: ['egoManeuver'] }).rows,
+        drivingState: CSt.aggregateAnalysis(summaries, { kind: 'maneuver', filter: analysisFilter, groupBy: ['drivingState'] }).rows,
+        roadContext: CSt.aggregateAnalysis(summaries, { kind: 'roadContext', filter: analysisFilter, groupBy: ['roadContext'] }).rows,
       },
     };
   }
@@ -464,6 +547,46 @@
     const dRatio = minUniqueDays > 0 ? Math.min(1, (r.uniqueDays || 0) / minUniqueDays) : 1;
     const achieved = mRatio * DEFICIT_MIX.minutes + vRatio * DEFICIT_MIX.visits + dRatio * DEFICIT_MIX.days;
     return { value: round1(clamp(100 * (1 - achieved), 0, 100)), ratios: { minutes: mRatio, visits: vRatio, days: dRatio } };
+  }
+
+  function eventDeficit(row, targetEvents, targetDays) {
+    const r = row || EMPTY_ROW;
+    const eRatio = targetEvents > 0 ? Math.min(1, (r.eventCount || 0) / targetEvents) : 1;
+    const dRatio = targetDays > 0 ? Math.min(1, (r.uniqueDays || 0) / targetDays) : 1;
+    return { value: round1(clamp(100 * (1 - eRatio * MANEUVER_EVENT_MIX.events - dRatio * MANEUVER_EVENT_MIX.days), 0, 100)), ratios: { events: eRatio, days: dRatio } };
+  }
+
+  function analysisKey(candidate, value) {
+    return [candidate.zone, candidate.weekdayType, candidate.trafficPeriod, candidate.lightCondition, value].join('\u0001');
+  }
+
+  function pickManeuverDeficit(candidate, features) {
+    const choices = [];
+    const observedInZone = new Set(features.breakdowns.maneuver.filter(r => r.egoManeuver !== 'UNKNOWN' && features.rows.maneuver.size && [...features.rows.maneuver.values()].some(x => x.zone === candidate.zone && x.egoManeuver === r.egoManeuver)).map(r => r.egoManeuver));
+    MANEUVER_EVENT_IDS.filter(id => id !== 'MERGE' && id !== 'DIVERGE' || observedInZone.has(id)).forEach(id => {
+      const row = features.rows.maneuver.get(analysisKey(candidate, id)) || EMPTY_ROW;
+      const target = features.settings.maneuverTargets[id];
+      choices.push({ kind: 'maneuver', value: id, row, target, deficit: eventDeficit(row, target.events, target.days).value, unit: 'events' });
+    });
+    MANEUVER_DURATION_IDS.forEach(id => {
+      const row = features.rows.maneuver.get(analysisKey(candidate, id)) || EMPTY_ROW, target = features.settings.maneuverTargets[id];
+      choices.push({ kind: 'maneuver', value: id, row, target, deficit: deficitFromTargets(row, target.minutes, target.visits, target.days).value, unit: 'duration' });
+    });
+    DRIVING_STATE_IDS.forEach(id => {
+      const row = features.rows.drivingState.get(analysisKey(candidate, id)) || EMPTY_ROW, target = features.settings.drivingStateTargets[id];
+      choices.push({ kind: 'drivingState', value: id, row, target, deficit: deficitFromTargets(row, target.minutes, target.visits, target.days).value, unit: 'duration' });
+    });
+    return choices.sort((a, b) => b.deficit - a.deficit || a.value.localeCompare(b.value))[0] || null;
+  }
+
+  function pickRoadContextDeficit(candidate, features) {
+    const zoneTypes = new Set([...features.rows.roadContext.values()].filter(r => r.zone === candidate.zone && r.roadContext !== 'UNKNOWN').map(r => r.roadContext));
+    if (!zoneTypes.size) return null;
+    const choices = [...zoneTypes].filter(id => ROAD_CONTEXT_IDS.includes(id)).map(id => {
+      const row = features.rows.roadContext.get(analysisKey(candidate, id)) || EMPTY_ROW, target = features.settings.roadContextTargets[id];
+      return { value: id, row, target, deficit: deficitFromTargets(row, target.minutes, target.visits, target.days).value };
+    });
+    return choices.sort((a, b) => b.deficit - a.deficit || a.value.localeCompare(b.value))[0] || null;
   }
 
   // 교통 시간대 목표 — 설정값, 0 이면 같은 구역·요일 유형의 다른 교통 시간대 중앙값(비교 기준을 기록)
@@ -586,7 +709,28 @@
       };
     }
 
-    return { scores, details, periodRow, lightRow, periodTarget, target, coverageTarget: covTarget, snapshot: snap || null };
+    const maneuver = pickManeuverDeficit(c, features);
+    if (maneuver) {
+      scores.maneuver = maneuver.deficit;
+      const r = maneuver.row, t = maneuver.target;
+      details.maneuver = maneuver.unit === 'events'
+        ? { current: `${maneuver.value} ${r.eventCount || 0}/${t.events}회 · 수집일 ${r.uniqueDays || 0}/${t.days}일`, basis: `Observed Ego Maneuver(HIGH/MEDIUM) · 달성률 = 이벤트 70% + 고유 수집일 30% · LOW/UNKNOWN 제외` }
+        : { current: `${maneuver.value} ${Math.round((r.collectionSec || 0)/60)}/${t.minutes}분 · 방문 ${r.visitCount || 0}/${t.visits}회 · 수집일 ${r.uniqueDays || 0}/${t.days}일`, basis: 'Observed Ego Maneuver/Driving State(HIGH/MEDIUM) · 수집 시간 50% + 방문 30% + 고유 수집일 20%' };
+      candidate.maneuverNeed = maneuver;
+    } else {
+      scores.maneuver = null; details.maneuver = { current: '유효 Ego Maneuver 분석 없음', basis: 'LOW/UNKNOWN만 있거나 분석 요약이 없어 점수에서 제외' };
+    }
+    const roadContext = pickRoadContextDeficit(c, features);
+    if (roadContext) {
+      scores.roadContext = roadContext.deficit;
+      const r = roadContext.row, t = roadContext.target;
+      details.roadContext = { current: `${roadContext.value} ${Math.round((r.collectionSec || 0)/60)}/${t.minutes}분 · 방문 ${r.visitCount || 0}/${t.visits}회 · 수집일 ${r.uniqueDays || 0}/${t.days}일`, basis: 'Observed Road Context(HIGH/MEDIUM) · 지도에서 확인된 Context만 후보화 · 수집 시간 50% + 방문 30% + 고유 수집일 20%' };
+      candidate.roadContextNeed = roadContext;
+    } else {
+      scores.roadContext = null; details.roadContext = { current: '이 구역의 확인된 Road Context 없음', basis: '지도/도로망 근거가 없거나 LOW/UNKNOWN뿐임 → 부족도 100이 아니라 unavailable로 점수에서 제외' };
+    }
+
+    return { scores, details, periodRow, lightRow, periodTarget, target, coverageTarget: covTarget, snapshot: snap || null, maneuver, roadContext };
   }
 
   function sumWeatherForPeriod(features, c, weather) {
@@ -795,6 +939,8 @@
     if (d.dataZonesNotActive.length) limitations.push(`활성 구역 목록에 없는 구역의 기록은 추천 후보에서 뺐습니다: ${d.dataZonesNotActive.join(', ')}`);
     if (d.recordCount > 0 && d.unknownRatios.zone > 0) limitations.push(`구역을 판정하지 못한 기록 ${round1(d.unknownRatios.zone * 100)}%는 구역별 추천에 쓰이지 않습니다.`);
     if (d.recordCount > 0 && d.unknownRatios.trafficPeriod > 0) limitations.push(`시각을 읽지 못한 기록 ${round1(d.unknownRatios.trafficPeriod * 100)}%는 시간대 추천에서 제외됩니다.`);
+    if (d.analysisQuality.maneuver.total) limitations.push(`Ego Maneuver UNKNOWN ${round1(d.analysisQuality.maneuver.unknownRatio * 100)}%는 데이터 품질 지표이며 부족도에는 넣지 않습니다.`);
+    if (d.analysisQuality.roadContext.total) limitations.push(`Road Context UNKNOWN ${round1(d.analysisQuality.roadContext.unknownRatio * 100)}%는 지도 데이터 부족 지표이며 수집 부족으로 간주하지 않습니다. Context는 복수 태그가 가능해 항목별 시간 합이 전체보다 클 수 있습니다.`);
 
     const base = {
       version: RECOMMENDATION_VERSION,
@@ -879,12 +1025,16 @@
         period: { collectionMinutes: Math.round((deficit.periodRow || EMPTY_ROW).collectionSec / 60), visitCount: (deficit.periodRow || EMPTY_ROW).visitCount, uniqueDays: (deficit.periodRow || EMPTY_ROW).uniqueDays || 0 },
         weatherMinutes: candidate.weatherMinutes || [],
         speed: row.speed && row.speed.count ? row.speed : null,
+        maneuver: deficit.maneuver ? { value: deficit.maneuver.value, eventCount: deficit.maneuver.row.eventCount || 0, collectionMinutes: Math.round((deficit.maneuver.row.collectionSec || 0)/60), visitCount: deficit.maneuver.row.visitCount || 0, uniqueDays: deficit.maneuver.row.uniqueDays || 0, confidenceCounts: deficit.maneuver.row.confidenceCounts || {} } : null,
+        roadContext: deficit.roadContext ? { value: deficit.roadContext.value, collectionMinutes: Math.round((deficit.roadContext.row.collectionSec || 0)/60), visitCount: deficit.roadContext.row.visitCount || 0, uniqueDays: deficit.roadContext.row.uniqueDays || 0, confidenceCounts: deficit.roadContext.row.confidenceCounts || {} } : null,
       },
       targets: {
         periodMinutes: deficit.periodTarget.minutes, periodVisits: deficit.periodTarget.visits, periodBasis: deficit.periodTarget.basis,
         minutes: deficit.target.minutes, visits: deficit.target.visits, minUniqueDays: features.settings.minUniqueDays,
         lightShare: candidate.window ? round2(candidate.window.overlapMinutes / candidate.window.periodMinutes) : 1,
         coveragePercent: deficit.coverageTarget,
+        maneuver: deficit.maneuver ? deficit.maneuver.target : null,
+        roadContext: deficit.roadContext ? deficit.roadContext.target : null,
       },
       coverage: {
         available: coverageAvailable,
@@ -910,6 +1060,7 @@
       skippedEdgeCaseRules: hints.skipped,
       expectedConditions: [...new Set(hints.applied.flatMap(h => h.expects))],
       observedEdgeCases: [],                 // 실제 이벤트 로그가 생기면 여기에 채운다(지금은 항상 비어 있음)
+      observedAnalysis: { maneuver: candidate.maneuverNeed ? candidate.maneuverNeed.value : null, roadContext: candidate.roadContextNeed ? candidate.roadContextNeed.value : null },
       edgeCaseEvidenceLevel: 'condition_only',
       edgeCaseDisclaimer: EDGE_CASE_DISCLAIMER,
       supportingObservations: row.speed && row.speed.count
@@ -2036,6 +2187,11 @@
     SCORE_KEYS,
     SCORE_LABELS,
     DEFICIT_MIX,
+    MANEUVER_EVENT_MIX,
+    MANEUVER_EVENT_IDS,
+    MANEUVER_DURATION_IDS,
+    DRIVING_STATE_IDS,
+    ROAD_CONTEXT_IDS,
     PRIORITY_BANDS,
     CONFIDENCE_LEVELS,
     HORIZON_DAYS,
@@ -2052,6 +2208,7 @@
     settingsSignature,
     fnv1a,
     coverageFingerprint,
+    recommendationDataFingerprint,
     coverageSnapshotFreshness,
     kstDate,
     buildRecommendationFeatures,

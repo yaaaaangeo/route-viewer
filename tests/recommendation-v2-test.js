@@ -1,0 +1,30 @@
+'use strict';
+const assert = require('assert');
+const R = require('../src/js/recommendation.js');
+const zone = { name:'강남', active:true, centerLat:37.5, centerLng:127.04 };
+const baseCell = { zone:'강남', vehicle:'v1', weekdayType:'weekday', trafficPeriod:'morning_peak', lightCondition:'daylight', weather:'맑음', issueMask:0 };
+function summary(maneuverCells, roadContextCells) { return { date:'2026-09-21', count:61, collectionSec:3600, driveSpanSec:3600, quality:{}, classificationSignature:null, conditionCells:[{...baseCell,recordCount:61,collectionSec:3600,firstTime:'08:00:00',lastTime:'09:00:00',speedCount:61,speedSumTenths:12000,stoppedCount:0,slowCount:0}], maneuverCells:maneuverCells||[], roadContextCells:roadContextCells||[] }; }
+const m = (value, events, confidence='HIGH') => ({...baseCell,egoManeuver:value,drivingState:'MOVING',drivingConfidence:'HIGH',source:'GPS_TRAJECTORY',confidence,recordCount:61,collectionSec:3600,eventCount:events});
+const c = (value, sec, confidence='HIGH') => ({...baseCell,roadContext:value,source:'HD_MAP',confidence,recordCount:61,collectionSec:sec,eventCount:3});
+const settings = R.defaultRecommendationSettings();
+Object.keys(settings.maneuverTargets).forEach(id=>{ settings.maneuverTargets[id]=id==='STRAIGHT'?{minutes:0,visits:0,days:0}:{events:0,days:0}; });
+Object.keys(settings.drivingStateTargets).forEach(id=>{ settings.drivingStateTargets[id]={minutes:0,visits:0,days:0}; });
+settings.maneuverTargets.LEFT_TURN={events:10,days:1}; settings.roadContextTargets.INTERSECTION={minutes:60,visits:1,days:1};
+function rec(s, custom=settings){ const out=R.buildRecommendations({summaries:[s],zones:[zone],settings:{recommendationSettings:custom},coverageSnapshots:[],now:'2026-09-22T00:00:00Z'}); return out.recommendations.find(x=>x.id==='강남|weekday|morning_peak|daylight'); }
+const enough=rec(summary([m('LEFT_TURN',10)],[c('INTERSECTION',3600)]));
+assert(enough.subScores.maneuver < 1); assert(enough.subScores.roadContext < 1);
+const missing=rec(summary([m('RIGHT_TURN',1)],[c('INTERSECTION',60)]));
+assert(missing.subScores.maneuver > 50); assert(missing.subScores.roadContext > 40);
+const unavailable=rec(summary([m('LEFT_TURN',1)],[c('UNKNOWN',3600,'LOW')]));
+assert.strictEqual(unavailable.subScores.roadContext,null); assert(unavailable.missingData.some(x=>/Context/.test(x)));
+const unknownOnly=rec(summary([m('UNKNOWN',99,'LOW')],[c('UNKNOWN',3600,'LOW')]));
+assert.strictEqual(unknownOnly.subScores.roadContext,null); assert(unknownOnly.subScores.maneuver == null || unknownOnly.current.maneuver.value !== 'UNKNOWN');
+const legacy={weights:{timePeriod:30,coverage:25,lightCondition:15,weatherDiversity:15,staleness:10,vehicleImbalance:5}};
+const migrated=R.effectiveRecommendationSettings(legacy);
+assert.strictEqual(R.SCORE_KEYS.reduce((a,k)=>a+migrated.weights[k],0),100); assert.strictEqual(migrated.weights.maneuver,15); assert.strictEqual(migrated.weights.roadContext,15); assert(R.validateRecommendationSettings(migrated).ok);
+const f1=R.recommendationDataFingerprint([summary([m('LEFT_TURN',1)],[c('INTERSECTION',60)])]);
+const f2=R.recommendationDataFingerprint([summary([m('LEFT_TURN',2)],[c('INTERSECTION',60)])]);
+const f3=R.recommendationDataFingerprint([summary([m('LEFT_TURN',1)],[c('INTERSECTION',120)])]);
+assert.notStrictEqual(f1,f2); assert.notStrictEqual(f1,f3);
+assert.notStrictEqual(R.settingsSignature(settings),R.settingsSignature({...settings,maneuverTargets:{...settings.maneuverTargets,LEFT_TURN:{events:11,days:1}}}));
+console.log('recommendation-v2-test: ok');

@@ -238,6 +238,7 @@ function recommendationCardHTML(r,rank,res){
       <div><span class="rec-k">마지막 방문</span><span class="mono">${r.current.lastVisitedAt?`${recEsc(r.current.lastVisitedAt.slice(0,10))} (${fmtNum(r.current.daysSinceLastVisit)}일 전)`:'방문 기록 없음'}</span></div>
     </div>
     ${tr&&tr.sunText?`<div class="rec-muted rec-time-note">${recEsc(tr.conditionText)} · ${recEsc(tr.sunText)}</div>`:''}
+    ${(r.current.roadContext||r.current.maneuver)?`<div class="rec-block"><span class="rec-k">Observed 부족 데이터</span> ${r.current.roadContext?`<span class="rec-chip">${recEsc(r.current.roadContext.value)}</span>`:''}${r.current.maneuver?`<span class="rec-chip">${recEsc(r.current.maneuver.value)}</span>`:''}</div>`:''}
     <div class="rec-block"><span class="rec-k">부족한 조건</span><ul class="rec-facts">${(r.deficitConditions.length?r.deficitConditions:['부족도 40점 이상인 항목 없음']).map(f=>`<li>${recEsc(f)}</li>`).join('')}</ul></div>
     <div class="rec-block"><span class="rec-k">예상 확보 조건</span> ${r.expectedConditions.length?r.expectedConditions.map(x=>`<span class="rec-chip">${recEsc(x)}</span>`).join(''):'<span class="rec-muted">이 조건에 해당하는 규칙 없음</span>'}
       <div class="rec-disclaimer-inline">${recEsc(r.edgeCaseDisclaimer)}</div></div>
@@ -279,6 +280,8 @@ function recommendationDetailHTML(r){
         <li>이 조건 목표: ${fmtNum(r.targets.minutes)}분 · ${fmtNum(r.targets.visits)}회 (시간대 목표 × 조도 비율 ${recPct(r.targets.lightShare*100)})</li>
         <li>최소 고유 수집일 ${fmtNum(r.targets.minUniqueDays)}일 · 현재 ${fmtNum(r.current.uniqueDays)}일</li>
         <li>목표 Coverage ${recEsc(r.targets.coveragePercent)}%</li>
+        ${r.current.maneuver?`<li>Observed Ego Maneuver: ${recEsc(r.current.maneuver.value)} · ${fmtNum(r.current.maneuver.eventCount)}회 · ${fmtNum(r.current.maneuver.collectionMinutes)}분 · ${fmtNum(r.current.maneuver.uniqueDays)}일</li>`:''}
+        ${r.current.roadContext?`<li>Observed Road Context: ${recEsc(r.current.roadContext.value)} · ${fmtNum(r.current.roadContext.collectionMinutes)}분 · ${fmtNum(r.current.roadContext.visitCount)}회 · ${fmtNum(r.current.roadContext.uniqueDays)}일</li>`:''}
         <li>권장 횟수: ${recEsc(r.need.basis)}</li>
         <li>${recEsc(r.need.efficiencyBasis)}</li>
         ${r.need.stageNote?`<li>${recEsc(r.need.stageNote)}</li>`:''}
@@ -357,8 +360,11 @@ function renderRecommendationDeficits(res){
       ${card('조도 조건',shareRowsHTML(TimeConditions.LIGHT_CONDITION_IDS.map(id=>b.lightCondition.find(r=>r.lightCondition===id)||{lightCondition:id,collectionSec:0,collectionMinutes:0}),r=>TimeConditions.LIGHT_CONDITION_LABELS[r.lightCondition],total))}
       ${card('날씨',shareRowsHTML(b.weather,r=>r.weather||'정보 없음',total))}
       ${card('차량 편중',shareRowsHTML(b.vehicle,r=>r.vehicle||'정보 없음',b.vehicle.reduce((a,r)=>a+r.collectionSec,0)))}
+      ${card('Ego Maneuver',shareRowsHTML(b.maneuver,r=>r.egoManeuver||'UNKNOWN',b.maneuver.reduce((a,r)=>a+r.collectionSec,0)))}
+      ${card('Driving State',shareRowsHTML(b.drivingState,r=>r.drivingState||'UNKNOWN',b.drivingState.reduce((a,r)=>a+r.collectionSec,0)))}
+      ${card('Road Context',shareRowsHTML(b.roadContext,r=>r.roadContext||'UNKNOWN',b.roadContext.reduce((a,r)=>a+r.collectionSec,0)))}
     </div>
-    <div class="rec-muted">분석 단위(구역 × 요일 × 교통 시간대 × 조도 × 날씨) 중 기록이 있는 조합 ${fmtNum(res.analysisUnitCount)}개 · 품질 경고(GPS 공백+점프) 기록 1,000건당 ${(Math.round(d.quality.per1000*10)/10).toFixed(1)}건${d.speed&&d.speed.count?` · 평균속도 ${d.speed.averageKmh}km/h(정차 ${recPct(d.speed.stoppedRatio*100)})`:''}</div>`;
+    <div class="rec-muted">분석 단위(구역 × 요일 × 교통 시간대 × 조도 × 날씨) 중 기록이 있는 조합 ${fmtNum(res.analysisUnitCount)}개 · Ego Maneuver UNKNOWN ${recPct(d.analysisQuality.maneuver.unknownRatio*100)} · Road Context UNKNOWN ${recPct(d.analysisQuality.roadContext.unknownRatio*100)} · LOW 판정은 추천 점수에서 제외 · Road Context는 복수 태그가 가능해 합계가 전체보다 클 수 있습니다.</div>`;
 }
 
 // ── 추천 설정 ─────────────────────────────────────────
@@ -383,6 +389,15 @@ function renderRecommendationSettings(res){
       </div>
       <div class="dist-card"><div class="dc-title">교통 시간대별 목표 (구역 × 요일 유형당)</div>
         ${TimeConditions.TRAFFIC_PERIOD_IDS.map(id=>`<div class="settings-row depth-tier-row"><span class="settings-row-name">${recEsc(TimeConditions.TRAFFIC_PERIOD_LABELS[id])}</span><span class="depth-tier-input-wrap">${num(['periodTargets',id,'minutes'],f.periodTargets[id].minutes,'min="0" step="10"')}<span class="rec-muted">분</span>${num(['periodTargets',id,'visits'],f.periodTargets[id].visits,'min="0" step="1"')}<span class="rec-muted">회</span></span></div>`).join('')}
+      </div>
+      <div class="dist-card"><div class="dc-title">Ego Maneuver 목표</div>
+        ${['LEFT_TURN','RIGHT_TURN','U_TURN','MERGE','DIVERGE'].map(id=>`<div class="settings-row depth-tier-row"><span class="settings-row-name">${id}</span><span class="depth-tier-input-wrap">${num(['maneuverTargets',id,'events'],f.maneuverTargets[id].events,'min="0" step="1"')}<span class="rec-muted">회</span>${num(['maneuverTargets',id,'days'],f.maneuverTargets[id].days,'min="0" step="1"')}<span class="rec-muted">일</span></span></div>`).join('')}
+      </div>
+      <div class="dist-card"><div class="dc-title">Driving State 목표</div>
+        ${['MOVING','SLOW','STOPPED'].map(id=>`<div class="settings-row depth-tier-row"><span class="settings-row-name">${id}</span><span class="depth-tier-input-wrap">${num(['drivingStateTargets',id,'minutes'],f.drivingStateTargets[id].minutes,'min="0" step="10"')}<span class="rec-muted">분</span>${num(['drivingStateTargets',id,'visits'],f.drivingStateTargets[id].visits,'min="0" step="1"')}<span class="rec-muted">회</span>${num(['drivingStateTargets',id,'days'],f.drivingStateTargets[id].days,'min="0" step="1"')}<span class="rec-muted">일</span></span></div>`).join('')}
+      </div>
+      <div class="dist-card"><div class="dc-title">Road Context 목표</div>
+        ${['NORMAL_ROAD','INTERSECTION','MERGE_AREA','DIVERGE_AREA','HIGHWAY','RAMP','SCHOOL_ZONE'].map(id=>`<div class="settings-row depth-tier-row"><span class="settings-row-name">${id}</span><span class="depth-tier-input-wrap">${num(['roadContextTargets',id,'minutes'],f.roadContextTargets[id].minutes,'min="0" step="10"')}<span class="rec-muted">분</span>${num(['roadContextTargets',id,'visits'],f.roadContextTargets[id].visits,'min="0" step="1"')}<span class="rec-muted">회</span>${num(['roadContextTargets',id,'days'],f.roadContextTargets[id].days,'min="0" step="1"')}<span class="rec-muted">일</span></span></div>`).join('')}
       </div>
       <div class="dist-card"><div class="dc-title">Coverage 목표 · 기타</div>
         <div class="settings-row depth-tier-row"><span class="settings-row-name">기본 목표 Coverage(%)</span>${num(['zoneCoverageTargets','default'],f.zoneCoverageTargets.default,'min="1" max="100"')}</div>

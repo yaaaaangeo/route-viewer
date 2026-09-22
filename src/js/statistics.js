@@ -293,12 +293,28 @@ async function renderStatsView(){
   catch(err){ console.warn('[경로뷰어] 날짜 요약 조회 실패:',err); }
   if(token!==statsRenderToken) return;
   cardsHTML.push(...conditionStatsCardsHTML(summaries,filter,barColor));
+  cardsHTML.push(...analysisStatsCardsHTML(summaries,filter,barColor));
 
   regionGridEl.innerHTML=statsMode==='region'?cardsHTML.join(''):'';
   vehicleGridEl.innerHTML=statsMode==='vehicle'?cardsHTML.join(''):'';
 }
 
 // 통계 탭의 조건 카드들. filter 는 statsFilter()({zone} 또는 {vehicleLike}) — 기록 수 카드들과 같은 조건.
+function analysisStatsCardsHTML(summaries,filter,barColor){
+  const labels={STRAIGHT:'직진',LEFT_TURN:'좌회전',RIGHT_TURN:'우회전',U_TURN:'U턴',MERGE:'합류',DIVERGE:'분기',MOVING:'주행',SLOW:'저속',STOPPED:'정차',NORMAL_ROAD:'일반도로',INTERSECTION:'교차로',MERGE_AREA:'합류부',DIVERGE_AREA:'분기부',HIGHWAY:'고속도로',RAMP:'램프',SCHOOL_ZONE:'어린이보호구역',UNKNOWN:'정보 없음'};
+  const maneuver=ConditionStats.aggregateAnalysis(summaries,{kind:'maneuver',filter,groupBy:['egoManeuver']});
+  const state=ConditionStats.aggregateAnalysis(summaries,{kind:'maneuver',filter,groupBy:['drivingState']});
+  const context=ConditionStats.aggregateAnalysis(summaries,{kind:'roadContext',filter,groupBy:['roadContext']});
+  const entries=(rows,key)=>rows.map(r=>[labels[r[key]]||r[key],r.recordCount]).sort((a,b)=>b[1]-a[1]);
+  const cards=[
+    distCardHTML('Ego Maneuver · 차량 행동',entries(maneuver.rows,'egoManeuver'),maneuver.totals.recordCount,true,barColor),
+    distCardHTML('Ego Maneuver · 주행 상태',entries(state.rows,'drivingState'),state.totals.recordCount,true,barColor),
+    distCardHTML('Road Context',entries(context.rows,'roadContext'),context.totals.recordCount,true,barColor),
+  ];
+  if(maneuver.missingDates||context.missingDates) cards.push(`<div class="dist-card cond-card" style="grid-column:1/-1"><div class="cond-note">이전 형식의 날짜 요약 ${fmtNum(Math.max(maneuver.missingDates,context.missingDates))}건은 앱 초기화 시 자동 재분석됩니다.</div></div>`);
+  return cards;
+}
+
 function conditionStatsCardsHTML(summaries,filter,barColor){
   const signature=currentClassificationSignature();
   const agg=groupBy=>ConditionStats.aggregate(summaries,{filter,groupBy,signature});

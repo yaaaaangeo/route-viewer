@@ -15,11 +15,11 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./time-conditions.js'), require('./collection-stats.js'), require('./issue-filter.js'));
+    module.exports = factory(require('./time-conditions.js'), require('./collection-stats.js'), require('./issue-filter.js'), require('./ego-maneuver.js'), require('./road-context.js'));
   } else {
-    root.ConditionStats = factory(root.TimeConditions, root.CollectionStats, root.IssueFilter);
+    root.ConditionStats = factory(root.TimeConditions, root.CollectionStats, root.IssueFilter, root.EgoManeuver, root.RoadContext);
   }
-}(typeof self !== 'undefined' ? self : this, function (TC, CS, IF) {
+}(typeof self !== 'undefined' ? self : this, function (TC, CS, IF, EM, RC) {
   'use strict';
 
   // issueMask: 그 기록이 어느 Import 파일에서 왔는지 요약한 비트(issue-filter.js) —
@@ -30,6 +30,9 @@
   // 조건 칸(conditionCells)은 수집 시간 규칙 때문에 축을 늘리기 부담스러워서 따로 둔다.
   // 하루치 조합은 보통 수십 줄이라, 이 값만 있으면 통계 탭이 원본 기록을 한 번도 읽지 않는다.
   const DIST_DIMENSIONS = Object.freeze(['zone', 'vehicle', 'place', 'road', 'weather', 'timeOfDay', 'issueMask']);
+  const ANALYSIS_CONDITION_DIMENSIONS = Object.freeze(['zone', 'vehicle', 'weekdayType', 'trafficPeriod', 'lightCondition']);
+  const MANEUVER_DIMENSIONS = Object.freeze([...ANALYSIS_CONDITION_DIMENSIONS, 'egoManeuver', 'drivingState', 'source', 'confidence', 'issueMask']);
+  const ROAD_CONTEXT_DIMENSIONS = Object.freeze([...ANALYSIS_CONDITION_DIMENSIONS, 'roadContext', 'source', 'confidence', 'issueMask']);
   const DIMENSION_LABELS = Object.freeze({
     zone: '구역', vehicle: '차량', weekdayType: '요일', trafficPeriod: '교통', lightCondition: '조도', weather: '날씨', issueMask: '데이터 상태',
   });
@@ -124,7 +127,61 @@
       return 0;
     });
 
-    return { classificationSignature: TC.classificationSignature(cfg), conditionCells, distCells };
+    const analysis = EM ? EM.analyzeTrajectory(rows || [], cfg.egoManeuver) : [];
+    const contexts = RC ? RC.analyzeTrajectory(rows || [], cfg.roadGraph || null, cfg.roadContext) : [];
+    const maneuverMap = new Map(), contextMap = new Map();
+    const add = (map, dims, value, metrics) => {
+      const key = dims.map(d => value[d]).join('\u0001');
+      const old = map.get(key);
+      const m = metrics || {};
+      if (old) {
+        old.recordCount++;
+        old.collectionSec += m.collectionSec || 0;
+        old.eventCount += m.eventCount || 0;
+      } else map.set(key, { ...value, recordCount: 1, collectionSec: m.collectionSec || 0, eventCount: m.eventCount || 0 });
+    };
+    const rowSec = r => CS.timeToSec(r && r.time);
+    const collectionByIndex = new Array((rows || []).length).fill(0), maneuverEventByIndex = new Array((rows || []).length).fill(0), contextEventByIndex = new Array((rows || []).length).fill(null);
+    const orderedByVehicle = new Map();
+    (rows || []).forEach((r, i) => { const vehicle = str(r && r.vehicle); if (!orderedByVehicle.has(vehicle)) orderedByVehicle.set(vehicle, []); orderedByVehicle.get(vehicle).push(i); });
+    orderedByVehicle.forEach(indices => {
+      indices.sort((a, b) => (rowSec(rows[a]) - rowSec(rows[b])) || (Number(rows[a].lat) - Number(rows[b].lat)) || (Number(rows[a].lng) - Number(rows[b].lng)));
+      let previousManeuver = null, previousContexts = new Set();
+      indices.forEach((idx, pos) => {
+        const next = indices[pos + 1], dt = next == null ? 0 : rowSec(rows[next]) - rowSec(rows[idx]);
+        collectionByIndex[idx] = Number.isFinite(dt) && dt > 0 && dt <= CS.COLLECTION_GAP_SEC ? dt : 0;
+        const maneuver = analysis[idx] && analysis[idx].maneuver ? analysis[idx].maneuver.value : 'UNKNOWN';
+        maneuverEventByIndex[idx] = previousManeuver === maneuver ? 0 : 1; previousManeuver = maneuver;
+        const current = new Set((contexts[idx] || [{ value: 'UNKNOWN' }]).map(c => c.value));
+        contextEventByIndex[idx] = new Set([...current].filter(v => !previousContexts.has(v))); previousContexts = current;
+      });
+    });
+    (rows || []).forEach((r, i) => {
+      if (!r) return;
+      const a = analysis[i] || {};
+      const maneuver = a.maneuver || { value: 'UNKNOWN', source: 'GPS_TRAJECTORY', confidence: 'LOW' };
+      const state = a.drivingState || { value: 'UNKNOWN' };
+      const cls = TC.classifyRecord(r, cfg);
+      const condition = { zone: str(r.zone), vehicle: str(r.vehicle), weekdayType: cls.weekdayType, trafficPeriod: cls.trafficPeriod, lightCondition: cls.lightCondition };
+      const collectionSec = collectionByIndex[i], eventCount = maneuverEventByIndex[i];
+      add(maneuverMap, MANEUVER_DIMENSIONS, {
+        ...condition, egoManeuver: maneuver.value,
+        drivingState: state.value, drivingConfidence: state.confidence, source: maneuver.source, confidence: maneuver.confidence,
+        issueMask: Number(r.issueMask) || 0,
+      }, { collectionSec, eventCount });
+      const list = contexts[i] || [{ value: 'UNKNOWN', source: 'NONE', confidence: 'LOW' }];
+      list.forEach(c => add(contextMap, ROAD_CONTEXT_DIMENSIONS, {
+        ...condition, roadContext: c.value,
+        source: c.source, confidence: c.confidence, issueMask: Number(r.issueMask) || 0,
+      }, { collectionSec, eventCount: contextEventByIndex[i] && contextEventByIndex[i].has(c.value) ? 1 : 0 }));
+    });
+    const byDims = dims => (a, b) => { for (const d of dims) { if (a[d] < b[d]) return -1; if (a[d] > b[d]) return 1; } return 0; };
+    return {
+      classificationSignature: TC.classificationSignature(cfg), conditionCells, distCells,
+      analysisVersion: `${EM ? EM.VERSION : 0}:${RC ? RC.VERSION : 0}`,
+      maneuverCells: [...maneuverMap.values()].sort(byDims(MANEUVER_DIMENSIONS)),
+      roadContextCells: [...contextMap.values()].sort(byDims(ROAD_CONTEXT_DIMENSIONS)),
+    };
   }
 
   // 날짜 요약 하나를 데이터 상태(이슈) 필터로 걸러 본 값 — 달력 칸·수집 현황이 쓴다.
@@ -349,6 +406,38 @@
 
   // 없는 조합도 0으로 채운다 — "일몰 전후 데이터가 없는 구역" 같은 질문용.
   // values: {zone:['강남','판교'], lightCondition:['sunset']} 처럼 축별 전체 후보
+  function aggregateAnalysis(summaries, options) {
+    const o = options || {}, f = o.filter || {}, kind = o.kind === 'roadContext' ? 'roadContext' : 'maneuver';
+    const field = kind === 'roadContext' ? 'roadContextCells' : 'maneuverCells';
+    const dims = kind === 'roadContext' ? ROAD_CONTEXT_DIMENSIONS : MANEUVER_DIMENSIONS;
+    const groupBy = (o.groupBy || (kind === 'roadContext' ? ['roadContext'] : ['egoManeuver'])).filter(d => dims.includes(d));
+    const groups = new Map(); let recordCount = 0, missingDates = 0;
+    for (const s of summaries || []) {
+      if (!s || !summaryMatchesDate(s.date, f)) continue;
+      if (!Array.isArray(s[field])) { missingDates++; continue; }
+      for (const cell of s[field]) {
+        const confidence = kind === 'maneuver' && groupBy.includes('drivingState') ? (cell.drivingConfidence || cell.confidence) : cell.confidence;
+        if (o.excludeLow !== false && confidence === 'LOW') continue;
+        if (f.issueFilter && f.issueFilter !== 'all' && !IF.maskMatches(cell.issueMask, f.issueFilter)) continue;
+        if (!matchValue(f.zone, cell.zone) || !matchValue(f.vehicle, cell.vehicle)) continue;
+        if (f.vehicleLike && String(cell.vehicle).indexOf(f.vehicleLike) < 0) continue;
+        if (!matchValue(f.weekdayType, cell.weekdayType) || !matchValue(f.trafficPeriod, cell.trafficPeriod) || !matchValue(f.lightCondition, cell.lightCondition)) continue;
+        const key = groupBy.map(d => cell[d]).join('\u0001');
+        if (!groups.has(key)) { const g = { recordCount: 0, collectionSec: 0, eventCount: 0, visits: new Set(), days: new Set(), confidenceCounts: { HIGH: 0, MEDIUM: 0, LOW: 0 } }; groupBy.forEach(d => { g[d] = cell[d]; }); groups.set(key, g); }
+        const g = groups.get(key);
+        g.recordCount += cell.recordCount || 0;
+        g.collectionSec += cell.collectionSec || 0;
+        g.eventCount += cell.eventCount || 0;
+        g.visits.add(`${s.date}|${cell.vehicle}`);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(String(s.date))) g.days.add(s.date);
+        g.confidenceCounts[confidence] = (g.confidenceCounts[confidence] || 0) + (cell.recordCount || 0);
+        recordCount += cell.recordCount || 0;
+      }
+    }
+    const rows = [...groups.values()].map(g => ({ ...Object.fromEntries(groupBy.map(d => [d, g[d]])), recordCount: g.recordCount, collectionSec: g.collectionSec, collectionMinutes: Math.round(g.collectionSec / 60), eventCount: g.eventCount, visitCount: g.visits.size, uniqueDays: g.days.size, confidenceCounts: g.confidenceCounts }));
+    return { rows: sortRows(rows, groupBy), totals: { recordCount }, missingDates };
+  }
+
   function fillMissing(rows, values) {
     const dims = Object.keys(values || {});
     const index = new Map((rows || []).map(r => [dims.map(d => r[d]).join(''), r]));
@@ -386,6 +475,9 @@
   return {
     CELL_DIMENSIONS,
     DIST_DIMENSIONS,
+    MANEUVER_DIMENSIONS,
+    ROAD_CONTEXT_DIMENSIONS,
+    ANALYSIS_CONDITION_DIMENSIONS,
     aggregateDistributions,
     filterDaySummary,
     DIMENSION_LABELS,
@@ -393,6 +485,7 @@
     buildConditionSummary,
     isStale,
     aggregate,
+    aggregateAnalysis,
     fillMissing,
     dimensionValueLabel,
     describeConditions,

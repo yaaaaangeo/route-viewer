@@ -66,7 +66,7 @@ R.SCORE_KEYS.forEach(k => {
   const bad = R.defaultRecommendationSettings();
   bad.weights.timePeriod = 40;
   const v = R.validateRecommendationSettings(bad);
-  check('4. 가중치 합계가 100%가 아니면 저장 거부(이유 표시)', !v.ok && v.errors.some(e => /합계가 110/.test(e)), v.errors.join(' | '));
+  check('4. 가중치 합계가 100%가 아니면 저장 거부(이유 표시)', !v.ok && v.errors.some(e => /합계가 120/.test(e)), v.errors.join(' | '));
   let threw = null;
   try { R.normalizeRecommendationPatch({ recommendationSettings: bad }); } catch (e) { threw = e; }
   check('   설정 패치도 같은 검증으로 막는다', !!threw && Array.isArray(threw.errors));
@@ -161,10 +161,10 @@ section('C. 데이터 누락');
     r.condition.weather === null && r.subScores.weatherDiversity === null && res.dataset.weatherCategories.length === 0
     && !r.predictedEdgeCaseHints.some(h => h.code === 'RAIN_REFLECTION') && res.limitations.some(l => /날씨 기록이 없어/.test(l)),
     `weather=${r.condition.weather} · 날씨 점수 ${r.subScores.weatherDiversity}`);
-  // 이 데이터에는 Coverage 계산값도, 2대 이상 차량도 없어서 세 항목(날씨 15 · Coverage 25 · 차량 5)이 빠진다
+  // Coverage·지도 Context·날씨·차량 편중은 근거가 없어 제외하고 남은 항목만 재정규화한다.
   const excluded = r.breakdown.filter(b => b.excluded).map(b => b.key).sort();
   check('   데이터가 없는 항목을 뺀 만큼 남은 가중치를 다시 100%로 나눈다(점수는 0~100)',
-    excluded.join(',') === 'coverage,vehicleImbalance,weatherDiversity' && r.availableWeight === 55 && r.score <= 100
+    excluded.join(',') === 'coverage,roadContext,vehicleImbalance,weatherDiversity' && r.availableWeight === 55 && r.score <= 100
     && Math.abs(r.breakdown.filter(b => !b.excluded).reduce((a2, b) => a2 + b.effectiveWeight, 0) - 100) < 0.05,
     `제외 ${excluded.join(',')} · 남은 가중치 ${r.availableWeight}%`);
 }

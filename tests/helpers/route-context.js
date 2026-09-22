@@ -102,9 +102,11 @@ function createStorageContext({ api, indexedDB, IDBKeyRange }) {
   load(ctx, 'src/js/coverage-grid.js');
   load(ctx, 'src/js/collection-stats.js');
   load(ctx, 'src/js/time-conditions.js');
+  load(ctx, 'src/js/issue-filter.js');
+  load(ctx, 'src/js/ego-maneuver.js');
+  load(ctx, 'src/js/road-context.js');
   load(ctx, 'src/js/condition-stats.js');
   load(ctx, 'src/js/recommendation.js');
-  load(ctx, 'src/js/issue-filter.js');
   load(ctx, 'src/js/subzones.js');
   load(ctx, 'src/js/road-graph.js');
   load(ctx, 'src/js/auto-subzones.js');

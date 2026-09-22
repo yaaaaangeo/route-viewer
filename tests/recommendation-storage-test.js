@@ -84,7 +84,7 @@ function createRecommendUi(db, extra) {
     ACTIVE_ZONE_NAMES: [], ZONE_COLORS: {}, styleZoneButtons() {}, refreshZoneCache: async () => [],
     renderConsole() {}, switchTab() {}, openModal() {}, closeModal() {},
   }, extra || {}));
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/ego-maneuver.js', 'src/js/road-context.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
     'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js', 'src/js/calendar.js', 'src/js/statistics.js', 'src/js/settings.js',
     'src/js/recommend-view.js'].forEach(f => load(ctx, f));
   const run = code => vm.runInContext(code, ctx);
@@ -99,7 +99,7 @@ async function sqliteRouteDB(db) {
 }
 async function idbRouteDB(fake) {
   const ctx = baseContext({ indexedDB: fake.indexedDB, IDBKeyRange: fake.IDBKeyRange, document: fakeDocument(), setInterval: () => 0 });
-  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
+  ['src/js/quality.js', 'src/js/collection-stats.js', 'src/js/time-conditions.js', 'src/js/issue-filter.js', 'src/js/ego-maneuver.js', 'src/js/road-context.js', 'src/js/condition-stats.js', 'src/js/recommendation.js',
     'src/js/core.js', 'src/js/coverage-grid.js', 'src/js/storage.js'].forEach(f => load(ctx, f));
   await ctx.RouteDB.init();
   return { RouteDB: ctx.RouteDB, ctx };
@@ -185,19 +185,19 @@ async function main() {
     const pointsBefore = (await RouteDB.stats()).points;
     const defaults = (await RouteDB.getSettings()).recommendationSettings;
     check(`[${kind}] 설정이 없으면 기본 가중치·목표를 돌려준다`,
-      defaults.weights.timePeriod === 30 && defaults.periodTargets.morning_peak.minutes === 240 && defaults.resultCount === 10);
+      defaults.weights.timePeriod === 20 && defaults.weights.maneuver === 15 && defaults.weights.roadContext === 15 && defaults.periodTargets.morning_peak.minutes === 240 && defaults.resultCount === 10);
     const good = R.defaultRecommendationSettings();
-    good.weights = { timePeriod: 40, coverage: 20, lightCondition: 15, weatherDiversity: 10, staleness: 10, vehicleImbalance: 5 };
+    good.weights = { timePeriod: 30, coverage: 15, lightCondition: 10, weatherDiversity: 10, maneuver: 10, roadContext: 10, staleness: 10, vehicleImbalance: 5 };
     good.periodTargets.evening_peak = { minutes: 300, visits: 5 };
     const savedSettings = await RouteDB.setSettings({ recommendationSettings: good });
     check(`[${kind}] 정상 설정 저장(가중치 합계 100%)`,
-      savedSettings.recommendationSettings.weights.timePeriod === 40 && savedSettings.recommendationSettings.periodTargets.evening_peak.minutes === 300);
+      savedSettings.recommendationSettings.weights.timePeriod === 30 && savedSettings.recommendationSettings.periodTargets.evening_peak.minutes === 300);
     const bad = R.defaultRecommendationSettings();
     bad.weights.coverage = 40;
     let err = null;
     try { await RouteDB.setSettings({ recommendationSettings: bad }); } catch (e) { err = e; }
     check(`[${kind}] 가중치 합계가 100%가 아니면 저장 거부 · 기존 설정 유지`,
-      !!err && /합계/.test(err.message) && (await RouteDB.getSettings()).recommendationSettings.weights.coverage === 20, err && err.message.split('\n')[0]);
+      !!err && /합계/.test(err.message) && (await RouteDB.getSettings()).recommendationSettings.weights.coverage === 15, err && err.message.split('\n')[0]);
     const bad2 = R.defaultRecommendationSettings();
     bad2.resultCount = 0;
     let err2 = null;
@@ -321,13 +321,15 @@ async function main() {
     check('25. 가중치 합계가 100%가 아니면 저장하지 않고 이유를 보여준다',
       rejected === false && /합계/.test(ui.html('rec-settings-errors')) && stats().computations === beforeSettings,
       ui.html('rec-settings-errors').replace(/<[^>]+>/g, ' ').trim().slice(0, 60));
+    ui.run("onRecommendationSettingInput(['weights','timePeriod'],40)");
     ui.run("onRecommendationSettingInput(['weights','coverage'],5)");
+    ui.run("onRecommendationSettingInput(['weights','weatherDiversity'],0)");
     const savedOk = await ui.run('saveRecommendationSettings()');
     check('   설정 저장 후 추천이 다시 계산된다',
-      savedOk === true && stats().computations === beforeSettings + 1 && db.getSettings().recommendationSettings.weights.timePeriod === 50,
+      savedOk === true && stats().computations === beforeSettings + 1 && db.getSettings().recommendationSettings.weights.timePeriod === 40,
       `계산 ${stats().computations}회`);
     const restored = await ui.run('restoreDefaultRecommendationSettings()');
-    check('   기본값 복원', restored === true && db.getSettings().recommendationSettings.weights.timePeriod === 30);
+    check('   기본값 복원', restored === true && db.getSettings().recommendationSettings.weights.timePeriod === 20);
 
     // 27. 늦게 끝난 계산이 최신 결과를 덮지 않는다
     const slowUi = createRecommendUi(new RouteDatabase(freshPath()));
@@ -442,7 +444,7 @@ async function main() {
       && db.listDateSummaries().every(s => s.conditionCells.every(c => Number.isInteger(c.speedCount)))
       && recs.empty === false && recs.candidateCount > 0,
       `${recs.candidateCount}개 후보`);
-    check('   추천 설정이 없던 DB는 기본값으로 동작', db.getSettings().recommendationSettings.weights.timePeriod === 30
+    check('   추천 설정이 없던 DB는 기본값으로 동작', db.getSettings().recommendationSettings.weights.timePeriod === 20
       && db.getSettings().coverageDepthTiers[0].label === '미수집');
     const summary = db.listDateSummaries()[0];
     check('32. 기존 기능 회귀 없음 — 달력 요약·조건 칸·분류 서명이 그대로 있다',
