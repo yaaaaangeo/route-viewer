@@ -1996,13 +1996,30 @@ function haversine(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+// 앞뒤 기록을 비교하는 계산(거리·공백·좌표 점프)은 차량을 섞으면 안 된다 —
+// src/js/core.js 의 vehicleIndexPartitions 와 같은 규칙. 입력 순서를 지키므로
+// 시간순으로 들어온 rows 는 차량 안에서도 여전히 시간순이다.
+function vehiclePartitions(rows) {
+  const byVehicle = new Map();
+  for (const r of rows || []) {
+    const v = String((r && r.vehicle) || '');
+    if (!byVehicle.has(v)) byVehicle.set(v, []);
+    byVehicle.get(v).push(r);
+  }
+  return [...byVehicle.values()];
+}
+
 // Import 결과 리포트의 "거리" — 그 파일 자체의 레코드를 시간순으로 이었을 때 거리.
 // (날짜별 누적 거리와는 별개로, "이 파일 하나가 몇 km짜리 주행이었는지"를 보여준다)
 function fileDistanceKm(normalizedRecords) {
   const sorted = [...normalizedRecords].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
   let distM = 0;
-  for (let i = 1; i < sorted.length; i++) {
-    distM += haversine(sorted[i - 1].lat, sorted[i - 1].lng, sorted[i].lat, sorted[i].lng);
+  // 한 파일에 차량이 두 대 이상 들어 있으면 차량별로 잰다 — 안 그러면 차량이 바뀔 때마다
+  // 두 차량 사이 직선거리가 주행거리에 얹힌다(buildDaySummary 와 같은 규칙)
+  for (const part of vehiclePartitions(sorted)) {
+    for (let k = 1; k < part.length; k++) {
+      distM += haversine(part[k - 1].lat, part[k - 1].lng, part[k].lat, part[k].lng);
+    }
   }
   return Math.round(distM / 10) / 100;
 }
@@ -2022,27 +2039,34 @@ function buildDaySummary(rows, classification) {
   let gaps = 0, teleports = 0;
   let distM = 0;
 
-  for (let i = 0; i < rows.length; i++) {
-    const p = rows[i];
+  for (const p of rows) {
     if (p.zone) zoneCount[p.zone] = (zoneCount[p.zone] || 0) + 1;
     if (p.vehicle) vehicleCount[p.vehicle] = (vehicleCount[p.vehicle] || 0) + 1;
     if (p.time) {
       if (minTime === null || p.time < minTime) minTime = p.time;
       if (maxTime === null || p.time > maxTime) maxTime = p.time;
     }
-    if (i === 0) continue;
-    const prev = rows[i - 1];
-    const t1 = timeToSec(prev.time), t2 = timeToSec(p.time);
-    let dtSec = null;
-    if (t1 != null && t2 != null) {
-      dtSec = t2 - t1;
-      if (dtSec < 0) dtSec += 86400;
+  }
+
+  // 거리·공백·점프는 차량마다 따로 센다. rows 는 시간순으로만 정렬돼 있어서(getRecordsByDate,
+  // _rebuildDateSummary) 두 대가 같이 달린 날은 좌표가 번갈아 섞이고, 그대로 앞뒤를 이으면
+  // 차량이 바뀌는 자리마다 "0초 만에 몇 km" 가 되어 가짜 점프와 가짜 거리가 잡힌다.
+  // (src/js/core.js 의 vehicleIndexPartitions·buildDaySummaryFromPoints 와 같은 규칙)
+  for (const part of vehiclePartitions(rows)) {
+    for (let k = 1; k < part.length; k++) {
+      const prev = part[k - 1], p = part[k];
+      const t1 = timeToSec(prev.time), t2 = timeToSec(p.time);
+      let dtSec = null;
+      if (t1 != null && t2 != null) {
+        dtSec = t2 - t1;
+        if (dtSec < 0) dtSec += 86400;
+      }
+      const d = haversine(prev.lat, prev.lng, p.lat, p.lng);
+      distM += d;
+      if (dtSec != null && dtSec > GAP_THRESHOLD_SEC) gaps++;
+      if (dtSec != null && dtSec > 0 && (d / dtSec) * 3.6 > TELEPORT_SPEED_KMH) teleports++;
+      else if (dtSec === 0 && d > 200) teleports++;
     }
-    const d = haversine(prev.lat, prev.lng, p.lat, p.lng);
-    distM += d;
-    if (dtSec != null && dtSec > GAP_THRESHOLD_SEC) gaps++;
-    if (dtSec != null && dtSec > 0 && (d / dtSec) * 3.6 > TELEPORT_SPEED_KMH) teleports++;
-    else if (dtSec === 0 && d > 200) teleports++;
   }
 
   const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);

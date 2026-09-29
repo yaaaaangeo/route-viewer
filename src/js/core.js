@@ -117,6 +117,24 @@ function dstr(d){
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
 }
 
+// ── 차량별 파티션 ─────────────────────────────────────
+// 하루치 기록은 시간순으로만 정렬돼 온다(getRecordsByDate). 그래서 차량이 두 대 이상
+// 달린 날은 서로 다른 차량의 좌표가 번갈아 섞이고, 그걸 그대로 앞뒤로 이으면
+// "0초 만에 몇 km 이동"이 되어 멀쩡한 기록이 좌표 점프로 잡힌다(거리·경로도 마찬가지).
+// 앞뒤 점을 비교하는 계산은 전부 이 함수로 차량을 나눈 뒤에 해야 한다.
+// 커버리지 계산은 예전부터 date+vehicle 로 나눠 쓰고 있다(coverage-grid.js) —
+// 같은 규칙을 날짜 상세·품질 검사에도 쓰는 것이다.
+// 반환: 차량마다 원본 배열의 인덱스 목록(입력 순서를 지키니 차량 안에서는 여전히 시간순)
+function vehicleIndexPartitions(dayPoints){
+  const byVehicle=new Map();
+  (dayPoints||[]).forEach((p,i)=>{
+    const v=String((p&&p.vehicle)||'');
+    if(!byVehicle.has(v)) byVehicle.set(v,[]);
+    byVehicle.get(v).push(i);
+  });
+  return [...byVehicle.values()];
+}
+
 // point 배열(zone/vehicle/time 포함) → 요약(구역별/차량별 카운트, 시간범위)
 function summarizePoints(dayPoints){
   const zoneCount={}, vehicleCount={};
@@ -143,9 +161,13 @@ function summarizePoints(dayPoints){
 window.buildDaySummaryFromPoints=function(sortedPoints,classification){
   const base=summarizePoints(sortedPoints);
   const q=analyzeDayQuality(sortedPoints);
+  // 거리도 차량별로 — 섞인 채로 더하면 차량이 바뀔 때마다 두 차량 사이 직선거리가 얹힌다
   let distM=0;
-  for(let i=1;i<sortedPoints.length;i++){
-    distM+=haversine(sortedPoints[i-1].lat,sortedPoints[i-1].lng,sortedPoints[i].lat,sortedPoints[i].lng);
+  for(const part of vehicleIndexPartitions(sortedPoints)){
+    for(let k=1;k<part.length;k++){
+      const a=sortedPoints[part[k-1]], b=sortedPoints[part[k]];
+      distM+=haversine(a.lat,a.lng,b.lat,b.lng);
+    }
   }
   return {
     zones:base.zones, vehicles:base.vehicles,

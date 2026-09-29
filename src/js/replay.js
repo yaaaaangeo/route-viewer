@@ -21,28 +21,35 @@ function replaySegmentStatus(a,b){
   };
 }
 
+// 차량마다 따로 잇는다 — 두 대가 같이 달린 날은 좌표가 시간순으로 번갈아 섞여 있어서,
+// 그대로 이으면 두 차량 사이를 오가는 경로가 된다(core.js vehicleIndexPartitions 주석 참고).
 function buildReplayRouteSegments(dayPoints){
   const segments=[];
   if(!dayPoints||dayPoints.length<2) return segments;
-  let current=[dayPoints[0]];
-  for(let i=1;i<dayPoints.length;i++){
-    const prev=dayPoints[i-1], cur=dayPoints[i];
-    if(replaySegmentStatus(prev,cur).connected){
-      current.push(cur);
-    }else{
-      if(current.length>=2) segments.push(current);
-      current=[cur];
+  for(const part of vehicleIndexPartitions(dayPoints)){
+    if(part.length<2) continue;
+    let current=[dayPoints[part[0]]];
+    for(let k=1;k<part.length;k++){
+      const prev=dayPoints[part[k-1]], cur=dayPoints[part[k]];
+      if(replaySegmentStatus(prev,cur).connected){
+        current.push(cur);
+      }else{
+        if(current.length>=2) segments.push(current);
+        current=[cur];
+      }
     }
+    if(current.length>=2) segments.push(current);
   }
-  if(current.length>=2) segments.push(current);
   return segments;
 }
 
 function replayConnectedDistanceM(dayPoints){
   let distM=0;
-  for(let i=1;i<dayPoints.length;i++){
-    const status=replaySegmentStatus(dayPoints[i-1],dayPoints[i]);
-    if(status.connected) distM+=status.distM;
+  for(const part of vehicleIndexPartitions(dayPoints)){
+    for(let k=1;k<part.length;k++){
+      const status=replaySegmentStatus(dayPoints[part[k-1]],dayPoints[part[k]]);
+      if(status.connected) distM+=status.distM;
+    }
   }
   return distM;
 }
@@ -77,7 +84,7 @@ function renderConsole(){
   const quality=analyzeDayQuality(points);
   renderQualityPanel(quality);
   quality.gaps.forEach(g=>{
-    const p1=points[g.i-1], p2=points[g.i];
+    const p1=points[g.prevI], p2=points[g.i];
     L.circleMarker([p1.lat,p1.lng],{radius:6,color:'#ffb84d',fillColor:'#ffb84d',fillOpacity:.9,weight:1})
       .bindPopup(`⏱ 시간 공백 시작<br/>다음 기록까지 ${g.gapSec}초`).addTo(routeLayer);
     L.circleMarker([p2.lat,p2.lng],{radius:6,color:'#ffb84d',fillColor:'#ffb84d',fillOpacity:.9,weight:1})
