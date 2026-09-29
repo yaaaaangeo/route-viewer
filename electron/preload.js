@@ -84,11 +84,16 @@ contextBridge.exposeInMainWorld('routeAPI', {
   buildBackupPayload: () => call('db:buildBackupPayload'),
   restoreBackupPayload: (payload, mode) => call('db:restoreBackupPayload', payload, mode),
   rebuildAllSummaries: () => call('db:rebuildAllSummaries'),
+  // 개인용 Career Log(로컬 전용) — kind: kpiSnapshots | collectionPlans | contributions | workTimes
+  listCareerItems: kind => call('db:listCareerItems', kind),
+  saveCareerItem: (kind, item) => call('db:saveCareerItem', kind, item),
+  deleteCareerItem: (kind, id) => call('db:deleteCareerItem', kind, id),
 
   // ── 앱 ──
   pickRouteFiles: () => call('app:pickRouteFiles'),
   pickBackupFile: () => call('app:pickBackupFile'),
   saveBackupFile: (name, json) => call('app:saveBackupFile', name, json),
+  saveTextFile: (name, text, format) => call('app:saveTextFile', name, text, format),
   confirm: opts => call('app:confirm', opts),
   info: () => call('app:info'),
   revealDatabase: () => call('app:revealDatabase'),

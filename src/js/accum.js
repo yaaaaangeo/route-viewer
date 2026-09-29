@@ -1434,11 +1434,12 @@ async function getZoneCoverageGeometry(zoneName){
 // ── 날짜에 따라 달라지는 동적 부분 ─────────────────────────────────
 // 정적 Geometry(캐시) 위에 선택 기간의 방문 집계(getCellVisitCounts — fromDate/toDate
 // 조건 포함)와 수동 셀 상태를 얹어 칸마다 최종 판정·방문 횟수를 낸다.
-async function computeZoneCoverageCells(zoneName){
+// options.visitFilter: 누적 지도 화면 필터 대신 쓸 방문 집계 조건(Career Log 가 "전체 기간 · 고정 데이터 기준"으로 부른다)
+async function computeZoneCoverageCells(zoneName,options){
   const grid=zoneGrid(zoneName);
   if(!grid) return null; // 경계 미설정
   const {minLat,maxLat,minLng,maxLng,refLat,latDeg,lngDeg,cellSizeM}=grid;
-  const dateFilter=accumDateFilter();
+  const dateFilter=(options&&options.visitFilter)||accumDateFilter();
   const [geometry,visitRows,manualCells]=await Promise.all([
     getZoneCoverageGeometry(zoneName),
     RouteDB.getCellVisitCounts({minLat,maxLat,minLng,maxLng,refLat,lngDeg,...dateFilter},cellSizeM),

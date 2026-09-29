@@ -43,6 +43,7 @@ const API_METHODS = [
   'listSubZones', 'getSubZone', 'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'getSubZoneStats',
   'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',
   'getHDMapPriorityPolygons', 'saveHDMapPriorityPolygon',
+  'listCareerItems', 'saveCareerItem', 'deleteCareerItem',
 ];
 
 function createDesktopApi(db) {
@@ -108,6 +109,7 @@ function createStorageContext({ api, indexedDB, IDBKeyRange }) {
   load(ctx, 'src/js/road-context.js');
   load(ctx, 'src/js/condition-stats.js');
   load(ctx, 'src/js/recommendation.js');
+  load(ctx, 'src/js/career-metrics.js');
   load(ctx, 'src/js/subzones.js');
   load(ctx, 'src/js/road-graph.js');
   load(ctx, 'src/js/auto-subzones.js');

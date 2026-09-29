@@ -30,6 +30,18 @@
     { threshold: 5, label: '충분', color: '#5fd88a' },
   ];
 
+  // Career Log 저장소 이름 — 정의는 career-metrics.js(CAREER_KINDS). 그 파일 없이 storage.js 만 올라와도
+  // (예: 테스트) v6 업그레이드에서 저장소가 빠지지 않도록 같은 이름을 여기에도 둔다.
+  const CAREER_KINDS_FALLBACK = {
+    kpiSnapshots: { store: 'careerKpiSnapshots' },
+    collectionPlans: { store: 'careerCollectionPlans' },
+    contributions: { store: 'careerContributionLog' },
+    workTimes: { store: 'careerWorkTimeLog' },
+  };
+  function careerKinds() {
+    return (global.CareerMetrics && global.CareerMetrics.CAREER_KINDS) || CAREER_KINDS_FALLBACK;
+  }
+
   function recordKey(rec) {
     return [
       rec.date,
@@ -154,6 +166,9 @@
       setBackupHistory: h => api.setBackupHistory(h),
       buildBackupPayload: () => api.buildBackupPayload(),
       restoreBackupPayload: (p, m) => api.restoreBackupPayload(p, m),
+      listCareerItems: kind => api.listCareerItems(kind),
+      saveCareerItem: (kind, item) => api.saveCareerItem(kind, item),
+      deleteCareerItem: (kind, id) => api.deleteCareerItem(kind, id),
     };
   }
 
@@ -165,7 +180,8 @@
   const IDB_NAME = 'route-viewer';
   // v2: vehicles/zones 설정 저장소 추가 · v3: recordSources(GPS 레코드 ↔ Import 파일 출처) 추가
   // v4: subZones(세부 수집 구역) · v5: autoAnalysis(자동 분석 캐시) + subZoneOverrides(사용자 보정)
-  const IDB_VERSION = 5;
+  // v6: 개인용 Career Log 저장소 4개(career-metrics.js CAREER_KINDS) — 로컬 전용, 백업 payload 에 넣지 않는다
+  const IDB_VERSION = 6;
 
   function makeIdbBackend() {
     let dbp = null;   // open() 진행중 promise
@@ -204,6 +220,10 @@
             st.createIndex('key', 'key');
             st.createIndex('importId', 'importId');
           }
+          // Career Log(개인용) — 예전 DB 를 열면 이 저장소들만 새로 생긴다
+          Object.values(careerKinds()).forEach(({ store }) => {
+            if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
+          });
         };
         req.onsuccess = () => { rawDb = req.result; resolve(rawDb); };
         req.onerror = () => reject(req.error);
@@ -1596,6 +1616,44 @@
         return (row && row.conflictDetails) || [];
       },
 
+      // ── Career Log(개인용 · local-only) — database.js listCareerItems/saveCareerItem/deleteCareerItem 과 같은 규칙.
+      //    buildBackupPayload 는 이 저장소를 읽지 않는다(백업 파일·서버 동기화에 들어가지 않음).
+      async listCareerItems(kind) {
+        const def = careerKinds()[kind];
+        if (!def) throw new Error(`알 수 없는 Career Log 영역이에요(${kind}).`);
+        const db = await ready();
+        const rows = await reqp(db.transaction([def.store], 'readonly').objectStore(def.store).getAll());
+        const CM = global.CareerMetrics;
+        return rows.slice().sort((a, b) => {
+          const ka = CM.storedSortKey(kind, a), kb = CM.storedSortKey(kind, b);
+          return ka < kb ? -1 : ka > kb ? 1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        });
+      },
+
+      async saveCareerItem(kind, item) {
+        const def = careerKinds()[kind];
+        const value = global.CareerMetrics.normalizeStoredItem(kind, item);
+        const db = await ready();
+        if (kind === 'collectionPlans' && await reqp(db.transaction([def.store], 'readonly').objectStore(def.store).get(value.id))) {
+          throw new Error('이미 저장된 Plan 버전은 바꿀 수 없어요 — 수정하면 새 버전으로 저장돼요.');
+        }
+        const t = db.transaction([def.store], 'readwrite');
+        t.objectStore(def.store).put(value);
+        await done(t);
+        return value;
+      },
+
+      async deleteCareerItem(kind, id) {
+        const def = careerKinds()[kind];
+        if (!def) throw new Error(`알 수 없는 Career Log 영역이에요(${kind}).`);
+        if (kind === 'collectionPlans') throw new Error('Plan 버전 기록은 지우지 않아요.');
+        const db = await ready();
+        const t = db.transaction([def.store], 'readwrite');
+        t.objectStore(def.store).delete(String(id || ''));
+        await done(t);
+        return true;
+      },
+
       getBackupHistory() { return metaGet('backupHistory', []).then(v => v || []); },
       setBackupHistory(h) { return metaSet('backupHistory', Array.isArray(h) ? h.slice(0, 10) : []); },
 
@@ -1764,6 +1822,8 @@
     'getStatsBundle', 'getAccumBundle',
     'listSubZones', 'getSubZone', 'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'getSubZoneStats',
     'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',
+    // Career Log 은 주행 데이터가 아니라서 MUTATING_METHODS(Coverage·추천 캐시 무효화)에 넣지 않는다
+    'listCareerItems', 'saveCareerItem', 'deleteCareerItem',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

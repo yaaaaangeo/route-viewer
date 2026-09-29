@@ -343,6 +343,10 @@ function registerIpc() {
   handle('db:buildBackupPayload', () => openDatabase().buildBackupPayload());
   handle('db:restoreBackupPayload', (payload, mode) => openDatabase().restoreBackupPayload(payload, mode));
   handle('db:rebuildAllSummaries', () => openDatabase().rebuildAllSummaries());
+  // 개인용 Career Log — 로컬 SQLite 에만 저장(백업·서버 동기화 대상 아님)
+  handle('db:listCareerItems', kind => openDatabase().listCareerItems(kind));
+  handle('db:saveCareerItem', (kind, item) => openDatabase().saveCareerItem(kind, item));
+  handle('db:deleteCareerItem', (kind, id) => openDatabase().deleteCareerItem(kind, id));
 
   // 파일 선택 다이얼로그 — 메뉴/버튼에서 부르면 실제 경로를 읽어 넘겨준다
   handle('app:pickRouteFiles', async () => {
@@ -378,6 +382,27 @@ function registerIpc() {
     if (res.canceled) return null;
     fs.writeFileSync(res.filePath, json, 'utf8');
     return res.filePath;
+  });
+
+  // Career Log Export(JSON/CSV/Markdown) — 사용자가 고른 로컬 경로에만 쓴다(네트워크 전송 없음)
+  const TEXT_FILE_FILTERS = {
+    json: { name: 'JSON', extensions: ['json'] },
+    csv: { name: 'CSV', extensions: ['csv'] },
+    md: { name: 'Markdown', extensions: ['md'] },
+  };
+  handle('app:saveTextFile', async (defaultName, text, format) => {
+    const filter = TEXT_FILE_FILTERS[format];
+    if (!filter) throw new Error('저장할 수 없는 파일 형식이에요.');
+    const res = await dialog.showSaveDialog(mainWindow, {
+      title: '파일로 저장',
+      defaultPath: path.join(app.getPath('documents'), path.basename(String(defaultName || `export.${format}`))),
+      filters: [filter],
+    });
+    if (res.canceled || !res.filePath) return null;
+    const ext = '.' + filter.extensions[0];
+    const filePath = res.filePath.toLowerCase().endsWith(ext) ? res.filePath : res.filePath + ext;
+    fs.writeFileSync(filePath, String(text || ''), 'utf8');
+    return filePath;
   });
 
   handle('app:confirm', async opts => {

@@ -33,6 +33,7 @@ const ConditionStats = require('../src/js/condition-stats.js');
 const Recommendation = require('../src/js/recommendation.js');
 const IssueFilter = require('../src/js/issue-filter.js');
 const HDMapPriority = require('../src/js/hdmap-priority.js');
+const CareerMetrics = require('../src/js/career-metrics.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -312,6 +313,21 @@ class RouteDatabase {
     // 매번 그 시점의 격자 기준으로 다시 계산해서 항상 정확한 칸에 맞는다.
     this._ensureColumns('zones', {
       manual_cells: "TEXT NOT NULL DEFAULT '{}'",
+    });
+
+    // 개인용 Career Log(KPI Snapshot · Collection Plan 버전 · Contribution · 작업 시간) — 로컬 전용.
+    // 주행 기록과 섞지 않으려고 테이블을 따로 두고, buildBackupPayload(백업·서버 동기화)에 넣지 않는다.
+    // 예전 DB 는 이 테이블이 없을 뿐이라 여기서 새로 생기기만 한다(기존 데이터는 건드리지 않음).
+    Object.values(CareerMetrics.CAREER_KINDS).forEach(({ table }) => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ${table} (
+          id         TEXT PRIMARY KEY,
+          sort_key   TEXT NOT NULL DEFAULT '',
+          data_json  TEXT NOT NULL DEFAULT '{}',
+          updated_at TEXT NOT NULL DEFAULT '',
+          local_only INTEGER NOT NULL DEFAULT 1
+        );
+      `);
     });
 
     // 예전 DB 에 issue_mask 컬럼을 새로 붙였으면 한 번만 전부 계산해 둔다
@@ -1530,6 +1546,44 @@ class RouteDatabase {
     else all[key] = normalizeRecommendationState(state);
     this.setMeta('recommendation_states', JSON.stringify(all));
     return all;
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  Career Log (개인용 · local-only) — 규칙은 src/js/career-metrics.js.
+  //  주행 기록·설정과 따로 저장하고, 백업/서버 동기화 payload 에는 절대 넣지 않는다.
+  //  Collection Plan 은 버전 기록이라 덮어쓰거나 지우지 않는다(수정 = 새 버전).
+  // ══════════════════════════════════════════════════════
+  _careerTable(kind) {
+    const def = CareerMetrics.CAREER_KINDS[kind];
+    if (!def) throw new Error(`알 수 없는 Career Log 영역이에요(${kind}).`);
+    return def.table;
+  }
+
+  listCareerItems(kind) {
+    const table = this._careerTable(kind);
+    return this.db.all(`SELECT data_json FROM ${table} ORDER BY sort_key, id`).map(r => {
+      try { return JSON.parse(r.data_json); } catch (_) { return null; }
+    }).filter(Boolean);
+  }
+
+  saveCareerItem(kind, item) {
+    const table = this._careerTable(kind);
+    const value = CareerMetrics.normalizeStoredItem(kind, item);
+    if (kind === 'collectionPlans' && this.db.get(`SELECT 1 AS x FROM ${table} WHERE id = ?`, [value.id])) {
+      throw new Error('이미 저장된 Plan 버전은 바꿀 수 없어요 — 수정하면 새 버전으로 저장돼요.');
+    }
+    this.db.run(
+      `INSERT OR REPLACE INTO ${table} (id, sort_key, data_json, updated_at, local_only) VALUES (?, ?, ?, ?, 1)`,
+      [value.id, CareerMetrics.storedSortKey(kind, value), JSON.stringify(value), new Date().toISOString()]
+    );
+    return value;
+  }
+
+  deleteCareerItem(kind, id) {
+    const table = this._careerTable(kind);
+    if (kind === 'collectionPlans') throw new Error('Plan 버전 기록은 지우지 않아요.');
+    this.db.run(`DELETE FROM ${table} WHERE id = ?`, [String(id || '')]);
+    return true;
   }
 
   // options: {issueOnly, issueStatus, search, withRelatedRecords} — 데이터 관리의 "이슈만 보기"·파일명/메모 검색.
