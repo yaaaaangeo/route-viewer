@@ -15,7 +15,7 @@
 
 const recFilters={zone:'all',weekdayType:'all',trafficPeriod:'all',lightCondition:'all',weather:'all',vehicle:'',minConfidence:'low'};
 let recSort='score';
-const recRevisions={data:0,zone:0,manual:0,coverage:0,classification:0,settings:0};
+const recRevisions={data:0,zone:0,manual:0,coverage:0,classification:0,settings:0,hdmap:0};
 let recCache={key:null,result:null};
 let recStates={};
 const recSessionHidden=new Set();   // "이번에는 숨기기" — 저장하지 않음
@@ -36,10 +36,15 @@ function onRecommendDataChanged(evt){
   else if(m==='saveZonePolygons'||m==='saveZone'||m==='setZoneActive') recRevisions.zone++;
   else if(m==='saveZoneManualCells') recRevisions.manual++;
   else if(m==='saveCoverageSnapshot') recRevisions.coverage++;
+  // HD Map 우선 구축구역 경계가 바뀌면 사업 우선도(도로 Segment 추천)가 달라진다
+  else if(m==='saveHDMapPriorityPolygon') recRevisions.hdmap++;
   else if(m==='reclassifySummaries') recRevisions.classification++;
   else if(m==='setSettings'){
     const p=args[0]||{};
     if('recommendationSettings' in p){ recRevisions.settings++; recSettingsForm=null; }
+    if('segmentRecommendationSettings' in p) recRevisions.settings++;
+    // 사업 우선 정책이 바뀌면 추천 점수가 달라진다 — 캐시 키를 올려 다시 계산한다
+    if('priorityPolicies' in p) recRevisions.settings++;
     if(TimeConditions.CLASSIFICATION_SETTING_KEYS.some(k=>k in p)) recRevisions.classification++;
   }
 }
@@ -50,7 +55,7 @@ function recommendationCacheKey(){
     version:Recommendation.RECOMMENDATION_VERSION,
     dataRevision:recRevisions.data, zoneRevision:recRevisions.zone, manualCoverageRevision:recRevisions.manual,
     coverageSnapshotRevision:recRevisions.coverage, timeClassificationRevision:recRevisions.classification,
-    recommendationSettingsRevision:recRevisions.settings,
+    recommendationSettingsRevision:recRevisions.settings, hdmapPriorityRevision:recRevisions.hdmap,
     vehicle:recFilters.vehicle, today:Recommendation.kstDate(recommendationClock()),
     issueFilter:recommendationIssueFilter(),
   });
@@ -126,10 +131,14 @@ function renderRecommendationResult(){
   recommendStats.renders++;
   const statusEl=document.getElementById('rec-status');
   if(statusEl){ statusEl.style.display='none'; statusEl.textContent=''; }
+  applyRecommendationDetailVisibility();
+  renderTodayView();
   renderRecommendationSummary(res);
-  // 자동 분석(도로 Segment·세부 구역)은 저장소가 캐시한다 — 탭을 옮겼다고 다시 계산하지 않는다
+  // 자동 분석(도로 Segment·세부 구역)은 저장소가 캐시한다 — 탭을 옮겼다고 다시 계산하지 않는다.
+  // 추천 입력(데이터·설정 등)이 바뀌어 캐시 키가 달라졌을 때만 다시 묻는다(저장소가 단계별 캐시를 판단).
   if (typeof renderAutoAnalysis === 'function') {
-    if (!autoAnalysis && !autoBusy) runAutoAnalysis({ force: false });
+    if (typeof ensureAutoAnalysisFresh === 'function') ensureAutoAnalysisFresh();
+    else if (!autoAnalysis && !autoBusy) runAutoAnalysis({ force: false });
     else renderAutoAnalysis();
   }
   if (typeof renderSubZoneSection === 'function') renderSubZoneSection();
@@ -478,8 +487,22 @@ function renderRecommendationLimitations(res){
 }
 
 // ── 카드 동작 — 추천 상태만 바꾸고 주행 기록은 건드리지 않는다 ──
+// 도로 구간 추천에는 "어떤 사업 우선 정책으로 계산했는지"를 함께 적어 둔다 — 나중에 숨김·완료 목록에서 추적
+function recommendationPolicyNote(r){
+  if(!r||!r.policy) return {};
+  const p=r.projectPriority;
+  return {policy:{policyId:r.policy.policyId,policyName:r.policy.policyName,updatedAt:r.policy.updatedAt,projectPriority:p?p.value:0,label:p?p.label:null,dataNeedScore:r.dataNeedScore,score:r.score}};
+}
+function statePolicyText(id){
+  const st=recStates&&recStates[id];
+  return st&&st.policy?`당시 적용 정책: ${st.policy.policyName}${st.policy.label?` · ${st.policy.label}`:''} · 사업 우선도 ${st.policy.projectPriority}`:'';
+}
+// 구역 추천과 도로 Segment 추천(오늘 추천 Top 3 에서 누름) 둘 다 같은 상태 저장소를 쓴다(id 가 겹치지 않음)
 function findRecommendation(id){
-  return recCache.result?recCache.result.recommendations.find(r=>r.id===id):null;
+  const zoneRec=recCache.result?recCache.result.recommendations.find(r=>r.id===id):null;
+  if(zoneRec) return zoneRec;
+  const seg=(typeof autoRecResult!=='undefined'&&autoRecResult)?(autoRecResult.allRecommendations||autoRecResult.recommendations||[]):[];
+  return seg.find(r=>r.id===id)||null;
 }
 
 function toggleRecommendationDetail(id){
@@ -495,7 +518,8 @@ function hideRecommendationOnce(id){
 async function snoozeRecommendation(id){
   const days=recCache.result?recCache.result.settings.snoozeDays:7;
   try{
-    recStates=await RouteDB.setRecommendationState(id,{status:'snoozed',until:Recommendation.snoozeUntil(recommendationClock(),days)});
+    const r=findRecommendation(id);
+    recStates=await RouteDB.setRecommendationState(id,{status:'snoozed',until:Recommendation.snoozeUntil(recommendationClock(),days),...recommendationPolicyNote(r)});
     showToast(`${days}일간 이 추천을 제외했어요.`);
   }catch(err){ showError('추천 상태를 저장하지 못했어요. ('+((err&&err.message)||err)+')'); }
   renderRecommendationResult();
@@ -506,7 +530,7 @@ async function completeRecommendation(id){
   if(!r) return;
   try{
     // 지금 실제 수집량을 함께 적어 둔다 — 나중에 새 데이터가 들어오면 이 값과 비교해 다시 평가한다
-    recStates=await RouteDB.setRecommendationState(id,{status:'completed',snapshot:{collectionSec:r.current.collectionSec,visitCount:r.current.visitCount}});
+    recStates=await RouteDB.setRecommendationState(id,{status:'completed',snapshot:{collectionSec:r.current.collectionSec,visitCount:r.current.visitCount},...recommendationPolicyNote(r)});
     showToast('수집 완료로 표시했어요. 주행 기록은 바뀌지 않고, 새 데이터를 불러오면 실제 수집량으로 다시 평가해요.');
   }catch(err){ showError('추천 상태를 저장하지 못했어요. ('+((err&&err.message)||err)+')'); }
   renderRecommendationResult();
@@ -517,6 +541,125 @@ async function restoreRecommendation(id){
   try{ recStates=await RouteDB.setRecommendationState(id,null); }
   catch(err){ showError('추천 상태를 되돌리지 못했어요. ('+((err&&err.message)||err)+')'); }
   renderRecommendationResult();
+}
+
+// ══════════════════════════════════════════════════════════
+//  오늘 추천 주행(간단 보기) — 운전 전에 "어디를 · 언제 · 왜"만
+//
+//  새로 계산하지 않는다. 이미 캐시된 도로 Segment 추천(autoRecResult)과 구역 추천(recCache)에서
+//  Recommendation.buildTodayPicks 가 오늘 요일 유형·운행 시간에 맞는 Top 3 를 고른다.
+//  운행 시간·차량 수는 아래 주행 계획과 같은 입력(recPlanForm)을 쓴다.
+//  점수·근거·신뢰도·Coverage·Maneuver·Road Context 는 "상세 분석 보기" 안에 그대로 있다.
+// ══════════════════════════════════════════════════════════
+const REC_DETAIL_LS_KEY='rv.recDetailOpen';
+let recDetailOpen=(function(){ try{ return localStorage.getItem(REC_DETAIL_LS_KEY)==='1'; }catch(_){ return false; } })();
+let recTodayResult=null;
+
+function applyRecommendationDetailVisibility(){
+  const wrap=document.getElementById('rec-detail-wrap');
+  if(wrap) wrap.style.display=recDetailOpen?'':'none';
+}
+
+function setRecommendationDetailOpen(open,scrollToId){
+  recDetailOpen=!!open;
+  try{ localStorage.setItem(REC_DETAIL_LS_KEY,recDetailOpen?'1':'0'); }catch(_){ /* 무시 */ }
+  applyRecommendationDetailVisibility();
+  renderTodayView();
+  // 접혀 있던 지도는 크기가 0으로 잡혀 있다 — 펼친 뒤 다시 잰다
+  if(recDetailOpen&&typeof autoMap!=='undefined'&&autoMap) setTimeout(()=>{ autoMap.invalidateSize(); if(typeof paintAutoMap==='function') paintAutoMap(); },0);
+  if(recDetailOpen&&scrollToId) setTimeout(()=>{ const el=document.getElementById(scrollToId); if(el&&el.scrollIntoView) el.scrollIntoView({behavior:'smooth',block:'start'}); },30);
+}
+
+function todayPicksInput(){
+  const seg=(typeof autoRecResult!=='undefined'&&autoRecResult)?(autoRecResult.allRecommendations||autoRecResult.recommendations||[]):[];
+  const res=recCache.result;
+  return {
+    segmentRecs:seg,
+    zoneRecs:res&&!res.empty?res.recommendations:[],
+    states:recStates, sessionHidden:recSessionHidden, now:recommendationClock(),
+    window:{start:recPlanForm.startTime,end:recPlanForm.endTime},
+    vehicleCount:recPlanForm.vehicleCount, count:3,
+  };
+}
+
+function renderTodayView(){
+  const el=document.getElementById('rec-today');
+  if(!el) return;
+  const res=recCache.result;
+  const detailBtn=`<button class="btn ghost" type="button" onclick="setRecommendationDetailOpen(${recDetailOpen?'false':'true'})">${recDetailOpen?'상세 분석 접기':'상세 분석 보기'}</button>`;
+  const head=(sub)=>`<div class="rec-today-head"><div class="rec-today-title">오늘 추천 주행</div>${sub||''}</div>`;
+  if(!res){ el.innerHTML=''; return; }
+  if(res.empty){
+    el.innerHTML=`${head()}<div class="rec-empty"><div>${recEsc(res.emptyReason)}</div></div><div class="rec-today-actions">${detailBtn}</div>`;
+    return;
+  }
+  const busy=typeof autoBusy!=='undefined'&&autoBusy;
+  const picks=Recommendation.buildTodayPicks(todayPicksInput());
+  recTodayResult=picks;
+  const form=`<div class="rec-today-form">
+      <label class="rec-filter"><span>운행</span><input type="time" value="${recEsc(recPlanForm.startTime)}" onchange="onPlanInput('startTime',this.value)"/></label>
+      <label class="rec-filter"><span>~</span><input type="time" value="${recEsc(recPlanForm.endTime)}" onchange="onPlanInput('endTime',this.value)"/></label>
+      <label class="rec-filter"><span>차량</span><input type="number" min="1" max="8" value="${recPlanForm.vehicleCount}" onchange="onPlanInput('vehicleCount',this.value)"/></label>
+    </div>`;
+  const pol=(typeof autoRecResult!=='undefined'&&autoRecResult)?autoRecResult.policy:null;
+  const sub=`<div class="rec-today-when mono">${recEsc(picks.today)} (${recEsc(picks.weekdayLabel)}) · ${recEsc(recPlanForm.startTime)} ~ ${recEsc(recPlanForm.endTime)} · 차량 ${fmtNum(picks.vehicleCount)}대</div>
+    ${picks.source==='segment'?`<div class="rec-today-when">적용 정책: ${recEsc(pol?pol.policyName:'없음(사업 우선도 0)')}</div>`:''}`;
+  const items=picks.items.map(it=>{
+    const idArg=recEsc(JSON.stringify(it.id));
+    return `<li class="rec-today-item" data-rec-id="${recEsc(it.id)}">
+      <div class="rec-today-no">${'①②③④⑤⑥⑦⑧⑨⑩'[it.order-1]||it.order}</div>
+      <div class="rec-today-body">
+        <!-- 어디 -->
+        <div class="rec-today-where"><b>${recEsc(it.title)}</b>
+          ${it.source==='segment'?`<span class="rec-muted">${recEsc([it.area,it.semanticLabel].filter(Boolean).join(' · '))}</span>`:''}</div>
+        <!-- 언제 -->
+        <div class="rec-today-meta mono">${recEsc(it.whenText)}${it.direction?` · ${recEsc(it.direction)}`:''}${it.passesText?` <span class="rec-muted">(${recEsc(it.passesText)})</span>`:''}</div>
+        <!-- 왜 — 데이터 부족 이유와 사업 우선도(활성 정책)를 한 줄씩 -->
+        <div class="rec-today-why">${recEsc(it.whyText)}</div>
+        ${it.projectLabel?`<div class="rec-today-project">${recEsc(it.projectLabel)}</div>`:''}
+        <div class="rec-today-item-actions">
+          ${it.source==='segment'?`<button class="btn ghost" type="button" onclick="showTodayPickOnMap(${idArg})">지도</button>`:''}
+          <button class="btn ghost" type="button" onclick="showTodayPickDetail(${idArg})">근거</button>
+          <button class="btn ghost" type="button" onclick="hideRecommendationOnce(${idArg})">숨기기</button>
+          <button class="btn ghost" type="button" onclick="completeRecommendation(${idArg})">완료</button>
+        </div>
+      </div>
+    </li>`;
+  }).join('');
+  const empty=busy&&!picks.items.length
+    ? '<div class="ir-note">도로 구간을 분석하는 중이에요… 잠시 뒤 추천이 채워져요.</div>'
+    : (!picks.items.length?`<div class="rec-empty">오늘 운행 시간에 더 모아야 할 곳을 찾지 못했어요(모두 목표를 채웠거나 숨김·완료 상태예요).</div>`:'');
+  // 여기서 숨기거나 완료한 도로 구간 추천 — 아래 상세 목록(구역 추천)에는 안 나오므로 여기서 되돌린다
+  const segPool=(todayPicksInput().segmentRecs||[]).filter(r=>r.condition&&r.condition.weekdayType===picks.weekdayType);
+  const segHidden=Recommendation.applyRecommendationStates(segPool,recStates,recSessionHidden,recommendationClock()).hidden;
+  const hiddenHTML=segHidden.length?`<details class="rec-llm rec-today-hidden"><summary>숨김·완료한 도로 구간 추천 (${fmtNum(segHidden.length)})</summary>
+      ${segHidden.slice(0,30).map(h=>`<div class="rec-hidden-row" data-rec-id="${recEsc(h.rec.id)}" data-status="${recEsc(h.status)}">
+        <span>${recEsc(h.rec.segmentLabel||h.rec.zone)} · ${recEsc(h.rec.conditionLabel)}</span>
+        <span class="rec-muted">${recEsc(h.note)}${statePolicyText(h.rec.id)?` · ${recEsc(statePolicyText(h.rec.id))}`:''}</span>
+        <button class="btn ghost settings-row-btn" type="button" onclick="restoreRecommendation(${recEsc(JSON.stringify(h.rec.id))})">다시 추천받기</button>
+      </div>`).join('')}</details>`:'';
+  el.innerHTML=`${head(sub)}${form}
+    ${picks.items.length?`<ol class="rec-today-list">${items}</ol>`:empty}
+    ${picks.notes.map(n=>`<div class="rec-muted">${recEsc(n)}</div>`).join('')}
+    ${hiddenHTML}
+    <div class="rec-today-actions">
+      ${picks.source==='segment'&&picks.items.length?`<button class="btn" type="button" onclick="showTodayPickOnMap(null)">지도에서 보기</button>`:''}
+      ${detailBtn}
+      <span class="rec-muted">예상 합계 약 ${fmtNum(picks.totalMinutes)}분 · 후보 ${fmtNum(picks.candidateCount)}개 중 부족도 순 Top ${fmtNum(picks.items.length)}</span>
+    </div>`;
+}
+
+function showTodayPickOnMap(id){
+  setRecommendationDetailOpen(true,'rec-auto');
+  if(id&&typeof focusAutoRecommendation==='function'){ if(autoFocusId!==id) focusAutoRecommendation(id); }
+}
+
+function showTodayPickDetail(id){
+  const r=findRecommendation(id);
+  const isSegment=r&&r.segmentId;
+  setRecommendationDetailOpen(true,isSegment?'rec-auto':'rec-list');
+  if(isSegment&&typeof toggleAutoDetail==='function'){ if(autoDetailId!==id) toggleAutoDetail(id); }
+  else if(r&&!recOpenDetails.has(id)) toggleRecommendationDetail(id);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -554,6 +697,21 @@ function onPlanInput(name,value){
   else recPlanForm[name]=String(value||'');
   savePlanForm();
   renderDrivePlan();
+  renderTodayView();
+}
+
+// 구역 간 이동 거리용 도로망(HD Map 강남+서초) — 한 번만 만든다(약 10ms). 데이터가 없으면 null → 직선 거리.
+let recPlanRouter;
+function planRouter(){
+  if(recPlanRouter!==undefined) return recPlanRouter;
+  recPlanRouter=null;
+  try{
+    const lines=[]
+      .concat((typeof HDMAP_GANGNAM_ROADS!=='undefined'&&HDMAP_GANGNAM_ROADS&&HDMAP_GANGNAM_ROADS.lines)||[])
+      .concat((typeof HDMAP_SEOCHO_ROADS!=='undefined'&&HDMAP_SEOCHO_ROADS&&HDMAP_SEOCHO_ROADS.lines)||[]);
+    if(lines.length&&typeof RoadGraph!=='undefined') recPlanRouter=RoadGraph.buildRouter(lines);
+  }catch(err){ console.warn('[경로뷰어] 도로망 이동 거리 계산기를 만들지 못했어요(직선 거리로 대신):',err); recPlanRouter=null; }
+  return recPlanRouter;
 }
 
 function togglePlanZone(zone,on){
@@ -571,7 +729,7 @@ function renderDrivePlan(){
   if(!res||res.empty){ el.innerHTML=''; recPlanResult=null; return; }
   const plan=Recommendation.buildDrivePlan({
     result:res, zones:recCache.zones||[], settings:recCache.appSettings||{},
-    plan:{...recPlanForm},
+    plan:{...recPlanForm}, router:planRouter(),
   });
   recPlanResult=plan;
 
@@ -623,7 +781,7 @@ function renderDrivePlan(){
                 <td><b>${recEsc(b.zone)}</b></td>
                 <td>${conditionBadgesHTML({trafficPeriod:b.trafficPeriod,lightCondition:b.lightCondition},['trafficPeriod','lightCondition'].filter(k=>b[k]))}</td>
                 <td class="mono">${fmtNum(b.collectMinutes)}</td>
-                <td class="mono">${b.travelMinutes?fmtNum(b.travelMinutes):'—'}</td>
+                <td class="mono" title="${b.travelMethod?recEsc(`${b.travelDistanceKm}km · ${b.travelMethod==='road_graph'?'도로망 최단 거리':'직선 거리'} · 변경 비용 ${b.switchPenaltyMinutes}분(계획 판단에만 반영)`):''}">${b.travelMinutes?fmtNum(b.travelMinutes):'—'}${b.travelMethod==='road_graph'?' <span class="rec-muted">도로</span>':b.travelMethod==='haversine'?' <span class="rec-muted">직선</span>':''}</td>
                 <td class="plan-reason">${recEsc(b.reason)}</td>
               </tr>`).join('')}
           </tbody>
@@ -657,7 +815,7 @@ function renderDrivePlan(){
       <div class="plan-summary-head">
         <span class="mono">${recEsc(plan.date)} (${recEsc(plan.weekdayLabel)}) · ${recEsc(plan.window.start)}~${recEsc(plan.window.end)}</span>
         ${plan.sun?`<span class="mono plan-sun">일출 ${recEsc(plan.sun.sunrise)} · 일몰 ${recEsc(plan.sun.sunset)}</span>`:''}
-        <span class="mono">예상 수집 ${fmtNum(plan.totals.collectMinutes)}분${plan.totals.travelMinutes?` · 이동 ${fmtNum(plan.totals.travelMinutes)}분`:''}</span>
+        <span class="mono">예상 수집 ${fmtNum(plan.totals.collectMinutes)}분${plan.totals.travelMinutes?` · 이동 ${fmtNum(plan.totals.travelMinutes)}분(${plan.totals.travelMethods.road_graph?'도로망 최단 거리':'직선 거리'} 기준)`:''} · 구역 변경 ${fmtNum(plan.totals.zoneSwitches)}회</span>
       </div>
       <div class="plan-summary-zones">구역별 ${byZone}</div>
       <div class="plan-diff">${diffText}${newList}${lostList}</div>
@@ -668,6 +826,7 @@ function renderDrivePlan(){
       <ul>
         <li>운행 시간을 교통 시간대·일출/일몰 경계로 자르고, 블록마다 그 조건에서 가장 부족한 구역을 고릅니다(추천 점수와 같은 규칙).</li>
         <li>한 조건의 부족분을 채우면 다음으로 부족한 곳으로 옮깁니다. 구역을 옮기면 이동 시간만큼 수집이 줄어드는 것을 감안합니다.</li>
+        <li>계획 가치 = 추천 점수 × 수집 가능 분 − 이동 시간 − 구역 변경 비용(${fmtNum(plan.switchPenaltyMinutes)}분 · 최소 체류 ${fmtNum(plan.minStayMinutes)}분 전에 떠나면 모자란 분만큼 추가).</li>
         ${plan.limitations.map(l=>`<li>${recEsc(l)}</li>`).join('')}
       </ul>
     </details>`;

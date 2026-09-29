@@ -435,8 +435,10 @@
 
     async function writeSettings(partial) {
       // 잘못된 분류 설정·추천 설정(가중치 합계 등)이면 여기서 던진다 — database.js setSettings 와 같은 규칙
-      const patch = global.Recommendation.normalizeRecommendationPatch(global.TimeConditions.normalizeClassificationPatch(partial));
-      const { coverageCellSizeM, ...merged } = { ...(await readSettings()), ...patch };
+      const current = await readSettings();
+      const patch = global.Recommendation.normalizePriorityPolicyPatch(
+        global.Recommendation.normalizeSegmentSettingsPatch(global.Recommendation.normalizeRecommendationPatch(global.TimeConditions.normalizeClassificationPatch(partial))), current);
+      const { coverageCellSizeM, ...merged } = { ...current, ...patch };
       await metaSet('app_settings', merged);
       return readSettings();
     }
@@ -1518,7 +1520,7 @@
         return { id, removed: true };
       },
 
-      async autoRevisions(parentZone, polygon, issueFilter) {
+      async autoRevisions(parentZone, polygon, issueFilter, poi) {
         const summaries = await this.listDateSummaries();
         const snapshots = await this.listCoverageSnapshots();
         const snap = (snapshots || []).find(s => s.zone === parentZone) || null;
@@ -1528,7 +1530,7 @@
           parentZoneRevision: global.RoadGraph.fnv1a(JSON.stringify(polygon || [])),
           mapDataRevision: global.RoadGraph.mapDataRevision(sources),
           roadGraphRevision: `${global.RoadGraph.ROAD_GRAPH_VERSION}:${global.RoadGraph.DEFAULTS.maxSegmentM}:${global.RoadGraph.DEFAULTS.minSegmentM}`,
-          poiDataRevision: 'none',
+          poiDataRevision: global.AutoSubZones.poiRevision(poi),
           gpsDataRevision: global.RoadGraph.fnv1a(summaries.map(s => `${s.date}:${s.count}`).join(';')),
           coverageRevision: global.RoadGraph.fnv1a(snap ? JSON.stringify(snap) : 'none'),
           issueFilter: global.IssueFilter.normalizeFilter(issueFilter),
@@ -1540,7 +1542,7 @@
         const o = options || {};
         const polygons = await this.getZonePolygons();
         const polygon = o.polygon || (polygons || {})[parentZone] || null;
-        const revisions = await this.autoRevisions(parentZone, polygon, o.issueFilter);
+        const revisions = await this.autoRevisions(parentZone, polygon, o.issueFilter, o.poi || null);
         const graphKey = [revisions.parentZoneRevision, revisions.mapDataRevision, revisions.roadGraphRevision, revisions.algorithmVersion].join('|');
         const statsKey = [graphKey, revisions.gpsDataRevision, revisions.issueFilter].join('|');
         const db = await ready();
@@ -1747,16 +1749,25 @@
   }
 
   // database.js normalizeRecommendationState 와 같은 규칙
+  // 그 추천을 만든 사업 우선 정책(도로 구간 추천만) — 과거 추천을 다시 볼 때 "당시 적용 정책"
+  function statePolicy(state) {
+    const p = state && state.policy;
+    if (!p || !p.policyId) return {};
+    const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+    return { policy: { policyId: String(p.policyId), policyName: String(p.policyName || ''), updatedAt: p.updatedAt || null,
+      projectPriority: num(p.projectPriority), label: p.label ? String(p.label) : null, dataNeedScore: num(p.dataNeedScore), score: num(p.score) } };
+  }
+
   function normalizeRecommendationState(state) {
     const status = state && state.status;
     if (status === 'snoozed') {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(String(state.until || ''))) throw new Error('추천 제외 기간(until)이 올바르지 않아요.');
-      return { status, until: state.until, markedAt: state.markedAt || new Date().toISOString() };
+      return { status, until: state.until, markedAt: state.markedAt || new Date().toISOString(), ...statePolicy(state) };
     }
     if (status === 'completed') {
       const snap = state.snapshot || {};
       const n = v => (Number.isFinite(v) && v >= 0 ? v : 0);
-      return { status, markedAt: state.markedAt || new Date().toISOString(), snapshot: { collectionSec: n(snap.collectionSec), visitCount: n(snap.visitCount) } };
+      return { status, markedAt: state.markedAt || new Date().toISOString(), snapshot: { collectionSec: n(snap.collectionSec), visitCount: n(snap.visitCount) }, ...statePolicy(state) };
     }
     throw new Error('알 수 없는 추천 상태예요.');
   }

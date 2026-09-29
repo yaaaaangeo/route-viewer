@@ -99,7 +99,11 @@ const KpiHistory=(function(){
       RouteDB.listCoverageSnapshots(),RouteDB.listCareerItems('collectionPlans'),RouteDB.getHDMapPriorityPolygons(),
     ]);
     const date=today();
-    const areas=HDMapPriority.listAreas(null,savedPolygons||{});
+    // 우선 구역은 활성 Priority Policy 에서 — 추천·설정·통계와 같은 정책·같은 분류(고정 목록 없음)
+    const areasMeta=(typeof HDMAP_PRIORITY_AREAS!=='undefined'&&HDMAP_PRIORITY_AREAS)?{generatedAt:HDMAP_PRIORITY_AREAS.generatedAt||null}:null;
+    const priorityPolicy=PriorityPolicy.resolveActive((settings||{}).priorityPolicies,HDMapPriority.listAreas(),areasMeta,date).policy;
+    const areas=HDMapPriority.listAreas(null,savedPolygons||{},priorityPolicy);
+    const priorityAreaNos=PriorityPolicy.priorityGroupAreaNos(priorityPolicy,HDMapPriority.ALL_AREA_NOS);
     const plan=C.activePlanFor(plans,date);
     const recSettings=Recommendation.effectiveRecommendationSettings((settings||{}).recommendationSettings);
 
@@ -130,7 +134,7 @@ const KpiHistory=(function(){
 
     const depthScopes=(plan&&plan.priorityZones&&plan.priorityZones.length)
       ? plan.priorityZones.map(String)
-      : HDMapPriority.PRIORITY_AREA_NOS.map(String);
+      : priorityAreaNos.map(String);
     const combined=C.combineDepth(depthScopes.map(s=>depth.byScope[s]));
     const scale=C.buildProjectScale({
       summaries,stats,vehicles,zones,areas,plan,
@@ -141,7 +145,7 @@ const KpiHistory=(function(){
     return {
       date,measuredAt:new Date().toISOString(),plan,plans,scale,monthScale:C.buildMonthScale(summaries,date),
       measurements,depth,depthScopes,combined,
-      fulfillment,rec,recDeficits,recSettings,areas,zones,activeZones,
+      fulfillment,rec,recDeficits,recSettings,areas,zones,activeZones,priorityAreaNos,priorityPolicy,
     };
   }
 

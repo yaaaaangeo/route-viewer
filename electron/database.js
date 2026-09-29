@@ -1015,7 +1015,7 @@ class RouteDatabase {
   //  탭을 여는 것만으로는 다시 계산하지 않고, 위 지문이 달라졌을 때만 그 단계부터 다시 한다.
   //  사용자 보정(overrides)은 따로 저장해서 읽을 때 덮어씌운다 — 다시 분석해도 살아남는다.
   // ══════════════════════════════════════════════════════
-  _autoRevisions(parentZone, polygon, issueFilter) {
+  _autoRevisions(parentZone, polygon, issueFilter, poi) {
     const summaries = this.db.all('SELECT date, record_count AS n FROM date_summaries ORDER BY date');
     const hdmapSources = SubZones.hdmapKeysFor(parentZone).map(key => {
       try { return require(`../src/data/hdmap_${key}_roads.json`); } catch (_) { return { source: key, lines: [] }; }
@@ -1025,7 +1025,9 @@ class RouteDatabase {
       parentZoneRevision: RoadGraph.fnv1a(JSON.stringify(polygon || [])),
       mapDataRevision: RoadGraph.mapDataRevision(hdmapSources),
       roadGraphRevision: `${RoadGraph.ROAD_GRAPH_VERSION}:${RoadGraph.DEFAULTS.maxSegmentM}:${RoadGraph.DEFAULTS.minSegmentM}`,
-      poiDataRevision: 'none',
+      // 화면이 넘긴 지도 POI 의 지문 — 없으면 'none'. 유형 판정은 매번 다시 하므로(캐시하지 않음)
+      // POI 가 바뀌면 다음 호출부터 바로 반영되고, 이 값은 "어떤 POI 로 판정했는지" 기록으로 남는다.
+      poiDataRevision: AutoSubZones.poiRevision(poi),
       gpsDataRevision: RoadGraph.fnv1a(summaries.map(r => `${r.date}:${r.n}`).join(';')),
       coverageRevision: RoadGraph.fnv1a(snap ? JSON.stringify(snap) : 'none'),
       issueFilter: IssueFilter.normalizeFilter(issueFilter),
@@ -1060,7 +1062,7 @@ class RouteDatabase {
 
   getAutoAnalysis(parentZone, options = {}) {
     const polygon = options.polygon || (this.getZonePolygons() || {})[parentZone] || null;
-    const revisions = this._autoRevisions(parentZone, polygon, options.issueFilter);
+    const revisions = this._autoRevisions(parentZone, polygon, options.issueFilter, options.poi || null);
     const graphKey = [revisions.parentZoneRevision, revisions.mapDataRevision, revisions.roadGraphRevision, revisions.algorithmVersion].join('|');
     const statsKey = [graphKey, revisions.gpsDataRevision, revisions.issueFilter].join('|');
     const row = this.db.get('SELECT data_json AS json FROM auto_analysis WHERE parent_zone = ?', [parentZone]);
@@ -1482,8 +1484,11 @@ class RouteDatabase {
   // 분류 설정·추천 설정은 저장 전에 검증한다 — 겹침·공백·형식 오류, 가중치 합계가 100%가 아님 등
   // 하나라도 있으면 아무것도 저장하지 않고 이유를 담은 Error 를 던진다. 재분류·추천 재계산은 따로 한다.
   setSettings(partial) {
-    const patch = Recommendation.normalizeRecommendationPatch(TimeConditions.normalizeClassificationPatch(partial));
-    const { coverageCellSizeM, ...merged } = { ...this.getSettings(), ...patch };
+    // priorityPolicies: 이전 정책은 목록에서 빠져도 보존하고, 바뀐 정책은 이전 버전을 history 에 남긴다
+    const current = this.getSettings();
+    const patch = Recommendation.normalizePriorityPolicyPatch(
+      Recommendation.normalizeSegmentSettingsPatch(Recommendation.normalizeRecommendationPatch(TimeConditions.normalizeClassificationPatch(partial))), current);
+    const { coverageCellSizeM, ...merged } = { ...current, ...patch };
     this.setMeta('app_settings', JSON.stringify(merged));
     return this.getSettings();
   }
@@ -2056,16 +2061,25 @@ function normalizeImportRow(r) {
   };
 }
 
+// 그 추천을 만든 사업 우선 정책(도로 구간 추천만) — 과거 추천을 다시 볼 때 "당시 적용 정책"
+function statePolicy(state) {
+  const p = state && state.policy;
+  if (!p || !p.policyId) return {};
+  const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
+  return { policy: { policyId: String(p.policyId), policyName: String(p.policyName || ''), updatedAt: p.updatedAt || null,
+    projectPriority: num(p.projectPriority), label: p.label ? String(p.label) : null, dataNeedScore: num(p.dataNeedScore), score: num(p.score) } };
+}
+
 function normalizeRecommendationState(state) {
   const status = state && state.status;
   if (status === 'snoozed') {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(state.until || ''))) throw new Error('추천 제외 기간(until)이 올바르지 않아요.');
-    return { status, until: state.until, markedAt: state.markedAt || new Date().toISOString() };
+    return { status, until: state.until, markedAt: state.markedAt || new Date().toISOString(), ...statePolicy(state) };
   }
   if (status === 'completed') {
     const snap = state.snapshot || {};
     const n = v => (Number.isFinite(v) && v >= 0 ? v : 0);
-    return { status, markedAt: state.markedAt || new Date().toISOString(), snapshot: { collectionSec: n(snap.collectionSec), visitCount: n(snap.visitCount) } };
+    return { status, markedAt: state.markedAt || new Date().toISOString(), snapshot: { collectionSec: n(snap.collectionSec), visitCount: n(snap.visitCount) }, ...statePolicy(state) };
   }
   throw new Error('알 수 없는 추천 상태예요.');
 }

@@ -7,10 +7,11 @@
 //    ①~⑫ 는 사용자가 등록하는 세부 구역(subZones 테이블)이 아니라 사업에서 정해진
 //    고정 목록이므로 DB 에 저장하지 않고 데이터 파일(src/data/hdmap-priority-areas.json)로 갖는다.
 //
-//  우선순위 (사업에서 정해진 값 — 여기서 추측하지 않는다)
-//    최우선 primary   ⑤
-//    우선   priority  ① ② ⑥ ⑨ ⑩
-//    일반   normal    ③ ④ ⑦ ⑧ ⑪ ⑫
+//  우선순위는 여기 없다 — 사업 요청마다 바뀌므로 Priority Policy(priority-policy.js, 설정 데이터)가 정한다.
+//    이 파일은 ①~⑫ 의 "위치(경계)"만 알고, 각 구역이 최우선/우선/보조/일반/비우선인지는
+//    호출하는 쪽이 넘긴 활성 정책(policy)에서 PriorityPolicy.classifyArea 로 읽는다.
+//    · 통계 "우선지역" = 우선도 40 이상(최우선·우선·보조) · "일반지역(비교군)" = 40 미만(일반·비우선)
+//    · 정책이 없으면 모든 구역이 비우선 → 우선지역 0개(비교 불가)로 그린다.
 //
 //  경계(polygon) 출처
 //    ①~⑫ 는 참고 지도의 빨간 선(간선도로)으로 둘러싸인 블록이다. 협의체 자료에 ①~⑫ 폴리곤
@@ -31,38 +32,36 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./subzones.js'), () => require('../data/hdmap-priority-areas.json'));
+    module.exports = factory(require('./subzones.js'), () => require('../data/hdmap-priority-areas.json'), require('./priority-policy.js'));
   } else {
     // 경계 데이터(<script src="data/hdmap-priority-areas.js">)가 이 파일보다 늦게 올라와도
     // 되도록 함수로 넘긴다 — 읽는 시점은 화면을 그릴 때다.
-    root.HDMapPriority = factory(root.SubZones, () => root.HDMAP_PRIORITY_AREAS);
+    root.HDMapPriority = factory(root.SubZones, () => root.HDMAP_PRIORITY_AREAS, root.PriorityPolicy);
   }
-}(typeof self !== 'undefined' ? self : this, function (SZ, defaultData) {
+}(typeof self !== 'undefined' ? self : this, function (SZ, defaultData, PP) {
   'use strict';
 
-  const HDMAP_PRIORITY_VERSION = 1;
+  const HDMAP_PRIORITY_VERSION = 2;   // 2: 우선순위를 Priority Policy 에서 읽는다(고정 목록 제거)
 
-  const PRIMARY_AREA_NO = 5;
-  const PRIORITY_AREA_NOS = Object.freeze([1, 2, 5, 6, 9, 10]);   // 최우선 ⑤ 포함
-  const NORMAL_AREA_NOS = Object.freeze([3, 4, 7, 8, 11, 12]);    // 비교군
+  // ①~⑫ 는 "구역 번호(위치)" 목록일 뿐 우선순위가 아니다
   const ALL_AREA_NOS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 
-  // 색만으로 뜻을 전하지 않는다 — 화면에는 언제나 이 라벨(글자)을 함께 쓴다.
-  const PRIORITY_LEVELS = Object.freeze({
-    primary: Object.freeze({ id: 'primary', label: '최우선', rank: 3, note: '2차년도 HD Map 우선 구축 구역' }),
-    priority: Object.freeze({ id: 'priority', label: '우선', rank: 2, note: '데이터 수집 우선 대상' }),
-    normal: Object.freeze({ id: 'normal', label: '일반', rank: 1, note: '비교군' }),
-  });
+  // 색만으로 뜻을 전하지 않는다 — 화면에는 언제나 이 라벨(글자)을 함께 쓴다. 단계 정의는 PriorityPolicy 에 하나뿐이다.
+  const PRIORITY_LEVELS = PP ? PP.TIERS : Object.freeze({});
   const priorityLabel = id => (PRIORITY_LEVELS[id] || {}).label || '확인 불가';
 
-  // 우선순위는 사업에서 정한 값이다. 데이터 파일이 다른 값을 들고 있으면 그건 오류이므로
-  // 파일 값을 믿지 않고 여기 정의를 기준으로 삼는다(그리고 validateAreas 가 어긋남을 알린다).
-  function priorityOf(areaNo) {
-    const n = Number(areaNo);
-    if (n === PRIMARY_AREA_NO) return 'primary';
-    if (PRIORITY_AREA_NOS.includes(n)) return 'priority';
-    if (NORMAL_AREA_NOS.includes(n)) return 'normal';
-    return null;
+  // 활성 정책에서 구역 하나의 분류 — 정책이 없거나 정책에 없는 구역은 비우선(0)
+  function classify(policy, areaNo) {
+    if (PP) return PP.classifyArea(policy, areaNo);
+    return { value: 0, tier: 'none', label: '비우선', group: 'normal' };
+  }
+
+  // 구역 목록에 활성 정책을 입힌다 — priority(단계 id) · priorityLabel · priorityValue · priorityGroup
+  function applyPolicy(areas, policy) {
+    return (areas || []).map(a => {
+      const c = classify(policy, a.areaNo);
+      return { ...a, priority: c.tier, priorityLabel: c.label, priorityValue: c.value, priorityGroup: c.group };
+    });
   }
 
   // 왜 못 세는지를 "—" 하나로 뭉뚱그리지 않는다 — 원인마다 할 일이 다르기 때문이다.
@@ -76,8 +75,9 @@
   });
   const areaStateLabel = id => (AREA_STATES[id] || {}).label || '확인 불가';
 
-  const isPriorityArea = areaNo => PRIORITY_AREA_NOS.includes(Number(areaNo));
-  const isNormalArea = areaNo => NORMAL_AREA_NOS.includes(Number(areaNo));
+  // 묶음 판정은 행(row)에 입힌 priorityGroup 으로만 한다(구역 번호로 정하지 않는다)
+  const isPriorityRow = r => !!r && r.priorityGroup === 'priority';
+  const isNormalRow = r => !!r && r.priorityGroup !== 'priority';
 
   // ── 구역 목록 읽기 ───────────────────────────────────
   // GeoJSON 은 [경도, 위도] 순서, subzones.js 는 [위도, 경도] 순서를 쓴다 — 여기서 한 번만 뒤집는다.
@@ -140,15 +140,14 @@
         id: `hdmap_${String(areaNo).padStart(2, '0')}`,
         areaNo, name: String(areaNo), parentZone: '강남', declaredPriority: null, polygon: [], warning: null,
       };
-      const priority = priorityOf(areaNo);
+      // 우선순위는 입히지 않는다(listAreas/applyPolicy 가 활성 정책으로 입힌다).
+      // declaredPriority 는 데이터 파일의 옛 값 — 초기 정책을 만들 때만 쓴다.
       const hasPolygon = found.polygon.length >= 3;
       return {
         id: found.id,
         areaNo,
         name: found.name,
         parentZone: found.parentZone,
-        priority,
-        priorityLabel: priorityLabel(priority),
         polygon: found.polygon,
         hasPolygon,
         center: hasPolygon ? SZ.polygonCenter(found.polygon) : null,
@@ -194,10 +193,12 @@
 
   // 파일 정의(고정 목록) 위에 앱에서 직접 그린 경계를 덮어쓴다.
   // savedPolygons: RouteDB.getHDMapPriorityPolygons() 가 준 {areaNo: {polygon, updatedAt}}
-  function listAreas(featureCollection, savedPolygons) {
+  // policy: 활성 Priority Policy — 각 구역에 단계(priority·priorityLabel·priorityValue·priorityGroup)를 입힌다.
+  //         안 넘기면(null) 모두 비우선. 경계만 필요한 곳(추천의 구간-구역 매칭)은 그대로 써도 된다.
+  function listAreas(featureCollection, savedPolygons, policy) {
     const areas = parseAreas(featureCollection || (typeof defaultData === 'function' ? defaultData() : null) || {});
     const saved = normalizeSavedPolygons(savedPolygons);
-    return areas.map(a => {
+    return applyPolicy(areas.map(a => {
       const own = saved[a.areaNo];
       if (!own) return { ...a, polygonSource: a.hasPolygon ? 'file' : null, polygonUpdatedAt: null };
       return {
@@ -209,7 +210,7 @@
         polygonUpdatedAt: own.updatedAt,
         warning: null,
       };
-    });
+    }), policy || null);
   }
 
   // ── 구역 데이터 점검 ─────────────────────────────────
@@ -236,10 +237,8 @@
     const errors = [];
     const warnings = [];
 
+    // (우선순위 검사는 하지 않는다 — 우선순위는 Priority Policy 가 정하고 그쪽에서 검증한다)
     list.forEach(a => {
-      if (a.declaredPriority && a.priority && a.declaredPriority !== a.priority) {
-        errors.push(`${a.name} 의 데이터 파일 우선순위(${a.declaredPriority})가 사업 정의(${a.priority})와 달라요 — 사업 정의를 씁니다.`);
-      }
       if (a.warning) warnings.push(`${a.name}: ${a.warning}`);
     });
 
@@ -298,17 +297,18 @@
   // ── 비교 통계 ────────────────────────────────────────
   const round1 = n => Math.round(n * 10) / 10;
 
-  // 일반지역 평균 — ③④⑦⑧⑪⑫ 중 "경계가 있는" 구역의 수집 분 평균.
+  // 일반지역 평균 — 활성 정책에서 우선도 40 미만(일반·비우선)인 구역 중 "경계가 있는" 구역의 수집 분 평균.
   // 경계가 없는 구역을 0분으로 넣으면 평균이 가짜로 낮아지므로 아예 뺀다.
   function normalAverage(rows) {
-    const basis = (rows || []).filter(r => isNormalArea(r.areaNo) && r.hasPolygon && r.state !== 'error');
+    const normals = (rows || []).filter(isNormalRow);
+    const basis = normals.filter(r => r.hasPolygon && r.state !== 'error');
     const minutes = basis.reduce((sum, r) => sum + r.collectionMinutes, 0);
     return {
       avgMinutes: basis.length ? minutes / basis.length : 0,
       totalMinutes: minutes,
       areaCount: basis.length,
       areaNos: basis.map(r => r.areaNo),
-      excludedAreaNos: NORMAL_AREA_NOS.filter(n => !basis.some(r => r.areaNo === n)),
+      excludedAreaNos: normals.filter(r => !basis.includes(r)).map(r => r.areaNo),
     };
   }
 
@@ -341,10 +341,14 @@
     return map;
   }
 
-  // areas + stats → 구역별 행 + 요약. 화면은 이 결과만 그린다(여기서 계산을 끝낸다).
+  // areas + stats + 활성 정책 → 구역별 행 + 요약. 화면은 이 결과만 그린다(여기서 계산을 끝낸다).
+  // policy 를 넘기면 그 정책으로 묶는다(안 넘기면 areas 에 이미 입힌 분류, 그것도 없으면 모두 비우선).
+  // 정책만 바뀌었을 때는 stats(GPS 집계)를 그대로 두고 이 함수만 다시 부르면 된다.
   function buildComparison(input) {
     const o = input || {};
-    const areas = o.areas || listAreas();
+    const baseAreas = o.areas || listAreas();
+    const hasPolicyArg = Object.prototype.hasOwnProperty.call(o, 'policy');
+    const areas = hasPolicyArg || !baseAreas.every(a => a.priorityGroup) ? applyPolicy(baseAreas, o.policy || null) : baseAreas;
     const byId = statsById(o.stats);
     const failed = !!o.error;   // 집계 자체가 실패했으면 0분이 아니라 '계산 실패'다
 
@@ -368,6 +372,8 @@
         parentZone: a.parentZone,
         priority: a.priority,
         priorityLabel: a.priorityLabel,
+        priorityValue: a.priorityValue,
+        priorityGroup: a.priorityGroup,
         hasPolygon: a.hasPolygon,
         // 집계는 돌았는데 기록이 하나도 없는 것과, 경계가 없어 아예 못 센 것은 다르다
         measured: !!s,
@@ -398,8 +404,8 @@
     });
 
     const measured = rows.filter(r => r.hasPolygon && r.state !== 'error');
-    const priorityRows = measured.filter(r => isPriorityArea(r.areaNo));
-    const normalRows = measured.filter(r => isNormalArea(r.areaNo));
+    const priorityRows = measured.filter(isPriorityRow);
+    const normalRows = measured.filter(isNormalRow);
     const sum = list => list.reduce((acc, r) => acc + r.collectionMinutes, 0);
 
     const priorityTotalMinutes = sum(priorityRows);
@@ -413,17 +419,26 @@
       ? priorityRows.slice().sort((a, b) => a.collectionMinutes - b.collectionMinutes || a.areaNo - b.areaNo)[0]
       : null;
 
-    const primary = rows.find(r => r.areaNo === PRIMARY_AREA_NO) || null;
+    // 최우선 구역 — 활성 정책에서 단계가 최우선(100)인 구역. 여럿이면 번호가 작은 쪽이 대표, 없으면 null.
+    const primaries = rows.filter(r => r.priority === 'primary').sort((a, b) => b.priorityValue - a.priorityValue || a.areaNo - b.areaNo);
+    const primary = primaries[0] || null;
     const validation = validateAreas(areas);
+    const byValue = (a, b) => b.priorityValue - a.priorityValue || a.areaNo - b.areaNo;
 
     return {
       version: HDMAP_PRIORITY_VERSION,
       rows,
       validation,
+      // 이 비교를 만든 정책 — 화면에 "적용 정책"으로 적는다
+      policy: hasPolicyArg && o.policy && PP ? PP.reference(o.policy) : null,
       summary: {
         ready: validation.ready,
         allReady: validation.allReady,
         primary,
+        primaryAreaNos: primaries.map(r => r.areaNo),
+        // 활성 정책 기준 묶음 — 화면 문구를 고정 문자열(①②⑤⑥⑨⑩) 대신 이걸로 만든다
+        priorityGroupAreaNos: rows.filter(isPriorityRow).sort(byValue).map(r => r.areaNo),
+        normalGroupAreaNos: rows.filter(isNormalRow).map(r => r.areaNo),
         normalAvgMinutes: round1(normal.avgMinutes),
         normalAvgBasis: normal,
         priorityAvgMinutes: round1(priorityAvgMinutes),
@@ -465,8 +480,8 @@
 
   return {
     HDMAP_PRIORITY_VERSION,
-    PRIMARY_AREA_NO, PRIORITY_AREA_NOS, NORMAL_AREA_NOS, ALL_AREA_NOS,
-    PRIORITY_LEVELS, priorityLabel, priorityOf, isPriorityArea, isNormalArea,
+    ALL_AREA_NOS,
+    PRIORITY_LEVELS, priorityLabel, classify, applyPolicy,
     AREA_STATES, areaStateLabel,
     parseAreas, listAreas, geometryToPolygon, ringToPolygon,
     normalizeAreaPolygon, normalizeSavedPolygons,

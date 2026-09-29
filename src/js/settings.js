@@ -17,6 +17,8 @@ async function renderSettingsView(){
   // HD Map 우선 구축 구역 ①~⑫ 의 경계 상태·넣는 방법 — 통계 화면은 현황 확인만 하고
   // 경계 관리는 여기로 모았다(그리기는 js/hdmap-priority-view.js).
   if(typeof renderHDMapPriorityAreaSettings==='function') renderHDMapPriorityAreaSettings();
+  // HD Map 우선 수집 정책(Priority Policy) — 구역별 사업 우선도·적용 기간(js/priority-policy-view.js)
+  if(typeof renderPriorityPolicySettings==='function') await renderPriorityPolicySettings();
   renderDepthTierSettings();
   await renderClassificationSettings();
 }

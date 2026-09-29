@@ -585,7 +585,8 @@ function careerStartPlanEditor(base){
       recommendationSettings:m?m.recSettings:Recommendation.defaultRecommendationSettings(),
       // 기록이 한 건도 없는 운영 구역은 초안에 넣지 않는다(목표만 잔뜩 생겨 미달 수가 부풀려진다) — 필요하면 직접 추가
       operatingZones:m?m.activeZones.filter(z=>m.measurements[z]&&m.measurements[z].recordCount>0):[],
-      priorityAreaNos:[HDMapPriority.PRIMARY_AREA_NO,...HDMapPriority.PRIORITY_AREA_NOS.filter(n=>n!==HDMapPriority.PRIMARY_AREA_NO)],
+      // 활성 Priority Policy 의 우선지역(우선도 40 이상, 값 큰 순) — 측정 때 같은 정책으로 구해 둔 값
+      priorityAreaNos:(m&&m.priorityAreaNos)||[],
     });
   }
   careerUi.planEditor={

@@ -22,7 +22,7 @@ let hdmapEditorOpen = false;
 let hdmapEditorMap = null;
 let hdmapEditorSavedLayer = null;   // 저장된 경계 미리보기
 let hdmapEditorDraftLayer = null;   // 그리는 중인 경계
-let hdmapEditorAreaNo = 5;          // 기본은 최우선 ⑤
+let hdmapEditorAreaNo = 1;          // 처음 열 때 선택된 구역 번호(우선순위와 무관 — 우선순위는 활성 정책)
 let hdmapEditorDraft = [];
 let hdmapEditorDrawing = false;
 let hdmapEditorBusy = false;
@@ -30,7 +30,8 @@ let hdmapEditorMsg = null;          // {kind:'ok'|'warn', text}
 let hdmapEditorAreas = [];
 
 // 우선순위 색 — 화면 다른 곳과 같은 뜻으로 쓰고, 지도에는 번호·구분 글자도 함께 찍는다
-const HDMAP_EDITOR_COLORS = { primary: '#ff6b6b', priority: '#f5a623', normal: '#7d8798' };
+// 단계 색 — 단계는 활성 Priority Policy 에서 온다(구역 번호로 정하지 않는다)
+const HDMAP_EDITOR_COLORS = { primary: '#ff6b6b', priority: '#f5a623', secondary: '#e3d14a', normal: '#7d8798', none: '#4d566a' };
 
 function toggleHDMapPriorityEditor() {
   hdmapEditorOpen = !hdmapEditorOpen;
@@ -166,7 +167,7 @@ function drawHDMapEditorLayers() {
 
   if (!hdmapEditorDraft.length) return;
   const cur = hdmapEditorArea(hdmapEditorAreaNo);
-  const color = HDMAP_EDITOR_COLORS[(cur && cur.priority) || 'normal'];
+  const color = HDMAP_EDITOR_COLORS[(cur && cur.priority) || 'none'];
   if (hdmapEditorDraft.length >= 3) {
     L.polygon(hdmapEditorDraft, { color: color, weight: 3, fillOpacity: 0.15, dashArray: '6,6' }).addTo(hdmapEditorDraftLayer);
   } else if (hdmapEditorDraft.length === 2) {

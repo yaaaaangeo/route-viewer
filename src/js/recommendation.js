@@ -26,11 +26,12 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'), require('./subzones.js'), require('./auto-subzones.js'));
+    module.exports = factory(require('./time-conditions.js'), require('./condition-stats.js'), require('./collection-stats.js'), require('./issue-filter.js'), require('./subzones.js'), require('./auto-subzones.js'), require('./priority-policy.js'));
   } else {
-    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter, root.SubZones, root.AutoSubZones);
+    // PriorityPolicy 는 사업 우선도에만 쓴다 — 없는 화면(테스트 컨텍스트 등)에서는 "정책 없음"으로 동작한다
+    root.Recommendation = factory(root.TimeConditions, root.ConditionStats, root.CollectionStats, root.IssueFilter, root.SubZones, root.AutoSubZones, root.PriorityPolicy || null);
   }
-}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF, SZ, SZA) {
+}(typeof self !== 'undefined' ? self : this, function (TC, CSt, CS, IF, SZ, SZA, PP) {
   'use strict';
 
   const RECOMMENDATION_VERSION = 2;
@@ -251,9 +252,14 @@
 
   // 백업 복원·서버 동기화용 — 잘못된 추천 설정은 빼고(지금 설정 유지) 나머지는 둔다
   function sanitizeRecommendationSettings(settings) {
-    if (!settings || typeof settings !== 'object' || !('recommendationSettings' in settings)) return settings;
+    if (!settings || typeof settings !== 'object') return settings;
+    const hasRec = 'recommendationSettings' in settings, hasSeg = 'segmentRecommendationSettings' in settings;
+    if (!hasRec && !hasSeg && !('priorityPolicies' in settings)) return settings;
     const out = { ...settings };
-    if (!validateRecommendationSettings(out.recommendationSettings).ok) delete out.recommendationSettings;
+    if (hasRec && !validateRecommendationSettings(out.recommendationSettings).ok) delete out.recommendationSettings;
+    // 함수 선언은 호이스팅되므로 아래(도로 Segment 추천)의 검증을 여기서 써도 된다
+    if (hasSeg && !validateSegmentSettings(out.segmentRecommendationSettings).ok) delete out.segmentRecommendationSettings;
+    if ('priorityPolicies' in out && PP && !PP.mergePolicyPatch([], out.priorityPolicies).ok) delete out.priorityPolicies;
     return out;
   }
 
@@ -1099,6 +1105,9 @@
     minBlockMinutes: 15,   // 이보다 짧은 꼬리는 앞 블록에 붙인다
     travelSpeedKmh: 30,    // 시내 평균 — 구역 간 이동 시간 어림
     vehicleCount: 1,
+    // A → B → A 처럼 블록마다 오가지 않게 — 계획 가치에서만 깎는다(실제 수집 시간 계산은 그대로)
+    switchPenaltyMinutes: 10,   // 구역을 바꿀 때마다 드는 정리·진입 비용(분)
+    minStayMinutes: 60,         // 한 구역에 이만큼은 머물러야 옮길 때 추가 비용이 없다(남은 부족분이 있을 때만)
   });
 
   function planClock(value, fallback) {
@@ -1162,6 +1171,24 @@
     return Math.round((km / Math.max(5, speedKmh)) * 60);
   }
 
+  // 이동 추정 — 1) 도로망 최단 거리(router.route, road-graph.js buildRouter) 2) 안 되면 직선 거리.
+  // 어떤 방법으로 셌는지(method)와 거리를 함께 돌려준다. 좌표가 없으면 null.
+  function travelEstimate(fromLoc, toLoc, speedKmh, router) {
+    if (!fromLoc || !toLoc) return null;
+    const speed = Math.max(5, speedKmh);
+    if (router && typeof router.route === 'function') {
+      let r = null;
+      try { r = router.route(fromLoc, toLoc); } catch (_) { r = null; }
+      if (r && Number.isFinite(r.distanceM)) {
+        const km = r.distanceM / 1000;
+        return { minutes: Math.round((km / speed) * 60), distanceKm: round1(km), method: 'road_graph', snapM: r.snapM };
+      }
+    }
+    const km = haversineKm(fromLoc.lat, fromLoc.lng, toLoc.lat, toLoc.lng);
+    if (!Number.isFinite(km)) return null;
+    return { minutes: Math.round((km / speed) * 60), distanceKm: round1(km), method: 'haversine', snapM: 0 };
+  }
+
   function haversineKm(lat1, lng1, lat2, lng2) {
     const R = 6371;
     const toRad = d => (d * Math.PI) / 180;
@@ -1178,6 +1205,13 @@
   // 운행 시간 하나에 대한 계획(차량 여러 대면 대수만큼 lane 을 만든다)
   function planWindow(ctx, startMin, endMin) {
     const { periods, light, limits, zoneNames, recByKey, locations, weekdayType } = ctx;
+    // 구역 쌍마다 한 번만 잰다(도로망 최단 거리는 계산이 들어간다)
+    const travelMemo = ctx.travelMemo || (ctx.travelMemo = new Map());
+    const travelBetween = (a, b) => {
+      const key = `${a}→${b}`;
+      if (!travelMemo.has(key)) travelMemo.set(key, travelEstimate(locations.get(a), locations.get(b), limits.travelSpeedKmh, ctx.router));
+      return travelMemo.get(key);
+    };
     const blocks = planBlocks(startMin, endMin, periods, light, limits);
     const conditions = blocks.map(([from, to]) => {
       const mid = from + Math.max(1, Math.round((to - from) / 2));
@@ -1208,18 +1242,27 @@
     const vehicles = Math.max(1, Math.min(8, Math.round(limits.vehicleCount || 1)));
     for (let v = 0; v < vehicles; v++) {
       let current = null;
+      let dwell = 0;   // 지금 구역에 연속으로 머문 분
       const laneBlocks = conditions.map((cond, i) => {
+        const currentLeft = current ? remainingOf(current, cond).minutes : 0;
         const options = zoneNames.filter(z => !taken[i].has(z)).map(zone => {
-          const travel = (current && current !== zone)
-            ? (travelMinutes(locations.get(current), locations.get(zone), limits.travelSpeedKmh) || 0) : 0;
+          const switching = !!current && current !== zone;
+          const est = switching ? travelBetween(current, zone) : null;
+          const travel = switching ? ((est && est.minutes) || 0) : 0;
           const collect = Math.max(0, cond.minutes - travel);
           const rec = recFor(zone, cond);
           const score = rec ? rec.score : 0;
           const left = remainingOf(zone, cond).minutes;
-          const useful = Math.min(collect, left);
-          const overfill = collect - useful;
+          // 계획 가치 = 추천 가치 − 이동 비용 − 구역 변경 비용. 변경 비용은 "그만큼 덜 모은 것"으로 친다.
+          //   · 구역을 바꿀 때마다 switchPenaltyMinutes
+          //   · 지금 구역에 아직 부족분이 남았는데 minStayMinutes 전에 떠나면 모자란 체류 분만큼 더
+          const stayShort = switching && currentLeft > 0 && dwell < limits.minStayMinutes ? limits.minStayMinutes - dwell : 0;
+          const penalty = switching ? limits.switchPenaltyMinutes + stayShort : 0;
+          const planningCollect = Math.max(0, collect - penalty);
+          const useful = Math.min(planningCollect, left);
+          const overfill = planningCollect - useful;
           return {
-            zone, travel, collect, rec, score, left,
+            zone, travel, est, collect, rec, score, left, penalty,
             value: score * (useful + overfill * OVERFILL_VALUE_RATIO),
           };
         });
@@ -1229,12 +1272,14 @@
           || b.left - a.left
           || (zoneMinutes.get(a.zone) || 0) - (zoneMinutes.get(b.zone) || 0)
           || (a.zone < b.zone ? -1 : 1));
-        const pick = options[0] || { zone: zoneNames[0], travel: 0, collect: cond.minutes, rec: null, score: 0, left: 0 };
+        const pick = options[0] || { zone: zoneNames[0], travel: 0, collect: cond.minutes, rec: null, score: 0, left: 0, penalty: 0, est: null };
         const step = { zone: pick.zone, travel: current ? pick.travel : 0 };
         const rec = pick.rec;
         const travel = step.travel;
         const collectMinutes = Math.max(0, cond.minutes - travel);
+        const switched = !!current && current !== step.zone;
         taken[i].add(step.zone);
+        dwell = switched || !current ? collectMinutes : dwell + collectMinutes;
         current = step.zone;
         zoneMinutes.set(step.zone, (zoneMinutes.get(step.zone) || 0) + collectMinutes);
         const ledger = remainingOf(step.zone, cond);
@@ -1245,15 +1290,20 @@
           conditionLabel: [TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod], cond.lightCondition ? TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : null].filter(Boolean).join(' · '),
           zone: step.zone,
           travelMinutes: travel,
+          travelMethod: switched && pick.est ? pick.est.method : null,
+          travelDistanceKm: switched && pick.est ? pick.est.distanceKm : null,
+          switchPenaltyMinutes: switched ? pick.penalty : 0,
+          switched,
           collectMinutes,
           score: rec ? rec.score : null,
           priority: rec ? rec.priority : null,
           recommendationId: rec ? rec.id : null,
           shortfallMinutes: rec ? rec.need.additionalMinutes : null,
           remainingBefore: ledger.minutes,
-          reason: rec
+          reason: (rec
             ? `${TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod]}${cond.lightCondition ? ' · ' + TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : ''} 조건에서 ${step.zone}이(가) 가장 부족해요(추천 점수 ${rec.score}점 · 이 조건 남은 부족 ${ledger.minutes}분)`
-            : `${step.zone}의 이 조건 기록이 없어 비교할 근거가 없어요(점수 없음)`,
+            : `${step.zone}의 이 조건 기록이 없어 비교할 근거가 없어요(점수 없음)`)
+            + (switched && pick.est ? ` · 이동 ${pick.est.distanceKm}km(${pick.est.method === 'road_graph' ? '도로망 최단 거리' : '직선 거리'}) · 구역 변경 비용 ${pick.penalty}분을 감안하고도 옮기는 쪽이 나음` : ''),
         };
       });
       lanes.push({ vehicleIndex: v + 1, blocks: laneBlocks });
@@ -1263,10 +1313,13 @@
 
   function summarizeLanes(lanes) {
     const byZone = {}, byPeriod = {}, byLight = {}, byCondition = {};
-    let collect = 0, travel = 0;
+    let collect = 0, travel = 0, switches = 0;
+    const travelMethods = { road_graph: 0, haversine: 0 };
     lanes.forEach(lane => lane.blocks.forEach(b => {
       collect += b.collectMinutes;
       travel += b.travelMinutes;
+      if (b.switched) switches++;
+      if (b.travelMethod) travelMethods[b.travelMethod] = (travelMethods[b.travelMethod] || 0) + 1;
       byZone[b.zone] = (byZone[b.zone] || 0) + b.collectMinutes;
       byPeriod[b.trafficPeriod] = (byPeriod[b.trafficPeriod] || 0) + b.collectMinutes;
       const lk = b.lightCondition || 'unknown';
@@ -1274,7 +1327,7 @@
       const ck = `${b.zone}|${b.trafficPeriod}|${b.lightCondition || 'any'}`;
       byCondition[ck] = (byCondition[ck] || 0) + b.collectMinutes;
     }));
-    return { collectMinutes: collect, travelMinutes: travel, byZone, byPeriod, byLight, byCondition };
+    return { collectMinutes: collect, travelMinutes: travel, zoneSwitches: switches, travelMethods, byZone, byPeriod, byLight, byCondition };
   }
 
   function buildDrivePlan(input) {
@@ -1307,12 +1360,16 @@
     const light = reference ? lightIntervals(date, reference, cfg) : null;
     const recByKey = new Map(result.recommendations.map(r => [r.id, r]));
 
+    const numOr = (v, d) => (v === '' || v == null || !Number.isFinite(Number(v)) ? d : Number(v));
     const ctx = {
       periods: cfg.trafficPeriods, light, zoneNames, recByKey, locations, weekdayType,
+      router: o.router || null,
       limits: {
         maxBlockMinutes: Math.max(20, Math.min(240, Number(plan.maxBlockMinutes) || PLAN_DEFAULTS.maxBlockMinutes)),
         minBlockMinutes: Math.max(5, Math.min(60, Number(plan.minBlockMinutes) || PLAN_DEFAULTS.minBlockMinutes)),
         travelSpeedKmh: Math.max(5, Math.min(120, Number(plan.travelSpeedKmh) || PLAN_DEFAULTS.travelSpeedKmh)),
+        switchPenaltyMinutes: Math.max(0, Math.min(120, numOr(plan.switchPenaltyMinutes, PLAN_DEFAULTS.switchPenaltyMinutes))),
+        minStayMinutes: Math.max(0, Math.min(240, numOr(plan.minStayMinutes, PLAN_DEFAULTS.minStayMinutes))),
         vehicleCount: plan.vehicleCount,
       },
     };
@@ -1333,8 +1390,18 @@
       baselineWindow: { start: TC.formatClock(baseStart), end: TC.formatClock(baseEnd) },
     }) : null;
 
+    const methods = [...ctx.travelMemo ? ctx.travelMemo.values() : []].filter(Boolean).map(e => e.method);
+    const usedRoad = methods.includes('road_graph'), usedLine = methods.includes('haversine');
+    const travelText = usedRoad && !usedLine
+      ? `구역 사이 이동 시간은 HD Map 도로망 최단 거리 ÷ 평균 ${ctx.limits.travelSpeedKmh}km/h 로 잡은 어림값입니다(신호·정체·일방통행·주차 시간은 반영하지 않습니다).`
+      : usedRoad
+        ? `구역 사이 이동 시간은 HD Map 도로망 최단 거리 ÷ 평균 ${ctx.limits.travelSpeedKmh}km/h 로 잡았고, 도로망으로 이어지지 않는 구역 쌍만 직선 거리로 대신했습니다(신호·정체 미반영).`
+        : ctx.router
+          ? `도로망으로 구역을 잇지 못해 구역 사이 이동 시간은 구역 중심을 잇는 직선 거리 ÷ 평균 ${ctx.limits.travelSpeedKmh}km/h 로 잡은 어림값입니다(실제 도로·신호·주차 시간 미반영).`
+          : `구역 사이 이동 시간은 구역 중심을 잇는 직선 거리 ÷ 평균 ${ctx.limits.travelSpeedKmh}km/h 로 잡은 어림값입니다(도로망 데이터 없음 · 실제 도로·신호·주차 시간 미반영).`;
     const limitations = [
-      '구역 사이 이동 시간은 구역 중심을 잇는 직선 거리 ÷ 평균 속도로 잡은 어림값입니다(실제 도로·신호·주차 시간은 반영하지 않습니다).',
+      travelText,
+      `블록마다 가장 부족한 구역을 고르되, 구역을 바꿀 때 ${ctx.limits.switchPenaltyMinutes}분의 변경 비용과 최소 체류 ${ctx.limits.minStayMinutes}분(부족분이 남아 있을 때)을 계획 가치에서 빼서 A→B→A 처럼 오가지 않게 했습니다(실제 수집 시간 계산에는 이동 시간만 뺍니다).`,
       '계획의 수집 시간은 "그 시간에 그 구역에 있으면 계속 기록된다"고 본 최대치입니다(신호 대기·휴식은 빼지 않았습니다).',
       '날씨는 예측하지 않습니다 — 비 오는 날 우선 수집 같은 판단은 당일에 직접 하세요.',
     ];
@@ -1357,6 +1424,9 @@
         : null,
       vehicleCount: ctx.limits.vehicleCount,
       travelSpeedKmh: ctx.limits.travelSpeedKmh,
+      switchPenaltyMinutes: ctx.limits.switchPenaltyMinutes,
+      minStayMinutes: ctx.limits.minStayMinutes,
+      travelBasis: usedRoad ? 'road_graph' : 'haversine',
       lanes: planned.lanes,
       totals: plannedTotals,
       baseline: baseline ? { window: { start: TC.formatClock(baseStart), end: TC.formatClock(baseEnd) }, lanes: baseline.lanes, totals: baselineTotals } : null,
@@ -1723,12 +1793,20 @@
     maxCandidatesPerSegment: 4,
     resultCount: 12,
     minSegmentM: 60,              // 이보다 짧은 구간은 추천 대상에서 뺀다(교차로 조각)
+    // 사업 우선도(HD Map 우선 구축구역) — 부족도 점수를 대신하지 않고 "보조"로만 섞는다.
+    //   최종 점수 = Data Need Score × (100 − weight)% + Project Priority × weight%
+    //   구역별 우선도(0~100)는 여기 두지 않는다 — 날짜별 Priority Policy(priority-policy.js, 설정 데이터)에서 읽는다.
+    //   이 조건을 이미 목표만큼 모았으면 사업 우선도를 더하지 않는다(최우선 구역이라도 충분하면 올리지 않음).
+    projectPriority: Object.freeze({ weight: 20 }),
   });
 
   function segmentSettings(input) {
     const s = input && typeof input === 'object' ? input : {};
     const weights = { ...SEGMENT_DEFAULTS.weights, ...(s.weights || {}) };
-    return { ...SEGMENT_DEFAULTS, ...s, weights };
+    const pp = s.projectPriority || {};
+    // 예전 버전이 저장한 values(단계별 점수)는 쓰지 않는다 — 구역 우선도는 Priority Policy 에서 온다
+    const projectPriority = { weight: pp.weight != null ? Number(pp.weight) : SEGMENT_DEFAULTS.projectPriority.weight };
+    return { ...SEGMENT_DEFAULTS, ...s, weights, projectPriority };
   }
 
   // 가중치 합계가 100이 아니면 저장하지 않는다(추천 설정과 같은 규칙)
@@ -1743,7 +1821,83 @@
     });
     if (!errors.length && Math.round(sum) !== 100) errors.push(`가중치 합계가 ${Math.round(sum)}% 예요 — 100% 가 되어야 저장할 수 있어요.`);
     if (!(s.targetMinutesPerCell > 0)) errors.push('한 칸 목표 수집 시간은 1분 이상이어야 해요.');
+    const pw = s.projectPriority.weight;
+    // 사업 우선도가 부족도를 넘어서면 "우선지역이라서 1등"이 된다 — 50% 까지만 허용한다
+    if (!Number.isFinite(pw) || pw < 0 || pw > 50) errors.push('사업 우선도 비중은 0~50% 사이여야 해요(부족도 점수가 중심이어야 합니다).');
     return { ok: !errors.length, errors, value: s };
+  }
+
+  // 앱 설정 패치 중 segmentRecommendationSettings 를 검증(잘못되면 저장하지 않고 던짐)
+  function normalizeSegmentSettingsPatch(partial) {
+    const out = { ...(partial || {}) };
+    if (!Object.prototype.hasOwnProperty.call(out, 'segmentRecommendationSettings')) return out;
+    const v = validateSegmentSettings(out.segmentRecommendationSettings);
+    if (!v.ok) { const err = new Error(v.errors.join('\n')); err.errors = v.errors; throw err; }
+    out.segmentRecommendationSettings = v.value;
+    return out;
+  }
+
+  // 앱 설정 패치 중 priorityPolicies 를 검증하고, 이전 정책은 목록에서 빠져도 보존한다(삭제 없음).
+  // prevSettings: 저장소의 지금 설정. 잘못된 정책이 하나라도 있으면 아무것도 저장하지 않고 던진다.
+  function normalizePriorityPolicyPatch(partial, prevSettings) {
+    const out = { ...(partial || {}) };
+    if (!Object.prototype.hasOwnProperty.call(out, 'priorityPolicies')) return out;
+    if (!PP) return out;
+    const prev = (prevSettings && Array.isArray(prevSettings.priorityPolicies)) ? prevSettings.priorityPolicies : [];
+    const v = PP.mergePolicyPatch(prev, out.priorityPolicies);
+    if (!v.ok) { const err = new Error(v.errors.join('\n')); err.errors = v.errors; throw err; }
+    out.priorityPolicies = v.value;
+    return out;
+  }
+
+  // ── 사업 우선도(HD Map 우선 구축구역 × Priority Policy) ──────────
+  // areas: HDMapPriority.listAreas() 결과 [{areaNo, name, polygon, hasPolygon}] — 경계만 쓴다.
+  // 구역별 우선도는 코드에 없다. 날짜별 Priority Policy(areaPriorities)에서 읽는다.
+  // 구간이 어느 구역에 속하는지는 구간 중심 → (없으면) 좌표 과반으로 정한다. 경계 밖이면 null.
+  const circledNo = n => (Number(n) >= 1 && Number(n) <= 20 ? String.fromCharCode(0x2460 + Number(n) - 1) : String(n));
+  // 단계는 PriorityPolicy.tierOf 하나로 정한다(100 최우선 · 70~99 우선 · 40~69 보조 · 1~39 일반 · 0 비우선)
+  // — 설정 탭 배지·통계 묶음과 같은 분류. 어느 구역인지와 무관하게 값에서 나온다.
+  const TIER_LABELS = Object.freeze({ primary: '사업 우선 구축지역', priority: '우선 수집 구역', secondary: '보조 수집 구역', normal: '일반 구역', none: '비우선 구역' });
+  const tierOfValue = v => (PP ? PP.tierOf(v) : { id: 'none', label: '비우선' });
+
+  function projectAreaOf(seg, areas) {
+    const list = (areas || []).filter(a => a && a.hasPolygon !== false && Array.isArray(a.polygon) && a.polygon.length >= 3);
+    if (!list.length || !seg) return null;
+    const c = seg.center;
+    const byCenter = c ? list.find(a => SZ.pointInPolygon(c.lat, c.lng, a.polygon)) : null;
+    if (byCenter) return { area: byCenter, basis: `구간 중심이 ${circledNo(byCenter.areaNo)} 경계 안` };
+    const pts = seg.geometry || [];
+    let best = null, bestN = 0;
+    list.forEach(a => {
+      const n = pts.filter(([la, lo]) => SZ.pointInPolygon(la, lo, a.polygon)).length;
+      if (n > bestN) { best = a; bestN = n; }
+    });
+    if (best && bestN * 2 >= pts.length) return { area: best, basis: `구간 좌표 ${bestN}/${pts.length}개가 ${circledNo(best.areaNo)} 경계 안` };
+    return null;
+  }
+
+  // 사업 우선도(0~100) — policy 의 areaPriorities 에서. 정책에 없는 구역·경계 밖은 0.
+  function projectPriorityOf(seg, areas, policy) {
+    const policyName = policy ? policy.policyName : null;
+    const hit = projectAreaOf(seg, areas);
+    // 정책이 없으면 모든 구역 비우선(설정·통계 화면과 같은 분류) — 사업 우선도 0
+    if (!policy) {
+      return hit
+        ? { value: 0, level: 'none', areaNo: hit.area.areaNo, label: `${TIER_LABELS.none} ${circledNo(hit.area.areaNo)}`, basis: `${hit.basis} · 오늘 적용되는 Priority Policy 가 없어 모든 구역 비우선 → 0점`, policyName }
+        : { value: 0, level: null, areaNo: null, label: '우선 구축구역 밖', basis: '오늘 적용되는 Priority Policy 가 없어 0점', policyName };
+    }
+    if (!hit) return { value: 0, level: null, areaNo: null, label: '우선 구축구역 밖', basis: `HD Map 우선 구축구역 경계 밖 → 0점 (정책: ${policyName})`, policyName };
+    const a = hit.area;
+    const raw = (policy.areaPriorities || {})[String(a.areaNo)];
+    const value = Number.isFinite(Number(raw)) ? Math.max(0, Math.min(100, Number(raw))) : 0;
+    const tier = tierOfValue(value);
+    const no = circledNo(a.areaNo);
+    return {
+      value, level: tier.id, areaNo: a.areaNo,
+      label: `${TIER_LABELS[tier.id]} ${no}`,
+      basis: `${hit.basis} · 정책 "${policyName}"의 ${no} 우선도 ${value}${raw == null ? '(정책에 없음 → 0)' : ''}`,
+      policyName,
+    };
   }
 
   // 그 칸(요일·시간대·조도·방향)의 현재 수집 상태
@@ -1764,6 +1918,113 @@
     return { minutes, visits, records, lastVisitedAt: last, weather };
   }
 
+  // 평일/주말 후보 — 후보 시간대 중 하나라도 목표(한 칸 목표 분)에 못 미친 요일 유형만 만든다.
+  //   기록이 전혀 없으면 둘 다, 둘 다 채웠으면 둘 다(점수가 낮게 나와 뒤로 밀린다) — 판단 근거를 남긴다.
+  // ── 구간 표시 이름 ─────────────────────────────────────
+  // 같은 도로의 서로 다른 구간이 "경부고속도로 · 경부고속도로 · …"처럼 똑같아 보이지 않게,
+  //   (1) 구간 양끝에서 만나는 다른 도로의 이름(지도 데이터에 실제로 있는 이름)으로 "A → B"를 만들고
+  //   (2) 그게 없으면 도로별 짧은 번호 "구간 #N"(서→동, 같으면 남→북 순서라 다시 분석해도 같다)을 쓴다.
+  // IC·역 이름은 지도 데이터에 없어 만들지 않는다. 내부 segmentId 는 상세 화면에서만 보여준다.
+  function segmentNaming(segments) {
+    const byNode = new Map();
+    segments.forEach(s => [s.startNode, s.endNode].forEach(n => {
+      if (!n) return;
+      if (!byNode.has(n)) byNode.set(n, []);
+      byNode.get(n).push(s);
+    }));
+    const crossAt = (seg, node) => {
+      const lengths = new Map();
+      (byNode.get(node) || []).forEach(o => {
+        if (o === seg || !o.named || o.roadName === seg.roadName) return;
+        lengths.set(o.roadName, (lengths.get(o.roadName) || 0) + (o.lengthM || 0));
+      });
+      const best = [...lengths.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0];
+      return best ? best[0] : null;
+    };
+    const numberOf = new Map(), countOf = new Map();
+    const byRoad = new Map();
+    segments.forEach(s => { const k = s.named ? s.roadName : ''; if (!byRoad.has(k)) byRoad.set(k, []); byRoad.get(k).push(s); });
+    byRoad.forEach((list, k) => {
+      list.slice().sort((a, b) => (a.center.lng - b.center.lng) || (a.center.lat - b.center.lat) || (a.id < b.id ? -1 : 1))
+        .forEach((s, i) => numberOf.set(s.id, i + 1));
+      countOf.set(k, list.length);
+    });
+    return {
+      cross: seg => ({ start: crossAt(seg, seg.startNode), end: crossAt(seg, seg.endNode) }),
+      number: seg => numberOf.get(seg.id) || null,
+      count: seg => countOf.get(seg.named ? seg.roadName : '') || 0,
+    };
+  }
+
+  function segmentDisplay(seg, dir, naming) {
+    const road = seg.named ? seg.roadName : '이름 없는 도로';
+    const no = naming ? naming.number(seg) : null;
+    const cross = naming ? naming.cross(seg) : { start: null, end: null };
+    const backward = dir && dir.id === 'backward';
+    const fromName = backward ? cross.end : cross.start;
+    const toName = backward ? cross.start : cross.end;
+    const numbered = no ? `${road} · 구간 #${no}` : road;
+    const displayName = fromName && toName && fromName !== toName ? `${road} · ${fromName} → ${toName}` : numbered;
+    return {
+      displayName, numberedName: numbered, fromName: fromName || null, toName: toName || null,
+      segmentNo: no, roadSegmentCount: naming ? naming.count(seg) : null,
+      displayBasis: fromName && toName && fromName !== toName
+        ? `구간 양끝에서 만나는 도로(지도 데이터): ${fromName} → ${toName}${dir && dir.id !== 'both' ? ` · ${dir.label} 기준` : ''}`
+        : `양끝 교차 도로 이름이 지도 데이터에 없어 ${road}의 구간 번호로 표시(서→동 순서 #${no || '—'})`,
+    };
+  }
+
+  function segmentWeekdayTypes(stat, periods, settings) {
+    const t = settings.targetMinutesPerCell;
+    const ids = ['weekday', 'weekend'];
+    if (!stat || !stat.recordCount) {
+      return ids.map(id => ({ id, deficient: true, basis: `이 구간 주행 기록이 없어 ${TC.WEEKDAY_TYPE_LABELS[id]}도 후보로 봅니다.` }));
+    }
+    const rows = ids.map(id => {
+      const per = periods.map(p => ({ p, minutes: cellStateOf(stat, { weekdayType: id, trafficPeriod: p, lightCondition: null }, 'both').minutes }));
+      const short = per.filter(x => x.minutes < t);
+      return {
+        id, deficient: short.length > 0,
+        basis: short.length
+          ? `${TC.WEEKDAY_TYPE_LABELS[id]} ${short.map(x => `${TC.TRAFFIC_PERIOD_LABELS[x.p]} ${x.minutes}분`).join(' · ')} — 한 칸 목표 ${t}분 미달`
+          : `${TC.WEEKDAY_TYPE_LABELS[id]} 후보 시간대 모두 목표 ${t}분 이상`,
+      };
+    });
+    const deficient = rows.filter(r => r.deficient);
+    return deficient.length ? deficient : rows;
+  }
+
+  // 최종 점수 구성 — 부족도(기존 가중합 × 관련도)가 중심, 사업 우선도는 보조.
+  // 이 조건의 목표를 이미 채웠으면 사업 우선도를 더하지 않는다("⑤인데 충분"은 올리지 않음).
+  // Data Need Score(데이터 부족도)와 Project Priority(사업 우선도)를 따로 계산해 둔 뒤 섞는다.
+  function composeSegmentScore(c, project, settings, policyRef) {
+    const w = project ? settings.projectPriority.weight : 0;
+    const needMinutes = Math.max(0, settings.targetMinutesPerCell - c.state.minutes);
+    const applied = !!project && needMinutes > 0;
+    const pv = project ? project.value : 0;
+    const final = round1(c.deficitScore * (100 - w) / 100 + (applied ? pv * w / 100 : 0));
+    return {
+      rawDeficitScore: round1(c.rawScore),
+      relevance: c.relevance,
+      dataNeedScore: c.deficitScore,
+      deficitScore: c.deficitScore,
+      deficitWeight: 100 - w,
+      projectPriorityScore: project ? pv : 0,
+      policy: policyRef ? { policyId: policyRef.policyId, policyName: policyRef.policyName, updatedAt: policyRef.updatedAt } : null,
+      project: project ? {
+        value: pv, weight: w, applied, label: project.label, level: project.level, areaNo: project.areaNo, basis: project.basis,
+        policyName: project.policyName,
+        contribution: applied ? round2(pv * w / 100) : 0,
+        skippedReason: !applied ? '이 조건은 이미 목표 수집 시간을 채워 사업 우선도를 더하지 않음' : null,
+      } : null,
+      deficitContribution: round2(c.deficitScore * (100 - w) / 100),
+      final,
+      formula: project
+        ? `Final ${final} = Data Need ${c.deficitScore} × ${100 - w}% + Project Priority ${applied ? pv : 0} × ${w}%`
+        : `Final ${final} = Data Need ${c.deficitScore} (Project Priority 0 · ${policyRef ? '이 범위에 해당 없음' : '적용 정책 없음'})`,
+    };
+  }
+
   function buildSegmentRecommendations(input) {
     const o = input || {};
     const analysis = o.analysis || { segments: [], zones: [] };
@@ -1778,6 +2039,23 @@
     });
     const items = [];
     const skipped = [];
+    // 사업 우선도 — 우선 구축구역 경계를 받았고, 이 분석 범위의 구간이 하나라도 그 안에 있을 때만 쓴다.
+    // (서초처럼 ①~⑫ 와 겹치지 않는 구역은 "모두 0점"이 아니라 "해당 없음"으로 빼고 부족도만으로 순위를 정한다)
+    const priorityAreas = (o.priorityAreas || []).filter(a => a && Array.isArray(a.polygon) && a.polygon.length >= 3);
+    // 오늘(한국 날짜)에 적용되는 Priority Policy — 저장된 적이 없으면 구역 데이터 파일로 만든 초기 정책
+    const policies = PP ? PP.resolvePolicies(o.priorityPolicies, o.priorityAreas || [], o.priorityAreasMeta) : [];
+    const policy = PP ? PP.activePolicy(policies, today) : null;
+    const projectAreasKnown = !!policy && priorityAreas.length > 0 && settings.projectPriority.weight > 0
+      && (analysis.segments || []).some(s => projectAreaOf(s, priorityAreas));
+    const projectNote = !policy
+      ? `${today}에 적용되는 사업 우선 정책(Priority Policy)이 없어 사업 우선도는 0 — 데이터 부족도만으로 순위를 정했습니다.`
+      : !priorityAreas.length
+        ? 'HD Map 우선 구축구역 경계를 받지 못해 사업 우선도는 반영하지 않았습니다.'
+        : settings.projectPriority.weight <= 0
+          ? '사업 우선도 비중이 0% 라 반영하지 않았습니다.'
+          : !projectAreasKnown ? '이 분석 범위에는 HD Map 우선 구축구역(①~⑫)이 없어 사업 우선도는 반영하지 않았습니다.' : null;
+    const policyRef = PP ? PP.reference(policy) : null;
+    const naming = segmentNaming(analysis.segments || []);
 
     (analysis.segments || []).forEach(seg => {
       const zone = zoneBySegment.get(seg.id);
@@ -1792,11 +2070,14 @@
         periods = Object.entries(stat.periods).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([id]) => id);
       }
       if (!periods.length) periods = ['morning_peak', 'evening_peak'];
-      const weekdayTypes = ['weekday'];
+      // 평일/주말 — 이 구간에서 실제로 부족한 요일 유형만 후보로 만든다(근거를 카드에 남긴다)
+      const weekdayPlan = segmentWeekdayTypes(stat, periods, settings);
+      const weekdayBasisOf = new Map(weekdayPlan.map(w => [w.id, w.basis]));
       const location = seg.center;
       const perSegment = [];
+      const project = projectAreasKnown ? projectPriorityOf(seg, priorityAreas, policy) : null;
 
-      weekdayTypes.forEach(weekdayType => {
+      weekdayPlan.map(w => w.id).forEach(weekdayType => {
         const referenceDate = nextDateOfType(today, weekdayType);
         const light = location ? lightIntervals(referenceDate, location, cfg) : null;
         periods.forEach(periodId => {
@@ -1814,7 +2095,7 @@
             dirs.forEach(dir => {
               const state = cellStateOf(stat, cond, dir.id);
               const scored = scoreSegmentCandidate({ seg, zone, stat, state, cond, dir, settings, today, analysis });
-              perSegment.push({ seg, zone, stat, state, cond, dir, lightOpt, referenceDate, light, ...scored });
+              perSegment.push({ seg, zone, stat, state, cond, dir, lightOpt, referenceDate, light, weekdayBasis: weekdayBasisOf.get(weekdayType), ...scored });
             });
           });
         });
@@ -1834,10 +2115,12 @@
         c.rawScore = c.score;
         c.relevance = relevance;
         c.relevanceReason = relevanceReason;
-        c.score = round1(c.score * relevance);
+        c.deficitScore = round1(c.score * relevance);
+        c.composition = composeSegmentScore(c, project, settings, policyRef);
+        c.score = c.composition.final;
       });
       perSegment.sort((a, b) => b.score - a.score);
-      perSegment.slice(0, settings.maxCandidatesPerSegment).forEach(c => items.push(makeSegmentRecommendation(c, settings, today)));
+      perSegment.slice(0, settings.maxCandidatesPerSegment).forEach(c => items.push(makeSegmentRecommendation({ ...c, naming }, settings, today)));
       if (!perSegment.length) skipped.push({ segment: seg.label, reason: '후보 시간대를 정하지 못했습니다.' });
     });
 
@@ -1854,6 +2137,10 @@
       issueFilter: IF.normalizeFilter(o.issueFilter === undefined ? 'clean' : o.issueFilter),
       settings,
       weights: settings.weights,
+      projectPriority: { applied: projectAreasKnown, weight: settings.projectPriority.weight, note: projectNote },
+      // 이 추천을 만든 정책 — 과거 추천을 다시 볼 때 "당시 적용 정책"
+      policy: policyRef,
+      policyCount: policies.length,
       candidateCount: items.length,
       recommendations: visible,
       allRecommendations: items,
@@ -1861,6 +2148,10 @@
       dataLevels: analysis.dataLevels || null,
       analysisNotes: analysis.notes || [],
       limitations: [
+        projectAreasKnown
+          ? `최종 점수 = Data Need Score × ${100 - settings.projectPriority.weight}% + Project Priority × ${settings.projectPriority.weight}% — 적용 정책 "${policy.policyName}"(${PP.summarize(policy)}). 이 조건을 이미 목표만큼 모은 구간은 사업 우선도를 더하지 않습니다.`
+          : projectNote,
+        'Edge Case 점수는 실제 이벤트 기록이 없어 "그 장소 유형에서 상황이 생길 가능성(분류 근거의 확실성) × 이 조건 수집 부족"으로 잡은 대리 지표입니다.',
         '자동 분류는 지도 데이터와 우리 주행 기록에서 나온 근거만 씁니다 — 확인되지 않은 장소·시설 이름은 만들지 않습니다.',
         '예상 상황은 조건에서 나온 가능성이며 실제 발생을 보장하지 않습니다.',
         '방향은 25m 안의 도로에 맞춘 기록으로만 나눕니다. 표본이 적으면 양방향으로 봅니다.',
@@ -1927,11 +2218,19 @@
       details.weatherDiversity = '이 구간 기록이 없어 날씨 다양성을 알 수 없음';
     }
 
+    // Edge Case 우선도 = 발생 가능성(그 장소 유형 판정이 얼마나 확실한가) × 이 조건의 수집 부족.
+    // 예상 상황 "개수"로 점수를 올리지 않는다 — 많이 나열된 유형이 부족하지 않아도 앞서는 것을 막는다.
+    // 실제 Edge Case 이벤트 기록이 없어 발생 빈도는 모른다 → 분류 근거를 가능성의 대리값으로 쓴다.
     const expects = zone.expects || [];
-    sub.edgeCase = expects.length ? clamp(40 + expects.length * 10, 0, 100) : null;
-    details.edgeCase = expects.length
-      ? `${zone.semanticLabel} 조건에서 볼 가능성이 있는 상황 ${expects.length}가지`
-      : '유형을 확인하지 못해 기대 상황을 정하지 못함';
+    const likelihood = edgeCaseLikelihood(seg, zone);
+    if (expects.length && likelihood) {
+      const shortfall = clamp(1 - state.minutes / Math.max(1, t), 0, 1);
+      sub.edgeCase = round1(100 * likelihood.value * shortfall);
+      details.edgeCase = `${zone.semanticLabel} 예상 상황 ${expects.length}가지 · 발생 가능성 ${likelihood.value}(${likelihood.basis}) × 이 조건 수집 부족 ${Math.round(shortfall * 100)}%`;
+    } else {
+      sub.edgeCase = null;
+      details.edgeCase = '유형을 확인하지 못해 기대 상황을 정하지 못함';
+    }
 
     const lastDate = state.lastVisitedAt ? String(state.lastVisitedAt).slice(0, 10) : null;
     const days = lastDate ? Math.max(0, daysBetween(lastDate, today)) : null;
@@ -1994,6 +2293,8 @@
       semanticLabel: zone.semanticLabel,
       segmentId: seg.id,
       segmentLabel: seg.label,
+      // 사람이 읽는 이름 — "도로명 · 교차 도로 → 교차 도로"(진행 방향 기준), 모르면 "도로명 · 구간 #N"
+      ...segmentDisplay(seg, dir, c.naming),
       roadName: seg.roadName,
       roadNamed: seg.named,
       lengthM: seg.lengthM,
@@ -2008,8 +2309,11 @@
       conditionLabel: [TC.WEEKDAY_TYPE_LABELS[cond.weekdayType], period,
         cond.lightCondition ? TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : null].filter(Boolean).join(' · '),
       timeWindow: window,
+      weekdayType: cond.weekdayType,
+      weekdayLabel: TC.WEEKDAY_TYPE_LABELS[cond.weekdayType],
+      weekdayBasis: c.weekdayBasis || null,
       current: {
-        collectionMinutes: state.minutes, visitCount: state.visits, recordCount: state.records,
+        collectionMinutes: state.minutes, collectionSec: state.minutes * 60, visitCount: state.visits, recordCount: state.records,
         lastVisitedAt: state.lastVisitedAt, daysSinceLastVisit: days,
         coveragePercent: stat && stat.coverage ? stat.coverage.percent : null,
         segmentTotalMinutes: stat ? stat.collectionMinutes : 0,
@@ -2019,10 +2323,18 @@
       targets: { minutes: settings.targetMinutesPerCell, visits: settings.targetVisitsPerCell },
       need: {
         additionalMinutes: needMinutes,
+        targetMinutes: settings.targetMinutesPerCell,
+        targetVisits: settings.targetVisitsPerCell,
         passes, passMinutes,
+        estimatedMinutes: passes * passMinutes,
         text: passes ? `${dir.label} ${passes}회(편도 약 ${passMinutes}분)` : '이 조건은 목표를 채웠어요',
       },
       score: c.score,
+      deficitScore: c.deficitScore != null ? c.deficitScore : c.score,
+      scoreComposition: c.composition || null,
+      dataNeedScore: c.deficitScore != null ? c.deficitScore : c.score,
+      policy: c.composition ? c.composition.policy : null,
+      projectPriority: c.composition && c.composition.project ? c.composition.project : null,
       rawScore: c.rawScore != null ? c.rawScore : c.score,
       relevance: c.relevance != null ? c.relevance : 1,
       relevanceReason: c.relevanceReason || null,
@@ -2049,6 +2361,20 @@
     };
   }
 
+  // 그 장소 유형에서 예상 상황이 생길 가능성의 대리값(0~1) — 판정 근거의 출처·확실성으로만 정한다.
+  // 공식 데이터·지도 등급 > POI > 도로망 모양 > 우리 주행 패턴 관측. 사용자가 고친 유형은 사람이 확인한 것으로 본다.
+  const EDGE_SOURCE_LIKELIHOOD = Object.freeze({ official: 1, map: 0.9, poi: 0.8, graph: 0.7, gps: 0.6 });
+  const EDGE_CONF_FACTOR = Object.freeze({ high: 1, medium: 0.9, low: 0.7 });
+  const EDGE_SOURCE_LABELS = Object.freeze({ official: '공식 데이터', map: '지도 도로 등급', poi: '지도 POI', graph: '도로망 모양', gps: '주행 기록 관측' });
+  function edgeCaseLikelihood(seg, zone) {
+    if (!zone || zone.semanticType === 'unclassified') return null;
+    if (zone.override && zone.override.semanticType) return { value: 0.8, basis: '사용자가 유형을 직접 지정' };
+    const t = ((seg && seg.semanticTypes) || []).find(x => x.type === zone.semanticType);
+    if (!t || !EDGE_SOURCE_LIKELIHOOD[t.source]) return null;
+    const value = round2(EDGE_SOURCE_LIKELIHOOD[t.source] * (EDGE_CONF_FACTOR[t.confidence] || 0.7));
+    return { value, basis: `${EDGE_SOURCE_LABELS[t.source]} 근거 · 신뢰 ${t.confidence}` };
+  }
+
   function segmentConfidence(c) {
     const reasons = [];
     const stat = c.stat;
@@ -2072,6 +2398,9 @@
     if (days != null) parts.push(`마지막 수집은 ${days}일 전입니다.`);
     if (c.relevanceReason) parts.push(c.relevanceReason);
     if (worst) parts.push(`점수를 가장 많이 올린 항목은 ${worst.label}(${worst.value}점 — ${worst.current})입니다.`);
+    if (c.weekdayBasis) parts.push(`${TC.WEEKDAY_TYPE_LABELS[cond.weekdayType]} 후보 근거: ${c.weekdayBasis}.`);
+    const p = c.composition && c.composition.project;
+    if (p && p.level && p.value > 0) parts.push(p.applied ? `${p.label}(사업 우선도 ${p.value}점 × ${p.weight}% 반영 · 정책 "${p.policyName}").` : `${p.label}이지만 ${p.skippedReason}.`);
     return parts.join(' ');
   }
 
@@ -2132,6 +2461,134 @@
   }
 
   function snoozeUntil(now, days) { return addDaysStr(kstDate(now), days); }
+
+  // ══════════════════════════════════════════════════════
+  //  오늘 추천 주행(간단 보기) — "어디를 · 언제 · 왜" 만 뽑는다
+  //
+  //  새 점수를 만들지 않는다. 이미 계산된 도로 Segment 추천(없으면 구역 추천)에서
+  //    · 오늘의 요일 유형(평일/주말)과 운행 시간에 맞는 것만,
+  //    · 숨김·기간 제외·완료 상태를 적용하고,
+  //    · 같은 구간은 한 번만 골라 점수 순 Top N 을 만든 뒤 시간 순서로 보여준다.
+  //  이유 문장은 그 추천의 점수 항목 중 기여가 큰 것을 짧은 말로 바꾼 것뿐이다.
+  // ══════════════════════════════════════════════════════
+  const SHORT_ANALYSIS_LABELS = Object.freeze({
+    LEFT_TURN: '좌회전', RIGHT_TURN: '우회전', U_TURN: '유턴', MERGE: '합류', DIVERGE: '분기', STRAIGHT: '직진',
+    MOVING: '주행', SLOW: '저속', STOPPED: '정지',
+    NORMAL_ROAD: '일반도로', INTERSECTION: '교차로', MERGE_AREA: '합류구간', DIVERGE_AREA: '분기구간',
+    HIGHWAY: '고속도로', RAMP: '램프', SCHOOL_ZONE: 'SCHOOL_ZONE',
+  });
+
+  function shortReasonOf(b, r) {
+    const cond = r.condition || {};
+    const period = TC.TRAFFIC_PERIOD_LABELS[cond.trafficPeriod] || '';
+    const light = cond.lightCondition ? TC.LIGHT_CONDITION_LABELS[cond.lightCondition] : '';
+    switch (b.key) {
+      case 'timePeriod': return `${period} 데이터 부족`;
+      case 'coverage': case 'segmentCoverage': return 'Coverage 부족';
+      case 'direction': return `${(r.direction && r.direction.label) || '한쪽 방향'} 데이터 부족`;
+      case 'lightCondition': return `${light || '조도'} 조건 부족`;
+      case 'weatherDiversity': return '날씨 다양성 부족';
+      case 'maneuver': return `${SHORT_ANALYSIS_LABELS[(r.current && r.current.maneuver && r.current.maneuver.value)] || 'Ego Maneuver'} 데이터 부족`;
+      case 'roadContext': return `${SHORT_ANALYSIS_LABELS[(r.current && r.current.roadContext && r.current.roadContext.value)] || 'Road Context'} 데이터 부족`;
+      case 'edgeCase': return `${r.semanticLabel || '이 장소 유형'} 상황 데이터 부족`;
+      case 'staleness': return r.current && r.current.daysSinceLastVisit != null ? `${r.current.daysSinceLastVisit}일째 미방문` : '방문 기록 없음';
+      case 'vehicleImbalance': case 'vehicleBias': return '차량 편중';
+      default: return b.label;
+    }
+  }
+
+  function windowOf(r) {
+    const w = r.timeWindow || r.timeRange || null;
+    if (!w || !w.start || !w.end) return null;
+    const s = TC.parseClock(w.start, false), e = TC.parseClock(w.end, true);
+    return s == null || e == null ? null : { start: w.start, end: w.end, from: s, to: e > s ? e : e + 1440 };
+  }
+
+  // input: { segmentRecs, zoneRecs, states, sessionHidden, now, window:{start,end}, weekdayType, count, vehicleCount }
+  function buildTodayPicks(input) {
+    const o = input || {};
+    const count = Math.max(1, Math.min(10, Number(o.count) || 3));
+    const today = kstDate(o.now);
+    const weekdayType = o.weekdayType && TC.WEEKDAY_TYPE_IDS.includes(o.weekdayType) ? o.weekdayType : TC.classifyWeekdayType(today);
+    const useSegments = Array.isArray(o.segmentRecs) && o.segmentRecs.length > 0;
+    const source = useSegments ? 'segment' : 'zone';
+    const pool = (useSegments ? o.segmentRecs : (o.zoneRecs || [])).filter(r => r && r.condition && r.condition.weekdayType === weekdayType);
+    const stated = applyRecommendationStates(pool, o.states || {}, o.sessionHidden || null, o.now).visible
+      .filter(r => r.score != null && r.need && r.need.additionalMinutes > 0);
+    const ws = o.window ? TC.parseClock(o.window.start, false) : null;
+    const we = o.window ? TC.parseClock(o.window.end, true) : null;
+    const hasWindow = ws != null && we != null && we > ws;
+    const overlap = r => {
+      const w = windowOf(r);
+      if (!w || !hasWindow) return 0;
+      return Math.max(0, Math.min(w.to, we) - Math.max(w.from, ws));
+    };
+    let candidates = hasWindow ? stated.filter(r => overlap(r) >= 15) : stated;
+    const notes = [];
+    if (hasWindow && !candidates.length && stated.length) {
+      notes.push(`운행 시간(${o.window.start}~${o.window.end})에 맞는 추천이 없어, 시간과 무관하게 부족한 순서로 보여줍니다.`);
+      candidates = stated;
+    }
+    const seen = new Set();
+    const picked = [];
+    [...candidates].sort((a, b) => (b.score - a.score) || (b.need.additionalMinutes - a.need.additionalMinutes) || idCompare(a, b)).forEach(r => {
+      if (picked.length >= count) return;
+      const key = useSegments ? r.segmentId : `${r.zone}|${r.condition.trafficPeriod}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      picked.push(r);
+    });
+    const items = picked.map((r, i) => {
+      const w = windowOf(r);
+      const reasons = (r.breakdown || []).filter(b => !b.excluded && b.value >= 40)
+        .sort((a, b) => b.contribution - a.contribution).slice(0, 2).map(b => shortReasonOf(b, r));
+      const project = r.projectPriority && r.projectPriority.level && r.projectPriority.applied && r.projectPriority.value > 0 ? r.projectPriority.label : null;
+      const minutes = useSegments
+        ? Math.max(r.need.passMinutes || 0, Math.min(r.need.estimatedMinutes || 0, w ? w.to - w.from : Infinity))
+        : Math.max(0, r.need.estimatedMinutesThisStage || 0);
+      return {
+        id: r.id, scoreRank: i + 1, source,
+        // 어디 — 도로 구간은 "도로명 · A → B"(없으면 "도로명 · 구간 #N"), 구역 추천은 구역 이름
+        title: useSegments ? (r.displayName || r.segmentLabel) : r.zone,
+        numberedTitle: useSegments ? (r.numberedName || r.segmentLabel) : r.zone,
+        area: useSegments ? [r.parentZone, r.projectPriority && r.projectPriority.areaNo ? `${circledNo(r.projectPriority.areaNo)}구역` : null].filter(Boolean).join(' ') : r.zone,
+        place: useSegments ? r.subZoneName : null,
+        semanticLabel: r.semanticLabel || null,
+        direction: useSegments ? r.direction.label : null,
+        route: useSegments ? r.direction.label : null,
+        // 언제 — 요일 유형 + 권장 시간 + 예상 소요
+        weekdayType, weekdayLabel: TC.WEEKDAY_TYPE_LABELS[weekdayType],
+        conditionLabel: r.conditionLabel,
+        window: w ? { start: w.start, end: w.end, text: `${w.start}~${w.end}` } : null,
+        minutes: Math.round(minutes),
+        whenText: `${TC.WEEKDAY_TYPE_LABELS[weekdayType]} ${w ? `${w.start}~${w.end}` : '시간대 전체'} · 약 ${Math.round(minutes)}분`,
+        passesText: useSegments ? r.need.text : `${r.need.additionalVisits}회`,
+        // 왜 — 데이터 부족 이유(점수 기여 큰 순 2개)와 사업 우선도를 따로
+        reasons: reasons.length ? reasons : ['부족도 점수 기준 상위'],
+        whyText: (reasons.length ? reasons : ['부족도 점수 기준 상위']).join(' + '),
+        reasonText: [project, ...reasons].filter(Boolean).join(' + ') || '부족도 점수 기준 상위',
+        projectLabel: project,
+        score: r.score, priorityLabel: r.priorityLabel,
+        confidenceLabel: r.confidence ? r.confidence.label : null,
+        segmentId: r.segmentId || null,
+      };
+    }).sort((a, b) => ((a.window ? TC.parseClock(a.window.start, false) : 9999) - (b.window ? TC.parseClock(b.window.start, false) : 9999)) || a.scoreRank - b.scoreRank);
+    // 그래도 이름이 겹치면(같은 도로 · 같은 교차 도로) 구간 번호로 바꾸고, 그것도 겹치면 순번을 붙인다
+    const seenTitle = new Map();
+    items.forEach(it => seenTitle.set(it.title, (seenTitle.get(it.title) || 0) + 1));
+    items.forEach(it => { if (seenTitle.get(it.title) > 1) it.title = it.numberedTitle; });
+    const again = new Map();
+    items.forEach(it => { const n = (again.get(it.title) || 0) + 1; again.set(it.title, n); if (n > 1) it.title = `${it.title} (${n})`; });
+    items.forEach((it, i) => { it.order = i + 1; });
+    return {
+      today, weekdayType, weekdayLabel: TC.WEEKDAY_TYPE_LABELS[weekdayType], source,
+      window: hasWindow ? { start: o.window.start, end: o.window.end } : null,
+      vehicleCount: Math.max(1, Number(o.vehicleCount) || 1),
+      items, totalMinutes: items.reduce((a, it) => a + it.minutes, 0),
+      candidateCount: stated.length,
+      notes: notes.concat(source === 'zone' ? ['도로 구간 자동 분석 결과가 아직 없어 구역 단위 추천으로 보여줍니다.'] : []),
+    };
+  }
 
   // ══════════════════════════════════════════════════════
   //  향후 LLM 연결 — 구조화된 사실만(원본 GPS·사람 이름·차량 이름 없음)
@@ -2227,7 +2684,13 @@
     SUBZONE_TARGET_DEFAULTS,
     buildSegmentRecommendations,
     validateSegmentSettings,
+    normalizeSegmentSettingsPatch,
     segmentSettings,
+    projectPriorityOf,
+    circledNo,
+    normalizePriorityPolicyPatch,
+    travelEstimate,
+    buildTodayPicks,
     SEGMENT_SCORE_KEYS,
     SEGMENT_SCORE_LABELS,
     SEGMENT_DEFAULTS,

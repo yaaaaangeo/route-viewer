@@ -270,14 +270,77 @@
 
   // POI 하나가 이 구간에서 radius 안인지 — 구간의 모든 선분과의 최단거리로 본다
   // (POI 중심으로 원을 그리는 방식이 아니라, 도로와의 실제 거리로 판정한다)
+  // 경계가 있는 POI(아파트 단지·보호구역 폴리곤)는 중심이 도로에서 멀어도 경계가 도로에 붙어 있으면
+  // 인접이다 — 경계 꼭짓점과의 거리, 또는 도로가 경계 안을 지나는지로 본다.
+  // 구간 bbox(위경도) — POI 가 수천 개여도 먼저 bbox 로 걸러서 정밀 거리 계산을 줄인다
+  const segBoxCache = new WeakMap();
+  function segBox(seg) {
+    let b = segBoxCache.get(seg);
+    if (!b) { b = SZ.polygonBounds(seg.geometry.length >= 3 ? seg.geometry : seg.geometry.concat([seg.geometry[0]])); segBoxCache.set(seg, b); }
+    return b;
+  }
+  const M_PER_DEG_LAT = 111320;
+  function boxesApart(a, b, radiusM, lat) {
+    const dLat = radiusM / M_PER_DEG_LAT;
+    const dLng = radiusM / (M_PER_DEG_LAT * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+    return a.maxLat + dLat < b.minLat || b.maxLat + dLat < a.minLat || a.maxLng + dLng < b.minLng || b.maxLng + dLng < a.minLng;
+  }
+
   function nearSegment(seg, poi, radiusM) {
+    const pts = seg.geometry;
+    const box = segBox(seg);
+    const near = (lat, lng) => {
+      for (let i = 1; i < pts.length; i++) {
+        if (SZ.pointToSegment(lat, lng, pts[i - 1], pts[i]).distanceM <= radiusM) return true;
+      }
+      return false;
+    };
+    if (Array.isArray(poi.polygon) && poi.polygon.length >= 3) {
+      const poly = poi.polygon;
+      const pb = SZ.polygonBounds(poly);
+      if (box && pb && boxesApart(box, pb, radiusM, box.minLat)) return false;
+      // 경계선(변)과 도로 좌표 사이 거리 · 경계 꼭짓점과 도로 사이 거리 · 도로가 경계 안을 지나는지
+      for (let k = 0; k < poly.length; k++) {
+        const a = poly[k], b = poly[(k + 1) % poly.length];
+        if (pts.some(([la, lo]) => SZ.pointToSegment(la, lo, a, b).distanceM <= radiusM)) return true;
+      }
+      if (poly.some(([la, lo]) => near(Number(la), Number(lo)))) return true;
+      if (pts.some(([la, lo]) => SZ.pointInPolygon(la, lo, poly))) return true;
+      return false;
+    }
     const lat = Number(poi.lat), lng = Number(poi.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-    const pts = seg.geometry;
-    for (let i = 1; i < pts.length; i++) {
-      if (SZ.pointToSegment(lat, lng, pts[i - 1], pts[i]).distanceM <= radiusM) return true;
-    }
-    return false;
+    if (box && boxesApart(box, { minLat: lat, maxLat: lat, minLng: lng, maxLng: lng }, radiusM, lat)) return false;
+    return near(lat, lng);
+  }
+
+  // ── POI 지문 — 저장된 분석이 어떤 POI 로 판정됐는지 기록(캐시 무효화·표시용) ──
+  // 없으면 'none'. 좌표를 6자리로 잘라 같은 데이터면 같은 값이 나온다.
+  const POI_CATEGORY_IDS = Object.freeze(['schools', 'offices', 'commercial', 'hospitals', 'markets', 'transit', 'residential', 'officialSchoolZones']);
+  const POI_CATEGORY_LABELS = Object.freeze({
+    schools: '학교', offices: '업무시설', commercial: '상업시설', hospitals: '병원', markets: '시장',
+    transit: '역·정류장', residential: '아파트 단지', officialSchoolZones: '공식 어린이보호구역',
+  });
+  function poiRevision(poi) {
+    if (!poi || typeof poi !== 'object') return 'none';
+    const cats = POI_CATEGORY_IDS.map(id => {
+      const list = Array.isArray(poi[id]) ? poi[id] : [];
+      const pts = list.map(p => `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}${Array.isArray(p.polygon) ? `#${p.polygon.length}` : ''}`).sort();
+      return `${id}:${pts.join(';')}`;
+    });
+    return RG.fnv1a(`${(poi.coveredCategories || []).slice().sort().join(',')}|${cats.join('|')}`);
+  }
+  // 화면·근거용 요약 — 어떤 종류를 받았고(받지 않은 것은 '없음'이 아니라 '확인 안 됨') 몇 개인지
+  function poiSummary(poi) {
+    if (!poi) return { available: false, covered: [], missing: POI_CATEGORY_IDS.slice(), counts: {}, sources: [] };
+    const covered = POI_CATEGORY_IDS.filter(id => (poi.coveredCategories || []).includes(id));
+    const counts = {};
+    covered.forEach(id => { counts[id] = Array.isArray(poi[id]) ? poi[id].length : 0; });
+    return {
+      available: covered.length > 0,
+      covered, missing: POI_CATEGORY_IDS.filter(id => !covered.includes(id)),
+      counts, sources: poi.sources || [], fetchedAt: poi.fetchedAt || null,
+    };
   }
 
   // ── 2) 자동 세부 구역 묶기 ────────────────────────────
@@ -415,15 +478,24 @@
       poi: o.poi, today: o.today, thresholds: o.thresholds,
     });
     const zones = applyOverrides(groupSubZones(segments, { parentZone: o.parentZone }), o.overrides);
+    const summary = poiSummary(o.poi);
     const dataLevels = {
       roadGraph: segments.length > 0,
       poi: !!(o.poi && o.poi.fetchedAt),
       officialSchoolZones: !!(o.poi && o.poi.officialSchoolZones && o.poi.officialSchoolZones.length),
       gps: Object.keys(o.segmentStats || {}).length > 0,
       coverage: !!o.coverage,
+      poiSummary: summary,
+      poiRevision: poiRevision(o.poi),
     };
     const notes = [];
-    if (!dataLevels.poi) notes.push('지도 POI(업무시설·학교·병원·시장·역) 데이터를 받지 못해, 업무지구·학교 인접 도로 같은 시설 기반 분류는 하지 않았습니다 — 도로망과 우리 주행 기록(속도·시간대·방문)만으로 판정했습니다.');
+    if (!dataLevels.poi) notes.push('지도 POI 데이터 없음 — 업무시설·학교·병원·시장·역 같은 시설 기반 분류는 하지 않았습니다. 도로망과 우리 주행 기록(속도·시간대·방문)만으로 판정했습니다.');
+    else {
+      const got = summary.covered.filter(id => id !== 'officialSchoolZones');
+      if (got.length) notes.push(`지도 POI 사용: ${got.map(id => `${POI_CATEGORY_LABELS[id]} ${summary.counts[id]}곳`).join(' · ')} (출처: ${(summary.sources || []).join(', ') || 'OSM'}).`);
+      const missing = summary.missing.filter(id => id !== 'officialSchoolZones');
+      if (missing.length) notes.push(`받지 않은 POI 종류(${missing.map(id => POI_CATEGORY_LABELS[id]).join('·')})는 "없음"이 아니라 "확인 안 됨"이라 그 유형 분류는 하지 않았습니다.`);
+    }
     if (dataLevels.poi && !dataLevels.officialSchoolZones) notes.push('공식 어린이보호구역 데이터가 없어, 학교가 가까운 구간은 "학교 인접 도로"로만 분류했습니다(보호구역 지정 여부는 확인되지 않음).');
     if (!dataLevels.gps) notes.push('이 구역에서 우리 주행 기록이 아직 없어 수집량·방향 판단은 하지 못했습니다.');
     return {
@@ -437,6 +509,7 @@
 
   return {
     AUTO_ANALYSIS_VERSION, SEMANTIC_TYPES, CLASSIFY_DEFAULTS, semanticLabel,
+    POI_CATEGORY_IDS, POI_CATEGORY_LABELS, poiRevision, poiSummary,
     classifySegments, groupSubZones, applyOverrides, buildAnalysis, nearSegment, hullOf,
   };
 }));

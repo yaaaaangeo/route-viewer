@@ -243,9 +243,125 @@
     return fnv1a(`${ROAD_GRAPH_VERSION}|${o.maxSegmentM}|${o.minSegmentM}|${segments.length}|${segments.map(s => s.id).sort().join(',')}`);
   }
 
+  // ── 4) 도로망 최단 거리(주행 계획의 구역 간 이동) ──────────
+  // 직선 거리 대신 "도로를 따라가면 몇 m 인가"를 잰다. 교통량·신호·일방통행은 모른다(지도에 없음) —
+  // 양방향 도로로 보고 길이만 더한다. 두 지점이 도로망에서 이어지지 않으면 null 을 돌려주고,
+  // 부르는 쪽이 직선 거리로 대신한다(모르는 것을 0으로 두지 않는다).
+  const ROUTER_DEFAULTS = Object.freeze({
+    maxSnapM: 1500,          // 구역 중심에서 이보다 멀리 있는 노드로는 붙이지 않는다
+  });
+
+  // 작은 이진 힙 — Dijkstra 용(노드 수천 개라 배열 정렬로는 느리다)
+  function MinHeap() { this.a = []; }
+  MinHeap.prototype.push = function (d, k) {
+    const a = this.a; a.push([d, k]);
+    let i = a.length - 1;
+    while (i > 0) { const p = (i - 1) >> 1; if (a[p][0] <= a[i][0]) break; [a[p], a[i]] = [a[i], a[p]]; i = p; }
+  };
+  MinHeap.prototype.pop = function () {
+    const a = this.a; const top = a[0]; const last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1; let m = i;
+        if (l < a.length && a[l][0] < a[m][0]) m = l;
+        if (r < a.length && a[r][0] < a[m][0]) m = r;
+        if (m === i) break;
+        [a[m], a[i]] = [a[i], a[m]]; i = m;
+      }
+    }
+    return top;
+  };
+
+  // lines: buildGraph 와 같은 입력. 결과는 여러 번 불러도 되게 거리·스냅을 기억해 둔다.
+  function buildRouter(lines, options) {
+    const o = { ...DEFAULTS, ...ROUTER_DEFAULTS, ...(options || {}) };
+    const graph = buildGraph(lines, o);
+    const adj = new Map();
+    graph.edges.forEach(e => {
+      if (e.from === e.to) return;
+      if (!adj.has(e.from)) adj.set(e.from, []);
+      if (!adj.has(e.to)) adj.set(e.to, []);
+      adj.get(e.from).push([e.to, e.lengthM]);
+      adj.get(e.to).push([e.from, e.lengthM]);
+    });
+    // 연결 요소 — 구역 중심을 "섬처럼 떨어진 짧은 조각"에 붙이면 길을 못 찾는다. 가장 큰 덩어리에 붙인다.
+    const component = new Map();
+    const sizes = [];
+    adj.forEach((_, start) => {
+      if (component.has(start)) return;
+      const id = sizes.length; let n = 0;
+      const stack = [start]; component.set(start, id);
+      while (stack.length) {
+        const k = stack.pop(); n++;
+        (adj.get(k) || []).forEach(([next]) => { if (!component.has(next)) { component.set(next, id); stack.push(next); } });
+      }
+      sizes.push(n);
+    });
+    const mainComponent = sizes.length ? sizes.indexOf(Math.max(...sizes)) : -1;
+    const snapMemo = new Map();
+    const pathMemo = new Map();
+
+    function nearestNode(lat, lng) {
+      const key = `${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`;
+      if (snapMemo.has(key)) return snapMemo.get(key);
+      let best = null;
+      graph.nodes.forEach(node => {
+        if (component.get(node.key) !== mainComponent) return;
+        const d = SZ.distanceM(lat, lng, node.lat, node.lng);
+        if (!best || d < best.distanceM) best = { key: node.key, distanceM: d };
+      });
+      const out = best && best.distanceM <= o.maxSnapM ? best : null;
+      snapMemo.set(key, out);
+      return out;
+    }
+
+    function shortestM(fromKey, toKey) {
+      if (fromKey === toKey) return 0;
+      const memoKey = fromKey < toKey ? `${fromKey}>${toKey}` : `${toKey}>${fromKey}`;
+      if (pathMemo.has(memoKey)) return pathMemo.get(memoKey);
+      const dist = new Map([[fromKey, 0]]);
+      const heap = new MinHeap();
+      heap.push(0, fromKey);
+      let found = null;
+      while (heap.a.length) {
+        const [d, k] = heap.pop();
+        if (d > (dist.get(k) ?? Infinity)) continue;
+        if (k === toKey) { found = d; break; }
+        (adj.get(k) || []).forEach(([next, w]) => {
+          const nd = d + w;
+          if (nd < (dist.get(next) ?? Infinity)) { dist.set(next, nd); heap.push(nd, next); }
+        });
+      }
+      pathMemo.set(memoKey, found);
+      return found;
+    }
+
+    // from/to: {lat,lng} → {distanceM, roadM, snapM, method} 또는 null(도로망으로 잴 수 없음)
+    function route(from, to) {
+      if (!from || !to) return null;
+      const a = nearestNode(from.lat, from.lng);
+      const b = nearestNode(to.lat, to.lng);
+      if (!a || !b) return null;
+      const roadM = shortestM(a.key, b.key);
+      if (roadM == null) return null;
+      const snapM = a.distanceM + b.distanceM;
+      return { distanceM: Math.round(roadM + snapM), roadM: Math.round(roadM), snapM: Math.round(snapM), method: 'road_graph' };
+    }
+
+    return {
+      nodeCount: graph.nodes.size,
+      edgeCount: graph.edges.length,
+      componentCount: sizes.length,
+      mainComponentSize: mainComponent >= 0 ? sizes[mainComponent] : 0,
+      nearestNode, shortestM, route,
+    };
+  }
+
   return {
-    ROAD_GRAPH_VERSION, DEFAULTS, UNNAMED,
+    ROAD_GRAPH_VERSION, DEFAULTS, UNNAMED, ROUTER_DEFAULTS,
     fnv1a, buildGraph, isJunction, buildSegments, labelSegments, segmentId,
-    lineLengthM, mapDataRevision, graphRevision,
+    lineLengthM, mapDataRevision, graphRevision, buildRouter,
   };
 }));

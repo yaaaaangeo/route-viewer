@@ -592,6 +592,8 @@
 .hp-tag.hp-primary{color:var(--red);border-color:rgba(255,107,107,.45);}
 .hp-tag.hp-priority{color:var(--amber);border-color:rgba(245,166,35,.45);}
 .hp-tag.hp-normal{color:var(--text-dim);}
+.hp-tag.hp-secondary{color:#e3d14a;border-color:rgba(227,209,74,.45);}
+.hp-tag.hp-none{color:var(--text-faint);border-style:dashed;}
 
 /* 가로 막대 그래프 */
 .hp-block-title{font-size:11px;font-weight:700;color:var(--text-dim);letter-spacing:.3px;margin-bottom:2px;}
@@ -604,6 +606,8 @@
 .hp-bar-primary{background:var(--red);}
 .hp-bar-priority{background:var(--amber);}
 .hp-bar-normal{background:var(--text-faint);}
+.hp-bar-secondary{background:#e3d14a;}
+.hp-bar-none{background:var(--line);}
 .hp-chart-value{font-size:11.5px;text-align:right;white-space:nowrap;}
 .hp-chart-legend{font-size:10.5px;color:var(--text-faint);margin-top:3px;}
 @media (max-width:640px){.hp-chart-row{grid-template-columns:28px 44px 1fr 68px;gap:6px;}}
@@ -634,6 +638,9 @@
   cursor:zoom-in;overflow:hidden;display:block;line-height:0;}
 .hp-ref-btn:hover{border-color:var(--teal);}
 .hp-ref-btn img{width:100%;height:auto;display:block;}
+/* 위치 안내 전용 — 원본의 빨간 선·번호가 우선순위 색(최우선=빨강)으로 읽히지 않도록 흑백으로 */
+.hp-ref-img,.hp-ref-full{filter:grayscale(1) contrast(1.15);}
+.hp-ref-tag{font-size:10px;font-weight:500;color:var(--text-dim);border:1px solid var(--line);border-radius:4px;padding:1px 6px;margin-left:6px;}
 .hp-ref-cap{font-size:10.5px;color:var(--text-faint);line-height:1.6;}
 .hp-ref-cap b{color:var(--text-dim);}
 /* 크게 보기 — 공용 모달을 쓰되 이 이미지가 들어있을 때만 넓힌다(다른 모달 폭은 그대로) */
@@ -666,3 +673,43 @@
 .hp-state-no_cov{color:var(--text-faint);}
 .hp-kpi .v.hp-state{font-size:13px;}
 .hp-row-zero td.mono{color:var(--text-faint);}
+
+/* ── 오늘 추천 주행(간단 보기) — 추천 주행 탭 맨 위 · 어디를·언제·왜 ── */
+.rec-today{border:1px solid var(--teal-dim);background:var(--panel);border-radius:10px;padding:14px 16px;}
+.rec-today-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}
+.rec-today-title{font-size:16px;font-weight:700;color:var(--text);}
+.rec-today-when{font-size:12px;color:var(--text-dim);}
+.rec-today-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;}
+.rec-today-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+.rec-today-item{display:flex;gap:12px;background:var(--panel-2);border:1px solid var(--line-soft);border-radius:8px;padding:10px 12px;}
+.rec-today-no{font-size:20px;line-height:1.1;color:var(--teal);font-weight:700;min-width:24px;}
+.rec-today-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;}
+.rec-today-where{font-size:14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.rec-today-route{font-size:12.5px;color:var(--text-dim);}
+.rec-today-meta{font-size:12px;color:var(--text);}
+.rec-today-why{font-size:12.5px;color:var(--text);}
+.rec-today-why .rec-k{min-width:0;margin-right:6px;}
+.rec-today-wd{color:var(--teal);border-color:var(--teal-dim);}
+.rec-today-item-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;}
+.rec-today-item-actions .btn{padding:3px 9px;font-size:11.5px;}
+.rec-today-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+.rec-today-hidden{margin:0;}
+.auto-project-settings{margin-top:10px;}
+.subzone-chip.hp-primary{color:var(--red);border-color:var(--red);}
+.subzone-chip.hp-priority{color:var(--amber);border-color:var(--amber);}
+
+/* ── HD Map 우선 수집 정책(Priority Policy) — 설정 탭 ── */
+.pp-list{display:flex;flex-direction:column;gap:8px;}
+.pp-row{border:1px solid var(--line);background:var(--panel);border-radius:7px;padding:9px 13px;display:flex;flex-direction:column;gap:4px;}
+.pp-row.on{border-color:var(--teal-dim);}
+.pp-row-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.pp-period{font-size:11.5px;color:var(--text-dim);}
+.pp-summary{font-size:12px;color:var(--text);}
+.pp-form{margin-top:10px;}
+.pp-areas{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px 16px;}
+.pp-area-row select{background:var(--panel-2);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:3px 4px;}
+.pp-score-line{font-size:12.5px;color:var(--text);}
+
+.hp-policy-chip{color:var(--teal);border-color:var(--teal-dim);}
+.rec-today-project{font-size:12px;color:var(--amber);}
+.rec-today-where .rec-muted{font-size:11.5px;font-weight:400;}

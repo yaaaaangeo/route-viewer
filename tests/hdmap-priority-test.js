@@ -21,6 +21,16 @@ const os = require('os');
 const path = require('path');
 
 const HP = require('../src/js/hdmap-priority.js');
+const PP = require('../src/js/priority-policy.js');
+
+// 우선순위는 코드에 없다 — 테스트도 정책 데이터로 준다.
+//   P5  : 예전 사업 정의와 같은 정책(⑤ 100 · ①②⑥⑨⑩ 70) — 아래 수치 검증(B~)은 이 정책 기준
+//   P10 : ⑩ 중심으로 바뀐 정책(⑩ 100 · ⑨ 80 · ⑥ 50 · ⑤ 10)
+const P5 = { policyId: 'p5', policyName: '⑤ 중심', areaPriorities: { 5: 100, 1: 70, 2: 70, 6: 70, 9: 70, 10: 70 } };
+const P10 = { policyId: 'p10', policyName: '⑩ 중심', areaPriorities: { 10: 100, 9: 80, 6: 50, 5: 10 } };
+// 데이터 파일 fixture 에 적는 옛 우선순위(초기 정책 변환 검증용 데이터)
+const FIXTURE_DECLARED = { 5: 'primary', 1: 'priority', 2: 'priority', 6: 'priority', 9: 'priority', 10: 'priority' };
+const compare = o => HP.buildComparison({ policy: P5, ...o });
 const SZ = require('../src/js/subzones.js');
 const CS = require('../src/js/collection-stats.js');
 const { RouteDatabase } = require('../electron/database.js');
@@ -61,7 +71,7 @@ function fixtureCollection(areaNos) {
       id: `hdmap_${String(areaNo).padStart(2, '0')}`,
       geometry: (areaNos || HP.ALL_AREA_NOS).includes(areaNo)
         ? { type: 'Polygon', coordinates: [squareRing(areaNo)] } : null,
-      properties: { areaNo, name: `${areaNo}`, parentZone: '강남', priority: HP.priorityOf(areaNo) },
+      properties: { areaNo, name: `${areaNo}`, parentZone: '강남', priority: FIXTURE_DECLARED[areaNo] || 'normal' },
     })),
   };
 }
@@ -130,26 +140,28 @@ async function idbContext() {
 
 async function main() {
   // ══════════════════════════════════════════════════════
-  section('A. 우선순위 정의 — 사업에서 정해진 값 그대로');
+  section('A. 우선순위 — 코드가 아니라 활성 Priority Policy 에서');
   // ══════════════════════════════════════════════════════
-  check('1. ⑤ 는 최우선(primary)', HP.priorityOf(5) === 'primary' && HP.priorityLabel('primary') === '최우선');
-  check('   ①②⑥⑨⑩ 은 우선(priority)',
-    [1, 2, 6, 9, 10].every(n => HP.priorityOf(n) === 'priority') && HP.priorityLabel('priority') === '우선');
-  check('   ③④⑦⑧⑪⑫ 는 일반(normal)',
-    [3, 4, 7, 8, 11, 12].every(n => HP.priorityOf(n) === 'normal') && HP.priorityLabel('normal') === '일반');
-  check('   우선지역 집합에 ⑤ 가 들어 있고, 일반지역 집합과 겹치지 않는다',
-    HP.PRIORITY_AREA_NOS.includes(5)
-    && HP.PRIORITY_AREA_NOS.every(n => !HP.NORMAL_AREA_NOS.includes(n))
-    && HP.PRIORITY_AREA_NOS.length + HP.NORMAL_AREA_NOS.length === 12);
-  check('   목록에 없는 번호는 우선순위를 지어내지 않는다', HP.priorityOf(13) === null && HP.priorityOf(0) === null);
+  const tiersOf = (policy, fc) => HP.listAreas(fc || fixtureCollection(), {}, policy).map(a => `${a.areaNo}:${a.priorityLabel}`).join(' ');
+  check('1. ⑤ 중심 정책이면 ⑤ 최우선 · ①②⑥⑨⑩ 우선 · 나머지 비우선',
+    tiersOf(P5) === '1:우선 2:우선 3:비우선 4:비우선 5:최우선 6:우선 7:비우선 8:비우선 9:우선 10:우선 11:비우선 12:비우선', tiersOf(P5));
+  check('   ⑩ 중심 정책으로 바꾸면 코드 수정 없이 ⑩ 최우선 · ⑨ 우선 · ⑥ 보조 · ⑤ 일반',
+    tiersOf(P10) === '1:비우선 2:비우선 3:비우선 4:비우선 5:일반 6:보조 7:비우선 8:비우선 9:우선 10:최우선 11:비우선 12:비우선', tiersOf(P10));
+  check('   정책이 없으면 모든 구역 비우선',
+    HP.listAreas(fixtureCollection(), {}, null).every(a => a.priority === 'none' && a.priorityValue === 0 && a.priorityGroup === 'normal'));
+  check('   단계 경계: 100 최우선 · 70~99 우선 · 40~69 보조 · 1~39 일반 · 0 비우선',
+    [[100, '최우선'], [99, '우선'], [70, '우선'], [69, '보조'], [40, '보조'], [39, '일반'], [1, '일반'], [0, '비우선']]
+      .every(([v, label]) => PP.tierOf(v).label === label));
+  check('   코드에 고정 우선 목록이 없다(PRIMARY/PRIORITY/NORMAL 상수·priorityOf 제거)',
+    HP.PRIMARY_AREA_NO === undefined && HP.PRIORITY_AREA_NOS === undefined && HP.NORMAL_AREA_NOS === undefined && HP.priorityOf === undefined);
 
-  const wrongFile = fixtureCollection();
-  wrongFile.features.find(f => f.properties.areaNo === 9).properties.priority = 'normal';
-  const wrongAreas = HP.parseAreas(wrongFile);
-  const wrongCheck = HP.validateAreas(wrongAreas);
-  check('2. 데이터 파일의 우선순위가 사업 정의와 다르면 사업 정의를 쓰고 그 사실을 알린다',
-    wrongAreas.find(a => a.areaNo === 9).priority === 'priority' && !wrongCheck.ok && wrongCheck.errors.length === 1,
-    wrongCheck.errors[0]);
+  const seed = PP.seedFromAreas(HP.parseAreas(fixtureCollection()));
+  check('2. 초기 정책은 데이터 파일의 priority 에서 만든다(primary 100 · priority 70 · normal 0) — 출처를 남긴다',
+    seed.policyName === '초기 정책' && PP.sourceText(seed) === '출처: 기존 HD Map 우선구역 설정'
+      && tiersOf(seed) === tiersOf(P5),
+    `${seed.policyName} · ${PP.sourceText(seed)} · ${PP.summarize(seed)}`);
+  check('   데이터 파일 값과 정책이 달라도 오류가 아니다 — 정책이 정한다',
+    HP.validateAreas(HP.listAreas(fixtureCollection(), {}, P10)).errors.length === 0);
 
   // ══════════════════════════════════════════════════════
   section('B. 수집량 집계 — 대표 지표는 유효 수집 시간');
@@ -157,7 +169,7 @@ async function main() {
   const areas = HP.parseAreas(fixtureCollection());
   const db = seededDb(scenarioRecords());
   const stats = statsFor(db, areas);
-  const result = HP.buildComparison({ areas, stats });
+  const result = compare({ areas, stats });
   const row = n => result.rows.find(r => r.areaNo === n);
 
   check('3. ⑤ 최우선 지역의 수집 시간이 계산된다(질문 1)',
@@ -168,7 +180,7 @@ async function main() {
   check('4. 우선지역 ①②⑤⑥⑨⑩ 이 각각 집계된다(질문 2)',
     row(1).collectionMinutes === 3 && row(2).collectionMinutes === 3 && row(6).collectionMinutes === 3
     && row(10).collectionMinutes === 3 && row(9).collectionMinutes === 1 && row(5).collectionMinutes === 5,
-    HP.PRIORITY_AREA_NOS.map(n => `${n}:${row(n).collectionMinutes}분`).join(' · '));
+    result.summary.priorityGroupAreaNos.map(n => `${n}:${row(n).collectionMinutes}분`).join(" · "));
 
   // ══════════════════════════════════════════════════════
   section('C. 일반지역 평균과 대비 — 분 · % · 배');
@@ -185,7 +197,7 @@ async function main() {
   check('   일반지역 자신도 같은 기준으로 비교된다', row(3).percentVsNormalAvg === 0 && row(3).ratioVsNormalAvg === 1);
 
   const zeroAreas = HP.parseAreas(fixtureCollection());
-  const zeroResult = HP.buildComparison({
+  const zeroResult = compare({
     areas: zeroAreas,
     // 일반지역에 기록이 하나도 없는 상태 — 평균 0분
     stats: HP.toSubZoneInputs(zeroAreas).map(z => ({
@@ -213,7 +225,7 @@ async function main() {
     && result.summary.prioritySharePercent === 60,
     `${result.summary.priorityTotalMinutes}분 / ${result.summary.allAreaMinutes}분 = ${result.summary.prioritySharePercent}%`);
   check('   전체 수집이 0분이면 비중을 만들어내지 않는다',
-    HP.buildComparison({ areas, stats: [] }).summary.prioritySharePercent === null);
+    compare({ areas, stats: [] }).summary.prioritySharePercent === null);
   check('10. 가장 부족한 우선지역 (질문 5)',
     result.summary.weakestPriority.areaNo === 9 && result.summary.weakestPriority.percentVsNormalAvg === -50,
     `⑨ ${result.summary.weakestPriority.collectionMinutes}분 · 일반 평균 대비 ${result.summary.weakestPriority.percentVsNormalAvg}%`);
@@ -252,7 +264,7 @@ async function main() {
     }),
   ]);
   const outsideStats = statsFor(outsideDb, areas);
-  const outsideRow = HP.buildComparison({ areas, stats: outsideStats }).rows.find(r => r.areaNo === 5);
+  const outsideRow = compare({ areas, stats: outsideStats }).rows.find(r => r.areaNo === 5);
   check('14. 경계 밖 GPS 는 그 구역 통계에 들어가지 않는다',
     outsideRow.recordCount === 61 && outsideRow.collectionSec === 60 && outsideRow.sessionCount === 1,
     `⑤ 안 ${outsideRow.recordCount}건만 집계(밖 121건 제외) · ${outsideRow.collectionSec}초`);
@@ -303,7 +315,7 @@ async function main() {
     && realCheck.overlaps.every(o => !o.confirmed) && realCheck.warnings.length === 0,
     `경계 ${realCheck.readyCount}개 · 겹침 확인 ${realCheck.overlaps.filter(o => o.confirmed).length}쌍`);
   // 아래부터 "경계가 없을 때"는 저장소 파일과 무관하게 경계 없는 정의로 확인한다
-  const realResult = HP.buildComparison({ areas: HP.listAreas(NO_POLYGON_FC), stats: [] });
+  const realResult = compare({ areas: HP.listAreas(NO_POLYGON_FC), stats: [] });
   check('   경계 없는 구역은 0분이 아니라 "잴 수 없음"으로 구분된다',
     realResult.rows.every(r => r.hasPolygon === false && r.measured === false
       && r.diffVsNormalAvgMinutes === null && r.ratioVsNormalAvg === null && r.comparable === false)
@@ -311,21 +323,21 @@ async function main() {
 
   // 일부만 채워도 동작한다 — 채운 구역만 집계하고, 뺀 구역을 평균에서 제외했다고 밝힌다
   const partialAreas = HP.parseAreas(fixtureCollection([1, 2, 3, 5]));
-  const partial = HP.buildComparison({ areas: partialAreas, stats: statsFor(db, partialAreas) });
+  const partial = compare({ areas: partialAreas, stats: statsFor(db, partialAreas) });
   check('19. 일부 구역만 경계가 있으면 그 구역만 집계하고 평균 기준을 밝힌다',
     partial.summary.normalAvgBasis.areaCount === 1 && partial.summary.normalAvgBasis.areaNos[0] === 3
     && partial.summary.normalAvgBasis.excludedAreaNos.join(',') === '4,7,8,11,12'
     && partial.summary.missingPolygonAreaNos.length === 8 && partial.summary.ready === true,
     `평균 기준 ${partial.summary.normalAvgBasis.areaCount}개 · 경계 미설정 ${partial.summary.missingPolygonAreaNos.length}개`);
   check('   기록이 0인 구역(경계 있음)과 경계 미설정 구역을 따로 센다',
-    HP.buildComparison({ areas, stats: statsFor(seededDb([]), areas) }).summary.noDataAreaNos.length === 12);
+    compare({ areas, stats: statsFor(seededDb([]), areas) }).summary.noDataAreaNos.length === 12);
 
   // ══════════════════════════════════════════════════════
   section('G2. 직접 그린 경계 — 저장하면 기존 기록이 그 자리에서 다시 분류된다');
   // ══════════════════════════════════════════════════════
   const drawDb = seededDb(scenarioRecords());
   const beforeAreas = HP.listAreas(NO_POLYGON_FC, drawDb.getHDMapPriorityPolygons());
-  const before = HP.buildComparison({ areas: beforeAreas, stats: statsFor(drawDb, beforeAreas) });
+  const before = compare({ areas: beforeAreas, stats: statsFor(drawDb, beforeAreas) });
   check('G1. 경계를 그리기 전에는 모든 구역이 "경계 미설정"이다',
     before.rows.every(r => r.state === 'no_polygon') && before.summary.prioritySharePercent === null);
 
@@ -333,7 +345,7 @@ async function main() {
   const drawRing5 = squareRing(5).map(([lng, lat]) => [lat, lng]);
   drawDb.saveHDMapPriorityPolygon(5, drawRing5);
   const afterAreas = HP.listAreas(NO_POLYGON_FC, drawDb.getHDMapPriorityPolygons());
-  const after = HP.buildComparison({ areas: afterAreas, stats: statsFor(drawDb, afterAreas) });
+  const after = compare({ areas: afterAreas, stats: statsFor(drawDb, afterAreas) });
   const a5 = after.rows.find(r => r.areaNo === 5);
   check('G2. 저장하면 이미 들어와 있는 기록이 그대로 다시 분류된다(재 import 불필요)',
     a5.state === 'ok' && a5.recordCount === 302 && a5.collectionMinutes === 5 && a5.sessionCount === 2,
@@ -385,7 +397,7 @@ async function main() {
   // ⑦ 은 경계는 있지만 기록이 전혀 없는 바다 한가운데 — "잴 수 없다"가 아니라 진짜 0건이다
   stateDb.saveHDMapPriorityPolygon(7, [[35.0, 125.0], [35.0, 125.01], [35.01, 125.01], [35.01, 125.0]]);
   const stAreas = HP.listAreas(NO_POLYGON_FC, stateDb.getHDMapPriorityPolygons());
-  const st = HP.buildComparison({ areas: stAreas, stats: statsFor(stateDb, stAreas) });
+  const st = compare({ areas: stAreas, stats: statsFor(stateDb, stAreas) });
   const stateOf = n => st.rows.find(r => r.areaNo === n).state;
   check('G5. 못 센 이유를 "—" 하나로 합치지 않고 구분한다',
     stateOf(5) === 'ok' && stateOf(7) === 'no_data' && stateOf(1) === 'no_polygon'
@@ -397,7 +409,7 @@ async function main() {
   check('   Coverage 를 재지 못한 구역은 0% 가 아니라 "미계산"으로 따로 센다',
     st.rows.find(r => r.areaNo === 5).coveragePct === null && st.summary.noCoverageAreaNos.includes(5),
     `Coverage 미계산 ${st.summary.noCoverageAreaNos.join(', ')}`);
-  const failedRun = HP.buildComparison({ areas: stAreas, stats: [], error: true });
+  const failedRun = compare({ areas: stAreas, stats: [], error: true });
   check('G6. 집계가 실패하면 0분이 아니라 "계산 실패"로 두고 평균에서도 뺀다',
     failedRun.rows.find(r => r.areaNo === 5).state === 'error'
     && failedRun.summary.errorAreaNos.length === 3 && failedRun.summary.normalAvgBasis.areaCount === 0,
@@ -424,8 +436,9 @@ async function main() {
     !/hdmap-priority-reference/.test(
       fs.readFileSync(path.join(__dirname, '..', 'src', 'js', 'statistics.js'), 'utf8'))
     && panel.indexOf('hdmap-priority-reference') < panel.indexOf('id="hdmap-priority-section"'));
-  check('   대체 텍스트와 캡션이 있고, 통계용 경계와 다르다고 밝힌다',
-    /alt="[^"]*①~⑫[^"]*"/.test(panel) && panel.includes('참고 이미지입니다') && panel.includes('경계(polygon)는 아니'));
+  check('   대체 텍스트와 캡션이 있고, 위치 안내 전용(우선순위와 무관 · 통계용 경계 아님)이라고 밝힌다',
+    /alt="[^"]*①~⑫[^"]*"/.test(panel) && panel.includes('위치 안내용 이미지') && panel.includes('우선순위와 무관')
+      && panel.includes('경계(polygon)도 아니') && panel.includes('class="hp-ref-img"'));
 
   // ══════════════════════════════════════════════════════
   section('I. Coverage · 두 저장소 일치 · 회귀 없음');
@@ -456,7 +469,7 @@ async function main() {
   sqlRingDb.close();
 
   const idbStats = await ctx.RouteDB.getSubZoneStats(HP.toSubZoneInputs(areas), { withRoads: false });
-  const idbResult = HP.buildComparison({ areas, stats: idbStats });
+  const idbResult = compare({ areas, stats: idbStats });
   const strip = r => r.rows.map(x => `${x.areaNo}|${x.collectionSec}|${x.visitCount}|${x.sessionCount}|${x.uniqueDays}|${x.recordCount}|${x.percentVsNormalAvg}`);
   check('21. SQLite 와 IndexedDB 가 같은 결과를 낸다',
     JSON.stringify(strip(idbResult)) === JSON.stringify(strip(result))

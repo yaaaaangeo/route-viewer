@@ -24,6 +24,7 @@ const path = require('path');
 const { RouteDatabase } = require('../electron/database.js');
 const SubZones = require('../src/js/subzones.js');
 const HDMapPriority = require('../src/js/hdmap-priority.js');
+const PriorityPolicy = require('../src/js/priority-policy.js');
 
 // Electron 이 쓰는 기본 경로 — app.getPath('userData')/database/route-viewer.db 와 같은 자리
 function defaultDbPath() {
@@ -51,7 +52,10 @@ if (total) console.log(` 범위   : 위도 ${bbox.minLat}~${bbox.maxLat} · 경�
 console.log('══════════════════════════════════════════════════════');
 
 const saved = db.getHDMapPriorityPolygons();
-const areas = HDMapPriority.listAreas(null, saved);
+// 우선순위는 앱과 같은 활성 Priority Policy(저장된 설정 → 없으면 초기 정책)에서
+const todayKst = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+const policy = PriorityPolicy.resolveActive((db.getSettings() || {}).priorityPolicies, HDMapPriority.listAreas(), null, todayKst).policy;
+const areas = HDMapPriority.listAreas(null, saved, policy);
 const ready = areas.filter(a => a.hasPolygon);
 console.log(`\n경계 설정: ${ready.length} / ${areas.length}개` + (ready.length ? ` (${ready.map(a => a.areaNo).join(', ')})` : ''));
 if (!ready.length) {
@@ -64,7 +68,7 @@ if (!ready.length) {
 
 // 앱 화면과 똑같은 경로로 집계한다
 const stats = db.getSubZoneStats(HDMapPriority.toSubZoneInputs(areas), {});
-const result = HDMapPriority.buildComparison({ areas, stats });
+const result = HDMapPriority.buildComparison({ areas, stats, policy });
 
 const pad = (s, n) => String(s).padStart(n);
 const padR = (s, n) => String(s) + ' '.repeat(Math.max(0, n - String(s).length));
@@ -98,9 +102,14 @@ console.log(`어느 구역엔가 포함 : ${inside.toLocaleString('ko-KR')}건 (
 console.log(`경계 밖           : ${outside.toLocaleString('ko-KR')}건 (${pct(outside)}%)`);
 console.log(`두 구역 이상 겹침  : ${multi.toLocaleString('ko-KR')}건` + (multi ? ' ← 합계가 부풀어 있어요(경계 겹침 확인 필요)' : ''));
 
-const primary = result.rows.find(r => r.areaNo === HDMapPriority.PRIMARY_AREA_NO);
-console.log(`\n⑤ 최우선 지역     : ${primary.recordCount.toLocaleString('ko-KR')}건 · ${primary.collectionMinutes}분`
-  + ` · 방문 ${primary.visitCount}회 · 세션 ${primary.sessionCount}회 · 수집일 ${primary.uniqueDays}일`);
+console.log(`\n적용 정책          : ${policy ? `${policy.policyName} — ${PriorityPolicy.summarize(policy)}` : '없음(모든 구역 비우선)'}`);
+const primary = result.summary.primary;
+if (primary) {
+  console.log(`${primary.name} 최우선 지역      : ${primary.recordCount.toLocaleString('ko-KR')}건 · ${primary.collectionMinutes}분`
+    + ` · 방문 ${primary.visitCount}회 · 세션 ${primary.sessionCount}회 · 수집일 ${primary.uniqueDays}일`);
+} else {
+  console.log('최우선 지역        : 없음(활성 정책에 우선도 100 구역 없음)');
+}
 const s = result.summary;
 console.log(`우선지역 비중      : ${s.prioritySharePercent == null ? '—' : s.prioritySharePercent + '%'}`
   + ` (우선 ${s.priorityTotalMinutes}분 / 전체 ${s.allAreaMinutes}분)`);
