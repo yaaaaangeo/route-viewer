@@ -200,6 +200,10 @@ async function renderStatsView(){
   styleVehicleButtons();
   renderIssueFilterButtons('stats-issue-filter');
 
+  // HD Map 화면이면 아래 요약 집계를 기다리는 동안에도 빈 칸 대신 '집계하는 중'을 먼저 보인다
+  if(statsMode==='hdmap'&&typeof hdmapPriorityPaint==='function'&&!hdmapPriorityResult){
+    hdmapPriorityPaint(null,{loading:true});
+  }
   let totalStats;
   try{
     totalStats=await RouteDB.stats();
@@ -242,7 +246,8 @@ async function renderStatsView(){
   // HD Map 우선 구축 구역 ①~⑫ 현황판 — 그 화면을 보고 있을 때만 계산한다(구역 12개를 훑어야 해서
   // 가볍지 않다). 같은 필터를 쓰고, 실패해도 통계 탭 나머지는 그대로 그려야 하므로 기다리지 않는다.
   if(statsMode==='hdmap'&&typeof renderHDMapPrioritySection==='function'){
-    renderHDMapPrioritySection(filter).catch(err=>console.warn('[경로뷰어] HD Map 우선 구역 현황판 실패:',err));
+    // 전체 기록 수를 함께 넘겨 ①~⑫ 안/밖 건수를 화면에 적는다(같은 필터 기준)
+    renderHDMapPrioritySection(filter,{totalPoints:bundle.points}).catch(err=>hdmapPriorityShowFailure(err));
   }
 
   const activeLabel=statsMode==='region'

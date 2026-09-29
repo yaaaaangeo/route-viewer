@@ -12,11 +12,12 @@
 //    우선   priority  ① ② ⑥ ⑨ ⑩
 //    일반   normal    ③ ④ ⑦ ⑧ ⑪ ⑫
 //
-//  ⚠ 경계(polygon) 는 협의체 자료에 없다 — 사용자가 직접 그린다.
-//    자료 폴더의 폴리곤 레이어는 강남구 8개·서초구 3개 '법정동' 경계뿐이고(나머지는 도로 선·노드 점),
-//    QGIS 프로젝트에도 ①~⑫ 레이어가 없다. 지도 이미지의 숫자 위치를 보고 위경도를 지어내면
-//    그 위에 올라가는 숫자가 전부 거짓이 되므로 추측하지 않는다.
-//    대신 앱에서 직접 그려 저장한 경계(savedPolygons)를 파일 정의 위에 덮어쓴다.
+//  경계(polygon) 출처
+//    ①~⑫ 는 참고 지도의 빨간 선(간선도로)으로 둘러싸인 블록이다. 협의체 자료에 ①~⑫ 폴리곤
+//    레이어는 없지만 그 도로들의 실제 선형은 있으므로, tools/derive-hdmap-priority-areas.js 가
+//    도로 shapefile 의 중앙선(강남대로·논현로·언주로·선릉로·삼성로 × 도산대로·학동로·봉은사로·테헤란로)으로
+//    블록을 만들어 src/data/hdmap-priority-areas.json 에 넣는다. 이미지 픽셀에서 좌표를 역산하지 않는다.
+//    앱에서 직접 그려 저장한 경계(savedPolygons)가 있으면 그쪽이 파일 정의보다 우선이다.
 //    경계가 없는 구역은 집계에서 빼고 "경계 미설정"으로만 표시한다.
 //
 //  집계는 여기서 새로 만들지 않는다.
@@ -216,6 +217,19 @@
   //  그건 합계·비중을 부풀리므로 숫자를 보여주기 전에 알려야 한다.
   //  겹침을 정확히 계산하려면 폴리곤 교차가 필요한데, 여기서는 (a) bbox 가 겹치는지,
   //  (b) 한쪽 꼭짓점이 다른 쪽 안에 있는지만 본다 — "겹칠 수 있음"과 "겹침 확인됨"을 나눠 말한다.
+  // 점이 다각형 테두리 위(약 0.1m 안)에 있나 — 위경도 평면 근사로 충분하다(구역 크기 1km 안팎)
+  const EDGE_EPS_DEG = 1e-6;
+  function onPolygonEdge(lat, lng, poly) {
+    for (let i = 0; i < poly.length; i++) {
+      const [ay, ax] = poly[i], [by, bx] = poly[(i + 1) % poly.length];
+      const dx = bx - ax, dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((lng - ax) * dx + (lat - ay) * dy) / len2)) : 0;
+      if (Math.hypot(lng - (ax + t * dx), lat - (ay + t * dy)) <= EDGE_EPS_DEG) return true;
+    }
+    return false;
+  }
+
   function validateAreas(areas) {
     const list = areas || [];
     const missingPolygon = list.filter(a => !a.hasPolygon).map(a => a.areaNo);
@@ -237,8 +251,14 @@
         const ba = SZ.polygonBounds(a.polygon), bb = SZ.polygonBounds(b.polygon);
         if (!ba || !bb) continue;
         if (ba.maxLat < bb.minLat || bb.maxLat < ba.minLat || ba.maxLng < bb.minLng || bb.maxLng < ba.minLng) continue;
-        const shared = a.polygon.some(([la, lo]) => SZ.pointInPolygon(la, lo, b.polygon))
-          || b.polygon.some(([la, lo]) => SZ.pointInPolygon(la, lo, a.polygon));
+        // 이웃 구역은 같은 도로 중앙선을 경계로 나눠 쓴다 — 그 선 위의 꼭짓점은 겹침이 아니다
+        const strictlyInside = (la, lo, poly) => SZ.pointInPolygon(la, lo, poly) && !onPolygonEdge(la, lo, poly);
+        // 꼭짓점이 모두 선 위에 있어도(같은 경계를 두 번 그린 경우) 안쪽 점이 겹치면 겹침이다
+        const ca = SZ.polygonCenter(a.polygon), cb = SZ.polygonCenter(b.polygon);
+        const shared = a.polygon.some(([la, lo]) => strictlyInside(la, lo, b.polygon))
+          || b.polygon.some(([la, lo]) => strictlyInside(la, lo, a.polygon))
+          || (ca && strictlyInside(ca.lat, ca.lng, b.polygon))
+          || (cb && strictlyInside(cb.lat, cb.lng, a.polygon));
         overlaps.push({ a: a.areaNo, b: b.areaNo, confirmed: shared });
       }
     }

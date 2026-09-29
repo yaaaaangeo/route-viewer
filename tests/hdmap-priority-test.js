@@ -51,6 +51,8 @@ function squareRing(areaNo) {
 function centerOf(areaNo) {
   return { lat: BASE_LAT + SIZE / 2, lng: BASE_LNG + (areaNo - 1) * SPACING + SIZE / 2 };
 }
+// 경계가 하나도 없는 정의 — "그리기 전" 상태를 저장소 파일과 무관하게 재현한다
+const NO_POLYGON_FC = { type: 'FeatureCollection', features: [] };
 function fixtureCollection(areaNos) {
   return {
     type: 'FeatureCollection',
@@ -294,10 +296,14 @@ async function main() {
   const realCheck = HP.validateAreas(realAreas);
   check('17. 저장소의 ①~⑫ 정의는 열두 칸 모두 있다',
     realAreas.length === 12 && realAreas.every(a => a.priority) && realAreas.map(a => a.areaNo).join(',') === HP.ALL_AREA_NOS.join(','));
-  check('18. 실제 경계가 아직 없으므로 통계가 켜지지 않는다(가짜 좌표를 넣지 않았다)',
-    realAreas.every(a => !a.hasPolygon) && realCheck.ready === false && HP.toSubZoneInputs(realAreas).length === 0,
-    `경계 미설정 ${realCheck.missingPolygon.length}개`);
-  const realResult = HP.buildComparison({ areas: realAreas, stats: [] });
+  // 저장소 경계는 협의체 도로 shapefile 의 간선도로 중앙선으로 만든 블록이다(tools/derive-hdmap-priority-areas.js).
+  // 이웃 블록은 같은 중앙선을 나눠 쓰므로 겹침 경고가 나오면 안 된다.
+  check('18. 저장소 경계는 도로 데이터에서 만든 ①~⑫ 열두 개이고 서로 겹치지 않는다',
+    realAreas.every(a => a.hasPolygon && a.polygonSource === 'file') && realCheck.allReady
+    && realCheck.overlaps.every(o => !o.confirmed) && realCheck.warnings.length === 0,
+    `경계 ${realCheck.readyCount}개 · 겹침 확인 ${realCheck.overlaps.filter(o => o.confirmed).length}쌍`);
+  // 아래부터 "경계가 없을 때"는 저장소 파일과 무관하게 경계 없는 정의로 확인한다
+  const realResult = HP.buildComparison({ areas: HP.listAreas(NO_POLYGON_FC), stats: [] });
   check('   경계 없는 구역은 0분이 아니라 "잴 수 없음"으로 구분된다',
     realResult.rows.every(r => r.hasPolygon === false && r.measured === false
       && r.diffVsNormalAvgMinutes === null && r.ratioVsNormalAvg === null && r.comparable === false)
@@ -318,7 +324,7 @@ async function main() {
   section('G2. 직접 그린 경계 — 저장하면 기존 기록이 그 자리에서 다시 분류된다');
   // ══════════════════════════════════════════════════════
   const drawDb = seededDb(scenarioRecords());
-  const beforeAreas = HP.listAreas(null, drawDb.getHDMapPriorityPolygons());
+  const beforeAreas = HP.listAreas(NO_POLYGON_FC, drawDb.getHDMapPriorityPolygons());
   const before = HP.buildComparison({ areas: beforeAreas, stats: statsFor(drawDb, beforeAreas) });
   check('G1. 경계를 그리기 전에는 모든 구역이 "경계 미설정"이다',
     before.rows.every(r => r.state === 'no_polygon') && before.summary.prioritySharePercent === null);
@@ -326,7 +332,7 @@ async function main() {
   // 화면에서 지도를 눌러 찍는 것과 같은 입력 — WGS84 [위도, 경도]
   const drawRing5 = squareRing(5).map(([lng, lat]) => [lat, lng]);
   drawDb.saveHDMapPriorityPolygon(5, drawRing5);
-  const afterAreas = HP.listAreas(null, drawDb.getHDMapPriorityPolygons());
+  const afterAreas = HP.listAreas(NO_POLYGON_FC, drawDb.getHDMapPriorityPolygons());
   const after = HP.buildComparison({ areas: afterAreas, stats: statsFor(drawDb, afterAreas) });
   const a5 = after.rows.find(r => r.areaNo === 5);
   check('G2. 저장하면 이미 들어와 있는 기록이 그대로 다시 분류된다(재 import 불필요)',
@@ -357,7 +363,7 @@ async function main() {
     (() => {
       const recordsBefore = reopened.getOverview({}).points;
       reopened.saveHDMapPriorityPolygon(5, null);
-      const areasNow = HP.listAreas(null, reopened.getHDMapPriorityPolygons());
+      const areasNow = HP.listAreas(NO_POLYGON_FC, reopened.getHDMapPriorityPolygons());
       return !areasNow.find(a => a.areaNo === 5).hasPolygon
         && reopened.getOverview({}).points === recordsBefore;
     })());
@@ -378,7 +384,7 @@ async function main() {
   stateDb.saveHDMapPriorityPolygon(3, squareRing(3).map(([lng, lat]) => [lat, lng]));
   // ⑦ 은 경계는 있지만 기록이 전혀 없는 바다 한가운데 — "잴 수 없다"가 아니라 진짜 0건이다
   stateDb.saveHDMapPriorityPolygon(7, [[35.0, 125.0], [35.0, 125.01], [35.01, 125.01], [35.01, 125.0]]);
-  const stAreas = HP.listAreas(null, stateDb.getHDMapPriorityPolygons());
+  const stAreas = HP.listAreas(NO_POLYGON_FC, stateDb.getHDMapPriorityPolygons());
   const st = HP.buildComparison({ areas: stAreas, stats: statsFor(stateDb, stAreas) });
   const stateOf = n => st.rows.find(r => r.areaNo === n).state;
   check('G5. 못 센 이유를 "—" 하나로 합치지 않고 구분한다',

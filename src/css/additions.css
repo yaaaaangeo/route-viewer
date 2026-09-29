@@ -611,6 +611,10 @@
 /* 비교표 */
 .hp-table{background:var(--panel);}
 .hp-table th[scope="row"]{font-size:14px;font-weight:700;}
+/* 지역별 비교표 — 숫자가 오른쪽 끝에 몰리면 머리글과 멀어져 읽기 어렵다. 칸 가운데로 맞춘다
+   (여러 칸에 걸친 '경계 미설정' 같은 안내 문장만 왼쪽 정렬 그대로) */
+.hp-table th,.hp-table td,.hp-table td.mono{text-align:center;vertical-align:middle;}
+.hp-table td[colspan]{text-align:left;}
 .hp-up{color:var(--green);}
 .hp-down{color:var(--red);}
 .hp-foot{margin-top:2px;}

@@ -57,7 +57,7 @@ console.log(`\n경계 설정: ${ready.length} / ${areas.length}개` + (ready.len
 if (!ready.length) {
   console.log('\n아직 ①~⑫ 경계가 하나도 없어요 — 그래서 모든 구역이 "경계 미설정"입니다.');
   console.log('앱의 [통계] → HD Map 우선 수집 → [구역 경계 설정]에서 지도에 경계를 그린 뒤 다시 실행하세요.');
-  console.log('(협의체 자료에는 ①~⑫ 경계가 없습니다 — 폴리곤은 강남구 8개·서초구 3개 법정동 경계뿐입니다.)');
+  console.log('(기본 경계 파일을 다시 만들려면: node tools/derive-hdmap-priority-areas.js)');
   db.close();
   process.exit(0);
 }

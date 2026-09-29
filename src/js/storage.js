@@ -1446,24 +1446,28 @@
         const list = (subZones && subZones.length) ? subZones : await this.listSubZones();
         const classification = await classificationConfig();
         const index = await issueIndex();
-        const out = [];
-        for (const sz of list) {
-          const bounds = global.SubZones.polygonBounds(sz.polygon);
-          if (!bounds) {
-            out.push({ id: sz.id, recordCount: 0, conditions: [], roads: [], match: { segments: 0, note: '경계가 없어 집계할 수 없어요.' } });
-            continue;
-          }
-          const rows = [];
+        // 구역마다 전체 기록을 다시 훑으면 구역 수만큼 느려진다(①~⑫ 면 15만 건을 12번).
+        // 한 번만 훑으면서 각 구역 bbox 에 드는 기록을 그 구역 몫으로 나눠 담는다.
+        const jobs = list.map(sz => ({ sz, bounds: global.SubZones.polygonBounds(sz.polygon), rows: [] }));
+        const live = jobs.filter(j => j.bounds);
+        if (live.length) {
           await scan(o.filter || {}, r => {
-            if (r.lat < bounds.minLat || r.lat > bounds.maxLat || r.lng < bounds.minLng || r.lng > bounds.maxLng) return;
-            rows.push({ ...r, issueMask: maskOf(index, r.key) });
+            let rec = null;
+            for (const j of live) {
+              const b = j.bounds;
+              if (r.lat < b.minLat || r.lat > b.maxLat || r.lng < b.minLng || r.lng > b.maxLng) continue;
+              if (!rec) rec = { ...r, issueMask: maskOf(index, r.key) };
+              j.rows.push(rec);
+            }
           });
+        }
+        return jobs.map(({ sz, bounds, rows }) => {
+          if (!bounds) return { id: sz.id, recordCount: 0, conditions: [], roads: [], match: { segments: 0, note: '경계가 없어 집계할 수 없어요.' } };
           rows.sort((a, b) => String(a.vehicle || '').localeCompare(String(b.vehicle || '')) || String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
           const roadSegments = o.withRoads === false ? []
             : global.SubZones.roadSegmentsIn(sz.polygon, this.hdmapLinesFor(sz.parentZone), { subZoneId: sz.id });
-          out.push(global.SubZones.aggregateSubZone(sz, rows, { classification, roadSegments }));
-        }
-        return out;
+          return global.SubZones.aggregateSubZone(sz, rows, { classification, roadSegments });
+        });
       },
 
 

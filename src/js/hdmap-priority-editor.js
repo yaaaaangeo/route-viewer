@@ -1,11 +1,10 @@
 // ══════════════════════════════════════════════════════════
 //  hdmap-priority-editor — ①~⑫ 구역 경계를 실제 지도에서 직접 그린다
 //
-//  왜 직접 그리나
-//    협의체 자료([산자부E2E]… 폴더)에는 ①~⑫ 경계가 없다. 폴리곤 레이어는
-//    강남구 8개·서초구 3개 '법정동' 경계(역삼·청담·삼성·대치·신사·논현·압구정·도곡 /
-//    잠원·반포·서초)뿐이고, 나머지 레이어는 전부 도로 선(Line)과 노드 점(Point)이다.
-//    QGIS 프로젝트(.qgz)에도 ①~⑫ 레이어·메모리 레이어·내장 좌표가 없다.
+//  기본 경계는 협의체 도로 데이터의 간선도로 중앙선으로 만든 블록이다
+//  (tools/derive-hdmap-priority-areas.js → src/data/hdmap-priority-areas.json).
+//  여기서는 그 경계를 실제 수집 기준에 맞게 고치거나 다시 그린다 — 저장한 경계가 파일보다 우선하고,
+//  지우면 파일 경계로 돌아간다.
 //
 //    참고 이미지(PNG)는 사람이 위치를 확인하라고 있는 것이지 공간 데이터가 아니다.
 //    거기서 픽셀을 위경도로 역산하면 그 위에 올라가는 숫자가 전부 거짓이 되므로 하지 않는다.
@@ -74,9 +73,10 @@ function renderHDMapPriorityEditor(areas) {
       + '<button class="btn ghost" type="button" onclick="cancelHDMapEditorDraw()">그리기 취소</button>'
     : '<button class="btn" type="button" onclick="startHDMapEditorDraw()"'
       + (hdmapEditorBusy ? ' disabled' : '') + '>' + (cur && cur.hasPolygon ? '다시 그리기' : '경계 그리기') + '</button>'
-      + (cur && cur.hasPolygon
+      // 지울 수 있는 건 직접 그린 경계뿐이다 — 지우면 기본(도로 데이터) 경계로 돌아간다
+      + (cur && cur.polygonSource === 'drawn'
         ? '<button class="btn ghost" type="button" onclick="clearHDMapEditorPolygon()"'
-          + (hdmapEditorBusy ? ' disabled' : '') + '>경계 지우기</button>'
+          + (hdmapEditorBusy ? ' disabled' : '') + '>직접 그린 경계 지우기</button>'
         : '');
 
   box.innerHTML = '<div class="hp-block-title">구역 경계 설정</div>'
@@ -100,7 +100,7 @@ function hdmapEditorHintHTML(cur) {
     return '지도를 눌러 꼭짓점을 찍으세요. 지금 <b>' + hdmapEditorDraft.length + '개</b> — 3개 이상이면 저장할 수 있어요.';
   }
   if (cur && cur.hasPolygon) {
-    const from = cur.polygonSource === 'drawn' ? ' · 직접 그림' : ' · 데이터 파일';
+    const from = cur.polygonSource === 'drawn' ? ' · 직접 그림' : ' · 기본 경계(도로 데이터)';
     return escapeHtml(cur.name) + ' 경계가 저장돼 있어요(' + cur.polygon.length + '점' + from
       + '). 모양을 바꾸려면 <b>다시 그리기</b>를 누르세요.';
   }
@@ -250,7 +250,7 @@ async function clearHDMapEditorPolygon() {
     const ok = await confirmDialog({
       title: '구역 경계 지우기',
       message: a.name + ' 구역의 경계를 지울까요?',
-      detail: '주행 기록은 지워지지 않아요. 이 구역이 다시 "경계 미설정"이 되고 평균·비중 계산에서 빠집니다.',
+      detail: '주행 기록은 지워지지 않아요. 기본 경계(도로 데이터)가 있으면 그 경계로 돌아가고, 없으면 "경계 미설정"이 되어 평균·비중 계산에서 빠집니다.',
       confirmLabel: '지우기', danger: true,
     });
     if (!ok) return;

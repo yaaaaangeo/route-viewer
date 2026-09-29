@@ -30,6 +30,7 @@ let hdmapPriorityCacheKey = null;   // 같은 조건이면 다시 계산하지 �
 let hdmapPriorityError = null;
 let hdmapPriorityToken = 0;
 let hdmapPriorityPolygons = {};     // 직접 그려 저장한 경계 {areaNo:{polygon,updatedAt}}
+let hdmapPriorityTotalPoints = null; // 같은 필터의 전체 기록 수 — 경계 밖 건수를 내는 데 쓴다
 
 // 저장된 경계를 읽어 파일 정의 위에 덮어쓴 ①~⑫ 목록을 만든다
 async function hdmapPriorityLoadAreas() {
@@ -47,10 +48,15 @@ function hdmapPriorityAvailable() {
 }
 
 // 통계 탭의 "HD Map 우선 수집" 모드에서 부른다. filter 는 statsFilter() — 다른 통계와 같은 조건.
-async function renderHDMapPrioritySection(filter) {
+async function renderHDMapPrioritySection(filter, options) {
   const box = document.getElementById('hdmap-priority-section');
   if (!box) return;
-  if (!hdmapPriorityAvailable()) { hdmapPriorityPaint(null); return; }
+  const total = options && options.totalPoints;
+  hdmapPriorityTotalPoints = Number.isFinite(total) ? total : null;
+  if (!hdmapPriorityAvailable()) {
+    hdmapPriorityShowFailure(new Error('구역 정의(js/hdmap-priority.js)를 불러오지 못했어요'));
+    return;
+  }
 
   const areas = await hdmapPriorityLoadAreas();
   if (typeof renderHDMapPriorityEditor === 'function') renderHDMapPriorityEditor(areas);
@@ -94,6 +100,15 @@ async function renderHDMapPrioritySection(filter) {
   hdmapPriorityPaint(hdmapPriorityResult);
 }
 
+// 어디서 실패했든 빈 화면이 아니라 '계산 실패'와 이유를 보여준다(통계 탭이 부르는 곳에서도 쓴다)
+function hdmapPriorityShowFailure(err) {
+  console.warn('[경로뷰어] HD Map 우선 구역 현황판 실패:', err);
+  hdmapPriorityError = err && err.message ? err.message : String(err);
+  hdmapPriorityResult = null;
+  hdmapPriorityCacheKey = null;
+  hdmapPriorityPaint(null);
+}
+
 // 현황판은 두 자리에 나눠 그린다.
 //   #hdmap-priority-section — 상태 한 줄 + KPI 카드 4개. 참고 이미지 옆(좁은 화면에서는 아래)에 붙는다.
 //   #hdmap-priority-detail  — 막대 그래프 + 비교표. 폭을 다 쓴다.
@@ -101,8 +116,21 @@ async function renderHDMapPrioritySection(filter) {
 function hdmapPriorityPaint(result, options) {
   const box = document.getElementById('hdmap-priority-section');
   const detail = document.getElementById('hdmap-priority-detail');
-  if (box) box.innerHTML = result ? `${hdmapPriorityStatusHTML(result, options)}${hdmapPriorityCardsHTML(result)}` : '';
-  if (detail) detail.innerHTML = result ? `${hdmapPriorityChartHTML(result)}${hdmapPriorityTableHTML(result)}` : '';
+  // 처음 계산하는 동안(앞선 결과가 없을 때)에도 빈 화면으로 두지 않는다 — 무엇을 하고 있는지 적는다
+  if (!result) {
+    const loading = options && options.loading;
+    if (box) {
+      box.innerHTML = loading
+        ? `<div class="hp-status-bar"><span class="hp-status hp-status-wait">①~⑫ 구역 집계하는 중… (기록이 많으면 몇 초 걸려요)</span></div>`
+        : (hdmapPriorityError
+          ? `<div class="hp-status-bar"><span class="hp-status hp-status-warn">계산 실패 — ${escapeHtml(hdmapPriorityError)} · [↻ 다시 계산]</span></div>`
+          : '');
+    }
+    if (detail) detail.innerHTML = '';
+    return;
+  }
+  if (box) box.innerHTML = `${hdmapPriorityStatusHTML(result, options)}${hdmapPriorityCardsHTML(result)}`;
+  if (detail) detail.innerHTML = `${hdmapPriorityChartHTML(result)}${hdmapPriorityTableHTML(result)}`;
 }
 
 // 참고 이미지 크게 보기 — 공용 모달(js/ui.js)을 그대로 쓴다
@@ -150,7 +178,7 @@ function hdmapPriorityStatusHTML(result, options) {
   if (v.warnings.length) chips.push(`<span class="hp-status hp-status-warn" title="${escapeHtml(v.warnings.join(' / '))}">경계 겹침 확인 필요</span>`);
   v.errors.forEach(e => chips.push(`<span class="hp-status hp-status-warn">${escapeHtml(e)}</span>`));
   if (!chips.length) return '';
-  return `<div class="hp-status-bar">${chips.join('')}<span class="hp-status-hint">경계 관리는 [설정] 탭</span></div>`;
+  return `<div class="hp-status-bar">${chips.join('')}<span class="hp-status-hint">경계는 위 <b>구역 경계 설정</b> 버튼에서 그리고 고쳐요</span></div>`;
 }
 
 // ── 카드 4개 ─────────────────────────────────────────
@@ -160,6 +188,12 @@ const hpDash = '<span class="hp-na">—</span>';
 function hdmapPriorityDateOf(stamp) {
   const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(stamp || ''));
   return m ? m[1] : null;
+}
+
+// 일반지역 평균과 비교하지 못하는 이유 — "일반 경계가 없다"와 "일반지역 기록이 0분이다"는 할 일이 다르다
+function hdmapPriorityNoCompareReason(summary) {
+  if (!summary.normalAreaCount) return '비교 불가 — 일반지역(③④⑦⑧⑪⑫) 경계 미설정';
+  return '비교 불가 — 일반지역 평균 0분(0으로 나눌 수 없음)';
 }
 
 function hdmapPriorityCardsHTML(result) {
@@ -177,8 +211,11 @@ function hdmapPriorityCardsHTML(result) {
            <span>세션 <b>${fmtNum(primary.sessionCount)}</b>회</span>
            <span>수집일 <b>${fmtNum(primary.uniqueDays)}</b>일</span>
          </div>
-         <div class="hp-kpi-note">일반지역 평균 대비 <b>${primary.comparable ? HDMapPriority.formatRatio(primary.ratioVsNormalAvg) : '—'}</b>${
-           primary.comparable ? ` · ${HDMapPriority.formatPercentDiff(primary.percentVsNormalAvg)}` : ''}</div>
+         ${primary.state === 'no_data'
+           ? '<div class="hp-kpi-note"><span class="hp-state hp-state-no_data">경계 안 기록 0건</span> — 경계는 있지만 그 안을 달린 기록이 없어요(진짜 0분).</div>' : ''}
+         <div class="hp-kpi-note">일반지역 평균 대비 ${primary.comparable
+           ? `<b>${HDMapPriority.formatRatio(primary.ratioVsNormalAvg)}</b> · ${HDMapPriority.formatPercentDiff(primary.percentVsNormalAvg)}`
+           : `<span class="hp-state">${escapeHtml(hdmapPriorityNoCompareReason(s))}</span>`}</div>
        </div>`
     : `<div class="stat-cell hp-kpi hp-kpi-primary">
          <div class="k">⑤ 최우선 지역</div>
@@ -196,13 +233,17 @@ function hdmapPriorityCardsHTML(result) {
     </div>`;
 
   // 3. 우선 평균 vs 일반 평균
+  // 경계가 있는 구역이 한쪽에 하나도 없으면 그쪽 평균은 0분이 아니라 '경계 미설정'이다
   const vs = s.priorityVsNormal;
+  const avgSide = (count, minutes) => count
+    ? `${fmtNum(Math.round(minutes))}<small> 분</small>`
+    : '<span class="hp-na hp-state hp-state-no_polygon" style="font-size:12px">경계 미설정</span>';
   const avgCard = `<div class="stat-cell hp-kpi">
       <div class="k">우선 평균 vs 일반 평균</div>
-      <div class="v hp-vs">${fmtNum(Math.round(s.priorityAvgMinutes))}<small> 분</small><span class="hp-vs-sep">vs</span>${fmtNum(Math.round(s.normalAvgMinutes))}<small> 분</small></div>
+      <div class="v hp-vs">${avgSide(s.priorityAreaCount, s.priorityAvgMinutes)}<span class="hp-vs-sep">vs</span>${avgSide(s.normalAreaCount, s.normalAvgMinutes)}</div>
       <div class="hp-kpi-rows">
         <span class="${vs.comparable && vs.percentVsNormalAvg >= 0 ? 'hp-up' : (vs.comparable ? 'hp-down' : '')}">
-          ${vs.comparable ? `<b>${HDMapPriority.formatPercentDiff(vs.percentVsNormalAvg)}</b>` : '—'}</span>
+          ${vs.comparable ? `<b>${HDMapPriority.formatPercentDiff(vs.percentVsNormalAvg)}</b>` : `<span class="hp-state">${escapeHtml(hdmapPriorityNoCompareReason(s))}</span>`}</span>
         <span>${vs.comparable ? HDMapPriority.formatRatio(vs.ratioVsNormalAvg) : ''}</span>
       </div>
       <div class="hp-kpi-note">우선 ${fmtNum(s.priorityAreaCount)}개 · 일반 ${fmtNum(s.normalAreaCount)}개 구역 평균</div>
@@ -216,7 +257,9 @@ function hdmapPriorityCardsHTML(result) {
          <div class="v">${escapeHtml(weakest.name)}<small> ${escapeHtml(weakest.priorityLabel)}</small></div>
          <div class="hp-kpi-rows">
            <span><b>${fmtNum(weakest.collectionMinutes)}</b>분</span>
-           <span class="${weakest.comparable && weakest.percentVsNormalAvg < 0 ? 'hp-down' : ''}">평균 대비 <b>${weakest.comparable ? HDMapPriority.formatPercentDiff(weakest.percentVsNormalAvg) : '—'}</b></span>
+           <span class="${weakest.comparable && weakest.percentVsNormalAvg < 0 ? 'hp-down' : ''}">일반 평균 대비 ${weakest.comparable
+             ? `<b>${HDMapPriority.formatPercentDiff(weakest.percentVsNormalAvg)}</b>`
+             : `<span class="hp-state">${escapeHtml(hdmapPriorityNoCompareReason(s))}</span>`}</span>
          </div>
          <div class="hp-kpi-note">마지막 수집 ${lastDate ? escapeHtml(lastDate) : '기록 없음'}</div>
        </div>`
@@ -270,33 +313,47 @@ function hdmapPriorityTableHTML(result) {
     const head = `<th scope="row">${escapeHtml(r.name)}</th>
       <td><span class="hp-tag hp-${r.priority}">${escapeHtml(r.priorityLabel)}</span></td>`;
     if (r.state === 'no_polygon') {
-      return `<tr class="rec-excluded"><td class="hp-state hp-state-no_polygon" colspan="6">
+      return `<tr class="rec-excluded"><td class="hp-state hp-state-no_polygon" colspan="8">
         경계 미설정 — 경계를 그려야 셀 수 있어요(평균·비중 계산에서 제외)</td></tr>`
         .replace('<tr class="rec-excluded">', `<tr class="rec-excluded">${head}`);
     }
     if (r.state === 'error') {
       return `<tr class="rec-excluded">${head}
-        <td class="hp-state hp-state-error" colspan="6">계산 실패 — [↻ 다시 계산]을 눌러 주세요(평균·비중 계산에서 제외)</td></tr>`;
+        <td class="hp-state hp-state-error" colspan="8">계산 실패 — [↻ 다시 계산]을 눌러 주세요(평균·비중 계산에서 제외)</td></tr>`;
     }
     // state === 'ok' | 'no_data'. 'no_data' 는 진짜 0분/0회/0일이다(잴 수 없는 것과 다르다).
     const zero = r.state === 'no_data';
+    const last = hdmapPriorityDateOf(r.lastVisitedAt);
     return `<tr${zero ? ' class="hp-row-zero"' : ''}>
       ${head}
       <td class="mono">${fmtNum(r.collectionMinutes)}분</td>
       <td class="mono">${fmtNum(r.visitCount)}</td>
       <td class="mono">${fmtNum(r.sessionCount)}</td>
       <td class="mono">${fmtNum(r.uniqueDays)}</td>
+      <td class="mono">${zero ? '<span class="hp-state hp-state-no_data">경계 안 기록 0건</span>' : fmtNum(r.recordCount)}</td>
+      <td class="mono">${last ? escapeHtml(last) : '—'}</td>
       <td class="mono">${r.coveragePct == null
         ? '<span class="hp-state hp-state-no_cov" title="구역 안에 HD Map 도로 데이터가 없어 Coverage 를 재지 않았어요">Coverage 미계산</span>'
         : `${r.coveragePct.toFixed(1)}%`}</td>
       <td class="mono ${r.comparable ? (r.percentVsNormalAvg >= 0 ? 'hp-up' : 'hp-down') : ''}">${
         r.comparable
           ? `${HDMapPriority.formatPercentDiff(r.percentVsNormalAvg)} / ${HDMapPriority.formatRatio(r.ratioVsNormalAvg)}`
-          : `<span class="hp-state">${escapeHtml(r.note || '비교 불가')}</span>`}</td>
+          : `<span class="hp-state">${escapeHtml(hdmapPriorityNoCompareReason(s))}</span>`}</td>
     </tr>`;
   }).join('');
 
   const basis = s.normalAvgBasis;
+  // 경계 안/밖 건수 — "정말 기존 기록이 분류되고 있나"를 화면에서 바로 확인하게 한다.
+  // 구역을 서로 독립으로 판정하므로 경계가 겹치면 합계에 중복이 들어간다(그때는 밖 건수를 단정하지 않는다).
+  const inside = result.rows.reduce((acc, r) => acc + (r.recordCount || 0), 0);
+  const total = hdmapPriorityTotalPoints;
+  const overlapped = result.validation.overlaps.some(o => o.confirmed);
+  const countLine = !result.validation.ready ? ''
+    : `<div class="cond-note hp-foot hp-count-line">
+        ①~⑫ 경계 안 기록 <b>${fmtNum(inside)}건</b>${total == null ? '' : ` / 전체 ${fmtNum(total)}건 · 경계 밖 <b>${
+          overlapped ? '계산 보류(경계 겹침)' : `${fmtNum(Math.max(0, total - inside))}건`}</b>`}
+        ${overlapped ? ' — 겹친 자리의 기록은 두 구역에 모두 세어져 합계가 부풀어 있어요' : ''}
+      </div>`;
   return `
     <div class="hp-panel">
     <div class="hp-block-title">지역별 비교</div>
@@ -305,12 +362,13 @@ function hdmapPriorityTableHTML(result) {
         <thead><tr>
           <th scope="col">지역</th><th scope="col">구분</th>
           <th scope="col">수집시간</th><th scope="col">방문</th><th scope="col">세션</th>
-          <th scope="col">수집일</th><th scope="col">Coverage</th>
+          <th scope="col">수집일</th><th scope="col">기록 수</th><th scope="col">마지막 수집</th><th scope="col">Coverage</th>
           <th scope="col">일반지역 평균 대비</th>
         </tr></thead>
         <tbody>${body}</tbody>
       </table>
     </div>
+    ${countLine}
     <div class="cond-note hp-foot">
       수집시간은 90초 넘는 GPS 공백을 뺀 <b>유효 수집 시간</b>, 방문은 (날짜 × 차량),
       세션은 같은 차량이 그 구역에서 10분 이상 끊겼다 다시 들어온 횟수,
@@ -348,14 +406,11 @@ async function renderHDMapPriorityAreaSettings() {
     </div>
     ${rows}
     <div class="cond-note" style="margin-top:8px;">
-      경계를 넣는 방법은 두 가지예요.<br>
-      <b>1) 앱에서 직접 그리기</b> — [통계] → <b>HD Map 우선 수집</b> 탭의 <b>구역 경계 설정</b> 버튼.
-         참고 이미지를 보면서 지도에 꼭짓점을 찍어 저장하면 바로 집계돼요(기존 기록도 함께 다시 셉니다).<br>
-      <b>2) 협의체 경계 파일이 생기면</b> — WGS84 경위도로 바꿔
-         <span class="mono">src/data/hdmap-priority-areas.json</span> 의 <span class="mono">geometry</span> 를 채우고
-         <span class="mono">node tools/build-hdmap-priority-areas.js</span> 실행.
-         직접 그린 경계가 있으면 그쪽이 우선이에요(지우면 파일 경계로 돌아가요).<br>
-      일부만 채워도 그 구역부터 통계가 켜져요.
+      <b>기본 경계</b> — 협의체 도로 데이터의 간선도로 중앙선
+         (강남대로·논현로·언주로·선릉로·삼성로 × 도산대로·학동로·봉은사로·테헤란로)으로 둘러싼 블록이에요.
+         <span class="mono">node tools/derive-hdmap-priority-areas.js</span> 로 다시 만들 수 있어요.<br>
+      <b>고치기</b> — [통계] → <b>HD Map 우선 수집</b> 탭의 <b>구역 경계 설정</b> 버튼에서 다시 그려 저장하면
+         그 구역은 직접 그린 경계가 우선이고, 기존 기록 전체로 바로 다시 셉니다(지우면 기본 경계로 돌아가요).
       ${v.warnings.length ? `<br><b>확인 필요:</b> ${escapeHtml(v.warnings.join(' / '))}` : ''}
       ${v.errors.length ? `<br><b>오류:</b> ${escapeHtml(v.errors.join(' / '))}` : ''}
     </div>`;
