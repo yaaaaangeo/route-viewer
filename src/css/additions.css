@@ -551,3 +551,114 @@
 .auto-legend-item{display:inline-flex;align-items:center;gap:4px;}
 .auto-legend-item i{width:14px;height:4px;border-radius:2px;display:inline-block;}
 .auto-card .rec-detail{margin-top:8px;}
+
+/* ── [통계] HD Map 우선 수집 현황판 ①~⑫ ───────────────────────
+   설정 도구가 아니라 KPI 현황판이다. 구분(최우선/우선/일반)은 색과 함께
+   반드시 글자 badge 로도 적는다 — 색만으로 뜻을 전하지 않는다. */
+#hdmap-stats-panel{display:none;flex-direction:column;gap:14px;}
+#hdmap-stats-panel.active{display:flex;}
+#hdmap-priority-section{display:flex;flex-direction:column;gap:14px;}
+#hdmap-stats-panel .stats-section-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.hp-refresh{margin-left:auto;padding:4px 10px;font-size:11px;font-weight:400;}
+
+/* 한 줄 상태 표시 — 경계 이야기는 여기서 끝난다 */
+.hp-status-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;}
+.hp-status{border-radius:4px;padding:3px 9px;border:1px solid var(--line);background:var(--panel);color:var(--text-dim);}
+.hp-status-wait{color:var(--amber);border-color:rgba(245,166,35,.35);}
+.hp-status-warn{color:var(--red);border-color:rgba(255,107,107,.35);}
+.hp-status-hint{color:var(--text-faint);font-size:10.5px;}
+
+/* KPI 카드 4개 */
+.hp-kpi-grid{grid-template-columns:repeat(4,1fr);}
+@media (max-width:900px){.hp-kpi-grid{grid-template-columns:1fr 1fr;}}
+.hp-kpi{background:var(--panel);display:flex;flex-direction:column;gap:6px;padding:14px 16px;}
+.hp-kpi .v{font-size:22px;line-height:1.1;}
+.hp-kpi .v small{font-size:11px;}
+.hp-kpi-primary{box-shadow:inset 3px 0 0 var(--red);}
+.hp-kpi-weak{box-shadow:inset 3px 0 0 var(--amber);}
+.hp-kpi-rows{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--text-dim);}
+.hp-kpi-rows b{color:var(--text);font-family:'JetBrains Mono',monospace;}
+.hp-kpi-note{font-size:10.5px;color:var(--text-faint);line-height:1.5;}
+.hp-kpi-note b{color:var(--text-dim);}
+.hp-vs{display:flex;align-items:baseline;gap:4px;font-size:18px;}
+.hp-vs-sep{font-size:10px;color:var(--text-faint);margin:0 3px;}
+.hp-meter{height:5px;border-radius:3px;background:var(--line-soft);overflow:hidden;}
+.hp-meter>span{display:block;height:100%;background:var(--amber);border-radius:3px;}
+.hp-na{color:var(--text-faint);}
+
+/* 구분 badge */
+.hp-tag{font-size:10px;border-radius:4px;padding:1px 7px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--text-dim);white-space:nowrap;flex:none;}
+.hp-tag.hp-primary{color:var(--red);border-color:rgba(255,107,107,.45);}
+.hp-tag.hp-priority{color:var(--amber);border-color:rgba(245,166,35,.45);}
+.hp-tag.hp-normal{color:var(--text-dim);}
+
+/* 가로 막대 그래프 */
+.hp-block-title{font-size:11px;font-weight:700;color:var(--text-dim);letter-spacing:.3px;margin-bottom:2px;}
+.hp-panel,.hp-chart{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;}
+.hp-chart{display:flex;flex-direction:column;gap:7px;}
+.hp-chart-row{display:grid;grid-template-columns:34px 46px 1fr 86px;align-items:center;gap:9px;}
+.hp-chart-name{font-size:14px;font-weight:700;text-align:center;}
+.hp-chart-track{height:12px;border-radius:3px;background:var(--line-soft);overflow:hidden;}
+.hp-chart-bar{display:block;height:100%;border-radius:3px;background:var(--text-faint);}
+.hp-bar-primary{background:var(--red);}
+.hp-bar-priority{background:var(--amber);}
+.hp-bar-normal{background:var(--text-faint);}
+.hp-chart-value{font-size:11.5px;text-align:right;white-space:nowrap;}
+.hp-chart-legend{font-size:10.5px;color:var(--text-faint);margin-top:3px;}
+@media (max-width:640px){.hp-chart-row{grid-template-columns:28px 44px 1fr 68px;gap:6px;}}
+
+/* 비교표 */
+.hp-table{background:var(--panel);}
+.hp-table th[scope="row"]{font-size:14px;font-weight:700;}
+.hp-up{color:var(--green);}
+.hp-down{color:var(--red);}
+.hp-foot{margin-top:2px;}
+
+/* 구역 번호 안내(참고 이미지) — 넓은 화면에서는 KPI 카드 옆, 좁은 화면에서는 위아래 */
+.hp-top{display:grid;grid-template-columns:minmax(260px,400px) 1fr;gap:14px;align-items:start;}
+.hp-top>#hdmap-priority-section{gap:10px;}
+.hp-top .hp-kpi-grid{grid-template-columns:1fr 1fr;}
+@media (max-width:1100px){
+  .hp-top{grid-template-columns:1fr;}
+  .hp-top .hp-kpi-grid{grid-template-columns:repeat(4,1fr);}
+}
+@media (max-width:900px){.hp-top .hp-kpi-grid{grid-template-columns:1fr 1fr;}}
+.hp-ref{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:14px 16px;display:flex;flex-direction:column;gap:8px;}
+.hp-ref-btn{padding:0;border:1px solid var(--line-soft);border-radius:6px;background:var(--panel-2);
+  cursor:zoom-in;overflow:hidden;display:block;line-height:0;}
+.hp-ref-btn:hover{border-color:var(--teal);}
+.hp-ref-btn img{width:100%;height:auto;display:block;}
+.hp-ref-cap{font-size:10.5px;color:var(--text-faint);line-height:1.6;}
+.hp-ref-cap b{color:var(--text-dim);}
+/* 크게 보기 — 공용 모달을 쓰되 이 이미지가 들어있을 때만 넓힌다(다른 모달 폭은 그대로) */
+#modal-box:has(.hp-ref-full){width:min(1180px,100%);}
+.hp-ref-full{display:block;margin:0 auto;max-width:100%;max-height:72vh;width:auto;height:auto;
+  border-radius:6px;border:1px solid var(--line-soft);}
+
+/* 구역 경계 설정(지도에서 ①~⑫ polygon 그리기) */
+#hdmap-priority-editor:empty{display:none;}
+#hdmap-priority-editor.open{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:14px 16px;display:flex;flex-direction:column;gap:9px;}
+.hp-ed-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.hp-ed-bar .btn{padding:5px 11px;font-size:11px;}
+.hp-ed-close{margin-left:auto;}
+.hp-ed-field{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--text-faint);}
+.hp-ed-field select{background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+  border-radius:5px;padding:5px 7px;font-size:11.5px;}
+.hp-ed-hint b{color:var(--text);}
+.hp-ed-msg{margin:0;}
+.hp-ed-map{height:440px;border-radius:6px;border:1px solid var(--line-soft);overflow:hidden;}
+@media (max-width:640px){.hp-ed-map{height:320px;}}
+.hp-ed-label{background:transparent!important;border:0!important;box-shadow:none!important;
+  color:#fff!important;font-size:12px;font-weight:700;text-shadow:0 1px 3px rgba(0,0,0,.9);}
+.hp-ed-label::before{display:none!important;}
+
+/* 왜 숫자가 없는지 — 원인마다 다르게 적는다("—" 하나로 합치지 않는다) */
+.hp-state{font-size:10.5px;color:var(--text-faint);white-space:nowrap;}
+.hp-state-no_polygon{color:var(--amber);}
+.hp-state-error{color:var(--red);}
+.hp-state-no_cov{color:var(--text-faint);}
+.hp-kpi .v.hp-state{font-size:13px;}
+.hp-row-zero td.mono{color:var(--text-faint);}

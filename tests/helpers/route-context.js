@@ -42,6 +42,7 @@ const API_METHODS = [
   'getStatsBundle', 'getAccumBundle',
   'listSubZones', 'getSubZone', 'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'getSubZoneStats',
   'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',
+  'getHDMapPriorityPolygons', 'saveHDMapPriorityPolygon',
 ];
 
 function createDesktopApi(db) {

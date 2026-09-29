@@ -32,6 +32,7 @@ const TimeConditions = require('../src/js/time-conditions.js');
 const ConditionStats = require('../src/js/condition-stats.js');
 const Recommendation = require('../src/js/recommendation.js');
 const IssueFilter = require('../src/js/issue-filter.js');
+const HDMapPriority = require('../src/js/hdmap-priority.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -1390,6 +1391,36 @@ class RouteDatabase {
     return this.getZonePolygons();
   }
 
+  // ── HD Map 우선 구축 구역 ①~⑫ 의 경계 ────────────────
+  //  ①~⑫ 는 사업에서 정해진 고정 목록이라 정의(번호·우선순위)는 데이터 파일에 있지만,
+  //  경계는 협의체 자료에 없어서 사용자가 앱에서 직접 그린다 — 그린 것만 여기 저장한다.
+  //  데이터 파일은 설치 경로에 있어(패키징되면 읽기 전용) 쓸 수 없으므로 meta 에 둔다.
+  //  {areaNo: {polygon:[[lat,lng],...], updatedAt}} — 좌표는 언제나 WGS84 위경도.
+  getHDMapPriorityPolygons() {
+    return HDMapPriority.normalizeSavedPolygons(this._jsonMeta('hdmap_priority_polygons', {}));
+  }
+
+  // polygon 이 비어 있으면(null·[]) 그 구역 경계를 지운다 — 한 구역씩 바꾼다.
+  saveHDMapPriorityPolygon(areaNo, polygon) {
+    const all = this._jsonMeta('hdmap_priority_polygons', {});
+    if (polygon == null || (Array.isArray(polygon) && polygon.length === 0)) {
+      const no = Number(areaNo);
+      if (!HDMapPriority.ALL_AREA_NOS.includes(no)) throw new Error('①~⑫ 중 하나를 골라주세요.');
+      delete all[String(no)];
+      this.setMeta('hdmap_priority_polygons', JSON.stringify(all));
+      return this.getHDMapPriorityPolygons();
+    }
+    const v = HDMapPriority.normalizeAreaPolygon(areaNo, polygon);
+    if (!v.ok) {
+      const err = new Error(v.errors.join(' '));
+      err.errors = v.errors;
+      throw err;
+    }
+    all[String(v.value.areaNo)] = { polygon: v.value.polygon, updatedAt: v.value.updatedAt };
+    this.setMeta('hdmap_priority_polygons', JSON.stringify(all));
+    return this.getHDMapPriorityPolygons();
+  }
+
   // 커버리지 갭 수동 오버라이드 — "이 칸은 도로가 아니다(excluded)" /
   // "이 칸은 방문한 걸로 친다(visited)" / "미방문으로 친다(unvisited)".
   // accum.js가 위경도 점 배열로 주고받고, 매 렌더링 시점의 격자 기준으로
@@ -1758,6 +1789,7 @@ class RouteDatabase {
       dateCount: dates.length,
       data,
       zonePolygons: this.getZonePolygons(),
+      hdmapPriorityPolygons: this.getHDMapPriorityPolygons(),
       vehicles: this.listVehicles(),
       zones: this.listZones(),
       settings: this.getSettings(),
@@ -1805,6 +1837,13 @@ class RouteDatabase {
     });
 
     if (payload.zonePolygons && typeof payload.zonePolygons === 'object') {
+      // 직접 그린 ①~⑫ 경계 — 예전 백업에는 없는 항목이라 있을 때만 되살린다
+      if (payload.hdmapPriorityPolygons) {
+        const base = mode === 'replace' ? {} : this._jsonMeta('hdmap_priority_polygons', {});
+        const incoming = HDMapPriority.normalizeSavedPolygons(payload.hdmapPriorityPolygons);
+        Object.keys(incoming).forEach(no => { base[String(no)] = incoming[no]; });
+        this.setMeta('hdmap_priority_polygons', JSON.stringify(base));
+      }
       const merged = mode === 'replace' ? {} : this.getZonePolygons();
       for (const [zone, pts] of Object.entries(payload.zonePolygons)) {
         if (Array.isArray(pts) && pts.length >= 3) merged[zone] = pts;

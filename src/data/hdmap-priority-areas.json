@@ -1,0 +1,26 @@
+{
+  "type": "FeatureCollection",
+  "name": "HDMAP_PRIORITY_AREAS",
+  "note": "2차년도 HD Map 우선 구축 구역 ①~⑫ (상위 구역 '강남'의 하위 개념). 기존 zone='강남' 은 그대로 두고, 이 구역들은 통계 비교용으로만 쓴다.",
+  "polygonSource": "아직 없음 — 아래 geometry 는 전부 null 이다. 저장소의 [산자부E2E][데이터협의체]HDMap_구축지역(강남)_세부구역_260209 폴더에는 강남구/서초구 '법정동' 경계(강남구.shp: 역삼·청담·삼성·대치·신사·논현·압구정·도곡 8개)와 도로·노드만 있고, ①~⑫ 블록 경계는 들어 있지 않다(QGIS 프로젝트 강남_서초_도로_시각화_최종.qgz 의 레이어 목록으로도 확인). 협의체 원본 경계(shp/GeoJSON)를 받아서 채워야 한다. 지도 이미지의 숫자 위치를 보고 좌표를 추측해 넣지 말 것.",
+  "crs": "WGS84 경위도. GeoJSON 규칙대로 좌표는 [경도, 위도] 순서이고, 링은 첫 점과 끝 점이 같아야 한다.",
+  "howToFill": [
+    "1) 각 Feature 의 geometry 를 {\"type\":\"Polygon\",\"coordinates\":[[[lng,lat],...,[lng,lat]]]} 로 채운다.",
+    "2) node tools/build-hdmap-priority-areas.js 를 실행해 src/data/hdmap-priority-areas.js 를 다시 만든다(브라우저 file:// 로드용).",
+    "3) 앱의 [통계] 탭 'HD Map 우선 수집 현황' 에서 채워진 구역부터 숫자가 켜진다."
+  ],
+  "features": [
+    { "type": "Feature", "id": "hdmap_01", "geometry": null, "properties": { "areaNo": 1, "name": "①", "parentZone": "강남", "priority": "priority" } },
+    { "type": "Feature", "id": "hdmap_02", "geometry": null, "properties": { "areaNo": 2, "name": "②", "parentZone": "강남", "priority": "priority" } },
+    { "type": "Feature", "id": "hdmap_03", "geometry": null, "properties": { "areaNo": 3, "name": "③", "parentZone": "강남", "priority": "normal" } },
+    { "type": "Feature", "id": "hdmap_04", "geometry": null, "properties": { "areaNo": 4, "name": "④", "parentZone": "강남", "priority": "normal" } },
+    { "type": "Feature", "id": "hdmap_05", "geometry": null, "properties": { "areaNo": 5, "name": "⑤", "parentZone": "강남", "priority": "primary" } },
+    { "type": "Feature", "id": "hdmap_06", "geometry": null, "properties": { "areaNo": 6, "name": "⑥", "parentZone": "강남", "priority": "priority" } },
+    { "type": "Feature", "id": "hdmap_07", "geometry": null, "properties": { "areaNo": 7, "name": "⑦", "parentZone": "강남", "priority": "normal" } },
+    { "type": "Feature", "id": "hdmap_08", "geometry": null, "properties": { "areaNo": 8, "name": "⑧", "parentZone": "강남", "priority": "normal" } },
+    { "type": "Feature", "id": "hdmap_09", "geometry": null, "properties": { "areaNo": 9, "name": "⑨", "parentZone": "강남", "priority": "priority" } },
+    { "type": "Feature", "id": "hdmap_10", "geometry": null, "properties": { "areaNo": 10, "name": "⑩", "parentZone": "강남", "priority": "priority" } },
+    { "type": "Feature", "id": "hdmap_11", "geometry": null, "properties": { "areaNo": 11, "name": "⑪", "parentZone": "강남", "priority": "normal" } },
+    { "type": "Feature", "id": "hdmap_12", "geometry": null, "properties": { "areaNo": 12, "name": "⑫", "parentZone": "강남", "priority": "normal" } }
+  ]
+}

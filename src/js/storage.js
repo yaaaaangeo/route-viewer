@@ -123,6 +123,8 @@
       deleteAll: () => api.deleteAll(),
       getZonePolygons: () => api.getZonePolygons(),
       saveZonePolygons: p => api.saveZonePolygons(p),
+      getHDMapPriorityPolygons: () => api.getHDMapPriorityPolygons(),
+      saveHDMapPriorityPolygon: (areaNo, polygon) => api.saveHDMapPriorityPolygon(areaNo, polygon),
       listImports: (n, o) => api.listImports(n, o || {}),
       findImportByFileHash: h => api.findImportByFileHash(h),
       getImportConflicts: id => api.getImportConflicts(id),
@@ -1043,6 +1045,38 @@
         return this.getZonePolygons();
       },
 
+      // ── HD Map 우선 구축 구역 ①~⑫ 의 경계 — database.js 와 같은 규칙·같은 결과 ──
+      // 정의(번호·우선순위)는 데이터 파일에 있고, 경계는 사용자가 앱에서 직접 그린 것만 여기 저장한다.
+      //
+      // hdmap-priority.js 는 이 화면 기능의 모듈이라 저장소보다 늦게·안 올라올 수도 있다
+      // (예: 화면 일부만 올리는 테스트). 그때 백업이 통째로 실패하면 안 되므로, 읽기는
+      // 저장된 값을 그대로 넘기고(백업에 남는다) 쓰기만 막는다 — 검증 없이 저장하지는 않는다.
+      async getHDMapPriorityPolygons() {
+        const raw = (await metaGet('hdmap_priority_polygons', {})) || {};
+        return global.HDMapPriority ? global.HDMapPriority.normalizeSavedPolygons(raw) : raw;
+      },
+
+      async saveHDMapPriorityPolygon(areaNo, polygon) {
+        if (!global.HDMapPriority) throw new Error('구역 정의를 불러오지 못했어요(hdmap-priority.js).');
+        const all = (await metaGet('hdmap_priority_polygons', {})) || {};
+        if (polygon == null || (Array.isArray(polygon) && polygon.length === 0)) {
+          const no = Number(areaNo);
+          if (!global.HDMapPriority.ALL_AREA_NOS.includes(no)) throw new Error('①~⑫ 중 하나를 골라주세요.');
+          delete all[String(no)];
+          await metaSet('hdmap_priority_polygons', all);
+          return this.getHDMapPriorityPolygons();
+        }
+        const v = global.HDMapPriority.normalizeAreaPolygon(areaNo, polygon);
+        if (!v.ok) {
+          const err = new Error(v.errors.join(' '));
+          err.errors = v.errors;
+          throw err;
+        }
+        all[String(v.value.areaNo)] = { polygon: v.value.polygon, updatedAt: v.value.updatedAt };
+        await metaSet('hdmap_priority_polygons', all);
+        return this.getHDMapPriorityPolygons();
+      },
+
       async listVehicles() {
         const db = await ready();
         const t = db.transaction(['vehicles'], 'readonly');
@@ -1572,6 +1606,7 @@
           dateCount: summaries.length,
           data,
           zonePolygons: await this.getZonePolygons(),
+          hdmapPriorityPolygons: await this.getHDMapPriorityPolygons(),
           vehicles: await this.listVehicles(),
           zones: await this.listZones(),
           settings: await this.getSettings(),
@@ -1605,6 +1640,15 @@
           trackSources: false,
         });
         if (payload.zonePolygons && typeof payload.zonePolygons === 'object') {
+          // 직접 그린 ①~⑫ 경계 — 예전 백업에는 없는 항목이라 있을 때만 되살린다
+          if (payload.hdmapPriorityPolygons) {
+            const base = mode === 'replace' ? {} : ((await metaGet('hdmap_priority_polygons', {})) || {});
+            const incoming = global.HDMapPriority
+              ? global.HDMapPriority.normalizeSavedPolygons(payload.hdmapPriorityPolygons)
+              : payload.hdmapPriorityPolygons;
+            Object.keys(incoming).forEach(no => { base[String(no)] = incoming[no]; });
+            await metaSet('hdmap_priority_polygons', base);
+          }
           const merged = mode === 'replace' ? {} : await this.getZonePolygons();
           Object.entries(payload.zonePolygons).forEach(([z, pts]) => {
             if (Array.isArray(pts) && pts.length >= 3) merged[z] = pts;
@@ -1694,7 +1738,7 @@
 
   const changeListeners = [];
   const MUTATING_METHODS = new Set([
-    'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveZone', 'setZoneActive',
+    'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveHDMapPriorityPolygon', 'saveZone', 'setZoneActive',
     'saveZoneManualCells', 'setSettings', 'restoreBackupPayload', 'reclassifySummaries',
     'saveCoverageSnapshot', 'setRecommendationState', 'updateImportIssue', 'restoreImports',
     'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'saveSubZoneOverride', 'deleteSubZoneOverride',
@@ -1705,7 +1749,8 @@
     'stats', 'importRecords', 'listDateSummaries', 'getRecordsByDate', 'getOverview',
     'getDensityCells', 'getBounds', 'getVisitedCellKeys', 'getDistribution',
     'getTimeBucketDistribution', 'deleteDate', 'deleteAll', 'getZonePolygons',
-    'saveZonePolygons', 'listImports', 'findImportByFileHash', 'getImportConflicts',
+    'saveZonePolygons', 'getHDMapPriorityPolygons', 'saveHDMapPriorityPolygon',
+    'listImports', 'findImportByFileHash', 'getImportConflicts',
     'listVehicles', 'saveVehicle', 'setVehicleActive', 'listZones', 'saveZone',
     'setZoneActive', 'getZoneManualCells', 'saveZoneManualCells', 'getSettings', 'setSettings', 'getCellVisitCounts',
     'getBackupHistory', 'setBackupHistory', 'buildBackupPayload', 'restoreBackupPayload',

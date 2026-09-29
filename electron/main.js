@@ -298,6 +298,8 @@ function registerIpc() {
   handle('db:setSubZoneActive', (id, active) => openDatabase().setSubZoneActive(id, active));
   handle('db:deleteSubZone', id => openDatabase().deleteSubZone(id));
   handle('db:getSubZoneStats', (subZones, options) => openDatabase().getSubZoneStats(subZones, options));
+  handle('db:getHDMapPriorityPolygons', () => openDatabase().getHDMapPriorityPolygons());
+  handle('db:saveHDMapPriorityPolygon', (areaNo, polygon) => openDatabase().saveHDMapPriorityPolygon(areaNo, polygon));
   handle('db:getAutoAnalysis', (parentZone, options) => openDatabase().getAutoAnalysis(parentZone, options));
   handle('db:listSubZoneOverrides', parentZone => openDatabase().listSubZoneOverrides(parentZone));
   handle('db:saveSubZoneOverride', override => openDatabase().saveSubZoneOverride(override));

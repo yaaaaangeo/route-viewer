@@ -373,6 +373,14 @@
   const DEFAULT_MATCH_DISTANCE_M = 25;
   const SEGMENT_COVERAGE_CELL_M = 20;   // 구간 Coverage 를 재는 칸 크기(누적 지도 Coverage 와 같은 20m)
 
+  // 수집 세션 — "그 구역을 한 번 돌고 나온 것"을 세는 단위.
+  // 방문 횟수(visitCount)는 (날짜 × 차량)이라, 같은 차가 같은 날 오전에 한 번 오후에 한 번
+  // 들어와도 1 로 센다. 세션은 같은 차량의 구역 안 기록이 이 시간 이상 끊기면(또는 날짜가
+  // 바뀌면) 새로 센다 — 09:00~09:30, 17:00~17:30 이면 같은 날 같은 차라도 2 세션이다.
+  // 수집 시간에서 GPS 공백을 빼는 기준(90초)과는 다른 값이다: 90초는 "신호 끊김",
+  // 600초는 "다른 주행"으로 본다.
+  const SESSION_GAP_SEC = 600;
+
   function buildRoadIndex(segments) {
     const cells = new Map();
     (segments || []).forEach(seg => {
@@ -454,6 +462,8 @@
   //
   //  수집 시간은 날짜 요약과 같은 규칙(차량별 90초 넘는 간격은 빼는 유효 수집 시간)이고,
   //  방문 횟수는 (날짜 × 차량) 수다. 방향은 앞 기록에서 지금 기록으로의 진행 방위를 도로에 맞춰 센다.
+  //  수집 세션(sessionCount)은 방문 횟수와 따로 센다 — 같은 차량의 구역 안 기록이
+  //  SESSION_GAP_SEC(10분) 이상 끊기면 새 세션이라, 같은 날 오전·오후에 따로 들어오면 2 세션이다.
   // ══════════════════════════════════════════════════════
   function aggregateSubZone(subZone, rows, options) {
     const o = options || {};
@@ -470,6 +480,7 @@
     const visits = new Set();
     let recordCount = 0, collectionSec = 0, lastVisitedAt = null;
     let matchedPoints = 0, unmatchedPoints = 0;
+    let sessionCount = 0;
     const issueCounts = { total: 0, issue: 0 };
 
     // 같은 차량의 직전 기록 — 간격(수집 시간)과 진행 방위(방향)를 구하는 데 쓴다
@@ -502,6 +513,13 @@
 
       const prev = prevByVehicle.get(r.vehicle || '');
       let heading = null;
+      // 수집 세션 — 같은 차량의 구역 안 직전 기록에서 SESSION_GAP_SEC 이상 끊겼거나
+      // 날짜가 바뀌었으면(= 앞 기록이 없으면) 새 세션이다. rows 는 (차량, 시각) 순으로
+      // 들어온다는 전제(SQLite·IndexedDB 양쪽 다 그렇게 정렬해서 넘긴다).
+      const sessionGap = prev && prev.date === r.date
+        ? CS.timeToSec(r.time) - CS.timeToSec(prev.time)
+        : null;
+      if (!Number.isFinite(sessionGap) || sessionGap < 0 || sessionGap >= SESSION_GAP_SEC) sessionCount++;
       if (prev && prev.date === r.date) {
         const dt = CS.timeToSec(r.time) - CS.timeToSec(prev.time);
         if (dt > 0 && dt <= CS.COLLECTION_GAP_SEC) {
@@ -526,10 +544,13 @@
               start: seg ? seg.start : null, end: seg ? seg.end : null,
               recordCount: 0, forward: 0, backward: 0, unknownDirection: 0,
               collectionSec: 0, conditions: new Map(), lastVisitedAt: null,
+              // 구간을 20m 칸으로 나눠 실제로 지나간 칸 — aggregateSegments 와 같은 방식
+              coveredCells: new Set(),
             };
             roads.set(m.roadId, road);
           }
           road.recordCount++;
+          if (Number.isFinite(m.alongM)) road.coveredCells.add(Math.floor(m.alongM / SEGMENT_COVERAGE_CELL_M));
           if (m.direction === 'forward') road.forward++;
           else if (m.direction === 'backward') road.backward++;
           else road.unknownDirection++;
@@ -567,10 +588,28 @@
       conditions: [...r.conditions.values()].sort((a, b) => b.recordCount - a.recordCount),
     })).sort((a, b) => b.recordCount - a.recordCount);
 
+    // 구역 Coverage — 구역 안 HD Map 도로를 20m 칸으로 나눠, 실제로 지나간 칸의 비율.
+    // 도로 데이터를 주지 않았으면(segments 0) 0% 가 아니라 null 이다 — "안 달렸다"와
+    // "잴 수 없다"는 다른 말이고, 0% 로 보이면 잘못된 숫자가 된다.
+    let coverage = null;
+    if (segments.length) {
+      const cellsOf = lengthM => Math.max(1, Math.ceil((lengthM || 0) / SEGMENT_COVERAGE_CELL_M));
+      let totalCells = 0;
+      segments.forEach(s => { totalCells += cellsOf(s.lengthM); });
+      let coveredCells = 0;
+      roads.forEach(r => { coveredCells += Math.min(r.coveredCells.size, cellsOf(r.lengthM)); });
+      coverage = {
+        cellSizeM: SEGMENT_COVERAGE_CELL_M,
+        coveredCells, totalCells,
+        percent: totalCells ? Math.round((Math.min(coveredCells, totalCells) / totalCells) * 1000) / 10 : 0,
+      };
+    }
+
     return {
       id: subZone.id,
       recordCount, collectionSec, collectionMinutes: Math.round(collectionSec / 60),
-      uniqueDays: dates.size, visitCount: visits.size, lastVisitedAt,
+      uniqueDays: dates.size, visitCount: visits.size, sessionCount, lastVisitedAt,
+      coverage,
       vehicles: [...vehicles.entries()].sort((a, b) => b[1] - a[1]),
       issueRecordCount: issueCounts.issue,
       conditions: conditionList,
@@ -718,6 +757,6 @@
     polygonBounds, polygonCenter, pointInPolygon, pointToSegment,
     roadSegmentsIn, normalizeSubZone, candidatePeriods, expectedSituations, safetyNote,
     buildRoadIndex, matchToRoad, directionConfidence,
-    DEFAULT_MATCH_DISTANCE_M, DIRECTION_MIN_SAMPLES, SEGMENT_COVERAGE_CELL_M,
+    DEFAULT_MATCH_DISTANCE_M, DIRECTION_MIN_SAMPLES, SEGMENT_COVERAGE_CELL_M, SESSION_GAP_SEC,
   };
 }));

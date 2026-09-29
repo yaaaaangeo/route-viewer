@@ -48,11 +48,14 @@ function setStatsVehicle(vehicle){
   renderStatsView();
 }
 
+// 통계 탭 안의 세 화면 — 지역별 · 차량별 · HD Map 우선 수집(①~⑫ 현황판)
 function updateStatsModeUI(){
-  document.getElementById('stats-type-region').classList.toggle('active',statsMode==='region');
-  document.getElementById('stats-type-vehicle').classList.toggle('active',statsMode==='vehicle');
-  document.getElementById('region-stats-panel').classList.toggle('active',statsMode==='region');
-  document.getElementById('vehicle-stats-panel').classList.toggle('active',statsMode==='vehicle');
+  ['region','vehicle','hdmap'].forEach(mode=>{
+    const tab=document.getElementById('stats-type-'+mode);
+    const panel=document.getElementById(mode+'-stats-panel');
+    if(tab) tab.classList.toggle('active',statsMode===mode);
+    if(panel) panel.classList.toggle('active',statsMode===mode);
+  });
 }
 
 function styleVehicleButtons(){
@@ -213,6 +216,12 @@ async function renderStatsView(){
     summaryEl.style.display='none';
     regionGridEl.innerHTML='';
     vehicleGridEl.innerHTML='';
+    // 기록이 하나도 없으면 ①~⑫ 현황판도 보여줄 게 없다(예전 숫자가 남지 않게 지운다).
+    // 구역 번호 안내 이미지는 index.html 에 고정이라 그대로 남는다 — 경계·기록과 무관하게 봐야 하는 것.
+    ['hdmap-priority-section','hdmap-priority-detail'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.innerHTML='';
+    });
     return;
   }
   statusEl.style.display='none';
@@ -230,6 +239,11 @@ async function renderStatsView(){
   if(token!==statsRenderToken) return;
   const overview={points:bundle.points,days:bundle.days,zones:bundle.zones,vehicles:bundle.vehicles};
   renderIssueOverview(bundle.issueOverview);
+  // HD Map 우선 구축 구역 ①~⑫ 현황판 — 그 화면을 보고 있을 때만 계산한다(구역 12개를 훑어야 해서
+  // 가볍지 않다). 같은 필터를 쓰고, 실패해도 통계 탭 나머지는 그대로 그려야 하므로 기다리지 않는다.
+  if(statsMode==='hdmap'&&typeof renderHDMapPrioritySection==='function'){
+    renderHDMapPrioritySection(filter).catch(err=>console.warn('[경로뷰어] HD Map 우선 구역 현황판 실패:',err));
+  }
 
   const activeLabel=statsMode==='region'
     ? (statsZoneFilter==='all'?'전체':statsZoneFilter)
@@ -252,6 +266,13 @@ async function renderStatsView(){
     const emptyHTML=`<div class="dist-card" style="grid-column:1/-1;"><div class="dc-empty">선택한 ${statsMode==='region'?'지역':'차량'}(${escapeHtml(activeLabel)})에는 아직 기록이 없어요.</div></div>`;
     regionGridEl.innerHTML=statsMode==='region'?emptyHTML:'';
     vehicleGridEl.innerHTML=statsMode==='vehicle'?emptyHTML:'';
+    return;
+  }
+
+  // HD Map 화면에서는 아래 분포 카드를 그리지 않는다 — 계산도 하지 않는다
+  if(statsMode==='hdmap'){
+    regionGridEl.innerHTML='';
+    vehicleGridEl.innerHTML='';
     return;
   }
 

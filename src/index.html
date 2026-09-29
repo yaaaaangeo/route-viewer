@@ -192,6 +192,7 @@
     <div id="stats-type-tabs">
       <button class="zone-btn active" id="stats-type-region" onclick="setStatsMode('region')">지역별 통계</button>
       <button class="zone-btn" id="stats-type-vehicle" onclick="setStatsMode('vehicle')">차량별 통계</button>
+      <button class="zone-btn" id="stats-type-hdmap" onclick="setStatsMode('hdmap')">HD Map 우선 수집</button>
     </div>
     <div id="region-stats-panel" class="active">
       <div class="stats-section-title">지역별 통계</div>
@@ -202,6 +203,34 @@
       <div class="stats-section-title">차량별 통계</div>
       <div id="stats-vehicle-filter-group"></div>
       <div id="vehicle-dist-grid"></div>
+    </div>
+    <!-- 2차년도 HD Map 우선 구축 구역 ①~⑫ 현황판 — 계산 js/hdmap-priority.js, 그리기 js/hdmap-priority-view.js.
+         경계(polygon) 관리는 이 화면이 아니라 [설정] 탭에 있다. -->
+    <div id="hdmap-stats-panel">
+      <div class="stats-section-title">HD Map 우선 수집 현황
+        <span class="ds-hint">최우선 ⑤ · 우선 ①②⑥⑨⑩ · 일반(비교군) ③④⑦⑧⑪⑫ — 상위 구역 '강남' 안</span>
+        <button class="btn ghost hp-refresh" type="button" onclick="toggleHDMapPriorityEditor()">구역 경계 설정</button>
+        <button class="btn ghost" type="button" onclick="refreshHDMapPriority()">↻ 다시 계산</button>
+      </div>
+      <!-- 구역 번호 안내(참고 이미지) — 통계 계산에 쓰는 경계(polygon)와는 별개다.
+           경계가 없어도, 기록이 없어도 언제나 보여야 해서 화면 코드가 아니라 여기 고정으로 둔다. -->
+      <div class="hp-top">
+        <figure class="hp-ref">
+          <div class="hp-block-title">구역 번호 안내</div>
+          <button class="hp-ref-btn" type="button" onclick="openHDMapPriorityReference()" title="크게 보기">
+            <img src="assets/hdmap-priority-reference.png"
+                 alt="강남 지도 위에 ①~⑫ 우선 수집 구역의 위치를 번호로 표시한 참고 이미지">
+          </button>
+          <figcaption class="hp-ref-cap">
+            ①~⑫ 우선 수집 구역 참고 이미지입니다. 아래 표의 구역 번호가 지도의 어디인지 확인하는 용도이고,
+            통계 계산에 쓰는 경계(polygon)는 아니에요. <b>이미지를 누르면 크게 볼 수 있어요.</b>
+          </figcaption>
+        </figure>
+        <div id="hdmap-priority-section"></div>
+      </div>
+      <!-- 구역 경계 설정(지도에서 ①~⑫ polygon 그리기) — js/hdmap-priority-editor.js -->
+      <div id="hdmap-priority-editor"></div>
+      <div id="hdmap-priority-detail"></div>
     </div>
   </div>
 
@@ -276,6 +305,9 @@
     <div class="stats-section-title" style="margin-top:8px;">지역 관리</div>
     <div id="settings-zone-list" class="settings-list"></div>
     <button class="btn ghost" type="button" onclick="openAddZoneModal()">+ 지역 추가</button>
+
+    <div class="stats-section-title" style="margin-top:8px;">HD Map 우선 구축 구역 ①~⑫</div>
+    <div id="settings-hdmap-priority" class="settings-list"></div>
 
     <div class="stats-section-title" style="margin-top:8px;">Coverage Depth 기준</div>
     <div class="ir-note" style="margin:0;">누적 지도의 "커버리지 갭 보기 → Coverage Depth 보기"에서 칸을 몇 등급으로 나눌지 정해요. 숫자를 바꾸면 바로 저장돼요.</div>
@@ -378,6 +410,8 @@
 <script src="js/time-conditions.js"></script>
 <script src="js/issue-filter.js"></script>
 <script src="js/subzones.js"></script>
+<!-- HD Map 우선 구축 구역 ①~⑫ 정의·비교 통계 (경계 데이터는 아래 hdmap-priority-areas.js) -->
+<script src="js/hdmap-priority.js"></script>
 <script src="js/road-graph.js"></script>
 <script src="js/ego-maneuver.js"></script>
 <script src="js/road-context.js"></script>
@@ -393,6 +427,9 @@
      에서도 그대로 로드된다. tools/convert-hdmap-shapefile.js가 생성한다. -->
 <script src="data/hdmap_gangnam_roads.js"></script>
 <script src="data/hdmap_seocho_roads.js"></script>
+<!-- ①~⑫ 경계 GeoJSON — 원본은 src/data/hdmap-priority-areas.json,
+     이 .js 는 tools/build-hdmap-priority-areas.js 가 만든다(file:// 로드용). -->
+<script src="data/hdmap-priority-areas.js"></script>
 <script src="js/quality.js"></script>
 <script src="js/coverage-grid.js"></script>
 <script src="js/storage.js"></script>
@@ -402,6 +439,8 @@
 <script src="js/map-capture.js"></script>
 <script src="js/accum.js"></script>
 <script src="js/statistics.js"></script>
+<script src="js/hdmap-priority-view.js"></script>
+<script src="js/hdmap-priority-editor.js"></script>
 <script src="js/recommend-view.js"></script>
 <script src="js/subzone-view.js"></script>
 <script src="js/auto-analysis-view.js"></script>
