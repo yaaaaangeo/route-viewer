@@ -348,6 +348,13 @@
 .ds-combo{display:flex;align-items:center;gap:5px;flex-wrap:wrap;}
 .ds-combo-n{font-size:10.5px;color:var(--text-faint);margin-left:4px;}
 .ds-cond-stale{margin:0;}
+.ds-tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px;border-bottom:1px solid var(--line-soft);}
+.ds-tab{background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:5px 10px;font-size:11.5px;font-weight:600;color:var(--text-dim);cursor:pointer;font-family:inherit;}
+.ds-tab:hover{color:var(--text);}
+.ds-tab.active{color:var(--amber);border-bottom-color:var(--amber);}
+.ds-tab.total{margin-left:auto;}
+.ds-tab.total.active{color:var(--teal);border-bottom-color:var(--teal);}
+.ds-tab-n{font-size:10px;font-weight:400;color:var(--text-faint);margin-left:2px;}
 
 /* ── 추천 주행 ────────────────────────────────────────── */
 #recommend-view{display:none;flex-direction:column;gap:14px;}

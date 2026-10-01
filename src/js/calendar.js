@@ -215,15 +215,57 @@ async function openDayDetail(dateKey){
   document.getElementById('back-btn').onclick=()=>switchTab('calendar');
   // dateSummaryIndex 에 이미 거리/품질검사 결과가 캐시돼 있다(달력이 refreshDateIndex로
   // 채워둔 값) — 새로 계산하지 않고 그대로 재사용한다.
-  renderDaySummary(summarizePoints(sorted),dateSummaryIndex.get(dateKey));
+  renderDaySummary(sorted,dateSummaryIndex.get(dateKey));
   renderDayIssues(dateKey);
   renderConsole();
 }
 
-// sum: summarizePoints() 결과(zones/vehicles/startTime/endTime/count)
-// cached: dateSummaryIndex 에 있는 날짜 요약(distanceKm/quality) — 없으면 '—'로 표시
-function renderDaySummary(sum,cached){
+// 일자 요약 — 차량이 여러 대면 "차량별 탭 + 전체 합산 탭"으로 나눠 보여준다.
+// 전체 합산은 DB 날짜 요약(cached) 그대로, 차량별은 이미 불러온 그 하루치 원본(sorted)을
+// 차량으로 나눠 buildDaySummaryFromPoints(core.js)로 그 자리에서 만든다 — 규칙이 같아서 합이 맞는다.
+let daySummaryTab='all';
+function renderDaySummary(sorted,cached){
   const el=document.getElementById('day-summary');
+  const byVehicle=new Map();
+  for(const p of sorted){
+    const v=p.vehicle?String(p.vehicle):'';
+    if(!byVehicle.has(v)) byVehicle.set(v,[]);
+    byVehicle.get(v).push(p);
+  }
+  const vehicles=[...byVehicle.keys()].sort((a,b)=>(a===''?1:0)-(b===''?1:0)||a.localeCompare(b,'ko',{numeric:true}));
+  const allBody=daySummaryBodyHTML(summarizePoints(sorted),cached);
+  if(vehicles.length<2){
+    el.innerHTML=`<div class="ds-title">일자 요약</div>${allBody}<div id="ds-issues" class="ds-issues"></div>`;
+    el.style.display='block';
+    return;
+  }
+  const cfg=currentClassificationConfig();
+  const tabs=vehicles.map((v,i)=>{
+    const pts=byVehicle.get(v);
+    return {id:'v'+i,label:v||'차량 정보 없음',count:pts.length,
+      body:daySummaryBodyHTML(summarizePoints(pts),window.buildDaySummaryFromPoints(pts,cfg))};
+  });
+  tabs.push({id:'all',label:'전체 합산',count:sorted.length,body:allBody,total:true});
+  if(!tabs.some(t=>t.id===daySummaryTab)) daySummaryTab='all';
+  el.innerHTML=`
+    <div class="ds-title">일자 요약 <span class="ds-hint">차량 ${vehicles.length}대</span></div>
+    <div class="ds-tabs" role="tablist">${tabs.map(t=>`<button type="button" role="tab" class="ds-tab${t.total?' total':''}${t.id===daySummaryTab?' active':''}" data-tab="${t.id}" aria-selected="${t.id===daySummaryTab}">${escapeHtml(t.label)} <span class="ds-tab-n mono">${fmtNum(t.count)}</span></button>`).join('')}</div>
+    ${tabs.map(t=>`<div class="ds-tab-panel" data-tab="${t.id}"${t.id===daySummaryTab?'':' hidden'}>${t.body}</div>`).join('')}
+    <div id="ds-issues" class="ds-issues"></div>
+  `;
+  el.querySelectorAll('.ds-tab').forEach(btn=>{
+    btn.onclick=()=>{
+      daySummaryTab=btn.dataset.tab;
+      el.querySelectorAll('.ds-tab').forEach(b=>{ const on=b===btn; b.classList.toggle('active',on); b.setAttribute('aria-selected',on); });
+      el.querySelectorAll('.ds-tab-panel').forEach(p=>{ p.hidden=p.dataset.tab!==daySummaryTab; });
+    };
+  });
+  el.style.display='block';
+}
+
+// sum: summarizePoints() 결과(zones/vehicles/startTime/endTime/count)
+// cached: 날짜 요약 모양(distanceKm/quality/collectionSec/driveSpanSec/conditionCells) — 없으면 '—'로 표시
+function daySummaryBodyHTML(sum,cached){
   const zoneChips=sum.zones.length
     ? sum.zones.map(([z])=>`<span class="ds-chip zone">${escapeHtml(z)}</span>`).join(' ')
     : '<span style="color:var(--text-faint);font-size:11px;">구역 정보 없음(이전 버전 기록)</span>';
@@ -241,8 +283,7 @@ function renderDaySummary(sum,cached){
   const fmtDuration=sec=>`${(sec/3600).toFixed(1)} h (${fmtNum(Math.round(sec/60))}분)`;
   const gapMinutes=(collectionSec!=null&&driveSec!=null)?Math.round((driveSec-collectionSec)/60):0;
 
-  el.innerHTML=`
-    <div class="ds-title">일자 요약</div>
+  return `
     <div class="ds-row"><span class="ds-label">운행 시간</span><span class="mono" style="font-size:12px;">${sum.startTime||'—'} → ${sum.endTime||'—'}</span></div>
     <div class="ds-row"><span class="ds-label">주행 거리</span><span class="mono" style="font-size:12px;">${distanceKm!=null?distanceKm.toFixed(1)+' km':'—'}</span></div>
     <div class="ds-row"><span class="ds-label">기록 수</span><span class="mono" style="font-size:12px;">${fmtNum(sum.count)}개</span></div>
@@ -253,9 +294,7 @@ function renderDaySummary(sum,cached){
     <div class="ds-row"><span class="ds-label">구역</span>${zoneChips}</div>
     <div class="ds-row"><span class="ds-label">차량</span>${vehicleChips}</div>
     ${dayConditionSectionsHTML(cached)}
-    <div id="ds-issues" class="ds-issues"></div>
   `;
-  el.style.display='block';
 }
 
 // 일자 요약의 조건 분포 — 날짜 요약에 저장된 조건 칸(conditionCells)만 더한다(원본 기록을 다시 읽지 않음).
