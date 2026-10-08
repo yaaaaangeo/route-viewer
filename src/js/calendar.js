@@ -207,7 +207,10 @@ async function openDayDetail(dateKey){
     showError(`${dateKey} 기록에는 지도에 표시할 GPS 좌표가 없어요.`);
     return;
   }
-  points=sorted;
+  dayAllPoints=sorted;
+  dayVehicleList=sortedDayVehicles(sorted);
+  if(!dayVehicleTabIds().includes(daySummaryTab)) daySummaryTab='all';
+  points=dayPointsForTab(daySummaryTab);
   currentSource='day';
   document.getElementById('chip-label').textContent='선택한 날짜:';
   document.getElementById('chip-filename').textContent=dateKey;
@@ -220,19 +223,66 @@ async function openDayDetail(dateKey){
   renderConsole();
 }
 
+// ── 날짜 상세의 차량 선택(일자 요약 탭 · 지도 탭 공용) ─────────────
+// 차량이 두 대 이상인 날은 "차량별 + 전체 합산"으로 나눠 본다. 탭 하나를 고르면
+// 일자 요약·지도·품질 패널·재생 테이프가 모두 그 차량(또는 전체)으로 바뀐다.
+// 탭 id 는 'veh:<차량명>' 또는 'all' — 다른 날짜로 넘어가도 같은 차량이 있으면 그대로 유지한다.
+let daySummaryTab='all';
+let dayAllPoints=[];
+let dayVehicleList=[]; // 그날 차량 이름(정렬) — '' 는 차량 정보 없는 기록
+
+function dayVehicleKey(p){ return p&&p.vehicle?String(p.vehicle):''; }
+function sortedDayVehicles(dayPoints){
+  const set=new Set((dayPoints||[]).map(dayVehicleKey));
+  return [...set].sort(compareVehicleNames);
+}
+function dayVehicleTabIds(){ return [...dayVehicleList.map(v=>'veh:'+v),'all']; }
+function dayVehicleLabel(v){ return v||'차량 정보 없음'; }
+function dayIsMultiVehicle(){ return currentSource==='day'&&dayVehicleList.length>1; }
+// 차량 색은 누적 지도와 같은 공용 색(core.js vehicleColor) — 같은 차량은 어느 날짜에서도 같은 색
+function dayVehicleColor(v){ return vehicleColor(v); }
+function dayVehicleSwatch(v){ return `<span class="veh-swatch" style="background:${dayVehicleColor(v)}"></span>`; }
+function dayPointsForTab(tabId){
+  if(!tabId||tabId==='all') return dayAllPoints;
+  const v=tabId.slice(4);
+  return dayAllPoints.filter(p=>dayVehicleKey(p)===v);
+}
+
+// 탭을 바꾼다 — 일자 요약은 보이는 칸만 바꾸고, 지도·품질·테이프는 그 차량 기록으로 다시 그린다
+function selectDayVehicleTab(tabId){
+  if(!dayVehicleTabIds().includes(tabId)) tabId='all';
+  daySummaryTab=tabId;
+  const el=document.getElementById('day-summary');
+  if(el){
+    el.querySelectorAll('.ds-tab').forEach(b=>{ const on=b.dataset.tab===tabId; b.classList.toggle('active',on); b.setAttribute('aria-selected',on); });
+    el.querySelectorAll('.ds-tab-panel').forEach(p=>{ p.hidden=p.dataset.tab!==tabId; });
+  }
+  if(playTimer){ clearInterval(playTimer); playTimer=null; document.getElementById('play-btn').textContent='▶'; }
+  points=dayPointsForTab(tabId);
+  renderConsole();
+}
+
+// 지도 위 차량 탭 — 차량이 한 대뿐이거나 파일을 바로 연 화면에서는 숨긴다(renderConsole 이 부른다)
+function renderMapVehicleTabs(){
+  const bar=document.getElementById('map-vehicle-tabs');
+  if(!bar) return;
+  if(!dayIsMultiVehicle()){ bar.hidden=true; bar.innerHTML=''; return; }
+  const counts=new Map();
+  dayAllPoints.forEach(p=>{ const v=dayVehicleKey(p); counts.set(v,(counts.get(v)||0)+1); });
+  const tab=(id,label,n,swatch,total)=>`<button type="button" role="tab" class="ds-tab${total?' total':''}${id===daySummaryTab?' active':''}" data-tab="${escapeHtml(id)}" aria-selected="${id===daySummaryTab}"${total?'':` style="--tab-c:${dayVehicleColor(id.slice(4))}"`}>${swatch}${escapeHtml(label)} <span class="ds-tab-n mono">${fmtNum(n)}</span></button>`;
+  bar.innerHTML='<span class="map-veh-title">지도 보기</span>'
+    +dayVehicleList.map(v=>tab('veh:'+v,dayVehicleLabel(v),counts.get(v)||0,dayVehicleSwatch(v))).join('')
+    +tab('all','전체 합산',dayAllPoints.length,dayVehicleList.map(dayVehicleSwatch).join(''),true);
+  bar.querySelectorAll('.ds-tab').forEach(btn=>{ btn.onclick=()=>selectDayVehicleTab(btn.dataset.tab); });
+  bar.hidden=false;
+}
+
 // 일자 요약 — 차량이 여러 대면 "차량별 탭 + 전체 합산 탭"으로 나눠 보여준다.
 // 전체 합산은 DB 날짜 요약(cached) 그대로, 차량별은 이미 불러온 그 하루치 원본(sorted)을
 // 차량으로 나눠 buildDaySummaryFromPoints(core.js)로 그 자리에서 만든다 — 규칙이 같아서 합이 맞는다.
-let daySummaryTab='all';
 function renderDaySummary(sorted,cached){
   const el=document.getElementById('day-summary');
-  const byVehicle=new Map();
-  for(const p of sorted){
-    const v=p.vehicle?String(p.vehicle):'';
-    if(!byVehicle.has(v)) byVehicle.set(v,[]);
-    byVehicle.get(v).push(p);
-  }
-  const vehicles=[...byVehicle.keys()].sort((a,b)=>(a===''?1:0)-(b===''?1:0)||a.localeCompare(b,'ko',{numeric:true}));
+  const vehicles=sortedDayVehicles(sorted);
   const allBody=daySummaryBodyHTML(summarizePoints(sorted),cached);
   if(vehicles.length<2){
     el.innerHTML=`<div class="ds-title">일자 요약</div>${allBody}<div id="ds-issues" class="ds-issues"></div>`;
@@ -240,26 +290,20 @@ function renderDaySummary(sorted,cached){
     return;
   }
   const cfg=currentClassificationConfig();
-  const tabs=vehicles.map((v,i)=>{
-    const pts=byVehicle.get(v);
-    return {id:'v'+i,label:v||'차량 정보 없음',count:pts.length,
+  const tabs=vehicles.map(v=>{
+    const pts=sorted.filter(p=>dayVehicleKey(p)===v);
+    return {id:'veh:'+v,label:dayVehicleLabel(v),count:pts.length,color:dayVehicleColor(v),swatch:dayVehicleSwatch(v),
       body:daySummaryBodyHTML(summarizePoints(pts),window.buildDaySummaryFromPoints(pts,cfg))};
   });
-  tabs.push({id:'all',label:'전체 합산',count:sorted.length,body:allBody,total:true});
+  tabs.push({id:'all',label:'전체 합산',count:sorted.length,swatch:'',body:allBody,total:true});
   if(!tabs.some(t=>t.id===daySummaryTab)) daySummaryTab='all';
   el.innerHTML=`
-    <div class="ds-title">일자 요약 <span class="ds-hint">차량 ${vehicles.length}대</span></div>
-    <div class="ds-tabs" role="tablist">${tabs.map(t=>`<button type="button" role="tab" class="ds-tab${t.total?' total':''}${t.id===daySummaryTab?' active':''}" data-tab="${t.id}" aria-selected="${t.id===daySummaryTab}">${escapeHtml(t.label)} <span class="ds-tab-n mono">${fmtNum(t.count)}</span></button>`).join('')}</div>
-    ${tabs.map(t=>`<div class="ds-tab-panel" data-tab="${t.id}"${t.id===daySummaryTab?'':' hidden'}>${t.body}</div>`).join('')}
+    <div class="ds-title">일자 요약 <span class="ds-hint">차량 ${vehicles.length}대 · 탭을 고르면 지도도 같이 바뀌어요</span></div>
+    <div class="ds-tabs" role="tablist">${tabs.map(t=>`<button type="button" role="tab" class="ds-tab${t.total?' total':''}${t.id===daySummaryTab?' active':''}" data-tab="${escapeHtml(t.id)}" aria-selected="${t.id===daySummaryTab}"${t.color?` style="--tab-c:${t.color}"`:''}>${t.swatch}${escapeHtml(t.label)} <span class="ds-tab-n mono">${fmtNum(t.count)}</span></button>`).join('')}</div>
+    ${tabs.map(t=>`<div class="ds-tab-panel" data-tab="${escapeHtml(t.id)}"${t.id===daySummaryTab?'':' hidden'}>${t.body}</div>`).join('')}
     <div id="ds-issues" class="ds-issues"></div>
   `;
-  el.querySelectorAll('.ds-tab').forEach(btn=>{
-    btn.onclick=()=>{
-      daySummaryTab=btn.dataset.tab;
-      el.querySelectorAll('.ds-tab').forEach(b=>{ const on=b===btn; b.classList.toggle('active',on); b.setAttribute('aria-selected',on); });
-      el.querySelectorAll('.ds-tab-panel').forEach(p=>{ p.hidden=p.dataset.tab!==daySummaryTab; });
-    };
-  });
+  el.querySelectorAll('.ds-tab').forEach(btn=>{ btn.onclick=()=>selectDayVehicleTab(btn.dataset.tab); });
   el.style.display='block';
 }
 

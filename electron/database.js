@@ -797,6 +797,7 @@ class RouteDatabase {
     if (filter.fromDate || filter.toDate) where.push(DATE_ONLY_SQL);
     if (filter.fromDate) { where.push('date >= ?'); params.push(filter.fromDate); }
     if (filter.toDate) { where.push('date <= ?'); params.push(filter.toDate); }
+    if (filter.vehicle && filter.vehicle !== 'all') { where.push('vehicle = ?'); params.push(filter.vehicle); }
     if (filter.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + filter.vehicleLike + '%'); }
     const issueSql = issueFilterSql(filter.issueFilter, this.hasIssueImports());
     if (issueSql) where.push(issueSql);
@@ -1761,6 +1762,7 @@ class RouteDatabase {
     if (box && (box.fromDate || box.toDate)) where.push(DATE_ONLY_SQL);
     if (box && box.fromDate) { where.push('date >= ?'); params.push(box.fromDate); }
     if (box && box.toDate) { where.push('date <= ?'); params.push(box.toDate); }
+    if (box && box.vehicle && box.vehicle !== 'all') { where.push('vehicle = ?'); params.push(box.vehicle); }
     if (box && box.vehicleLike) { where.push('vehicle LIKE ?'); params.push('%' + box.vehicleLike + '%'); }
     // 이슈 필터는 GPS 방문 데이터에만 건다 — 구역 경계·도로/건물 Geometry 는 이 필터와 무관하다(화면에서 따로 캐시)
     const visitIssueSql = box ? issueFilterSql(box.issueFilter, this.hasIssueImports()) : '';

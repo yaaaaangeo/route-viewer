@@ -129,6 +129,8 @@
   <div id="accum-view">
     <div id="accum-status"></div>
     <div id="accum-stats"></div>
+    <!-- 차량별 / 전체 누적 선택(accum.js renderAccumVehicleTabs) — 차량이 두 대 이상일 때만 보인다 -->
+    <div id="accum-vehicle-tabs" class="ds-tabs map-veh-tabs" role="tablist" hidden></div>
     <div id="zone-filter-group">
       <div id="zone-filter-buttons" class="zone-filter-buttons"></div>
       <span style="flex:1;"></span>
@@ -366,6 +368,8 @@
       <div class="stat-cell"><div class="k">총 이동거리</div><div class="v" id="stat-dist">—</div></div>
     </div>
 
+    <!-- 차량이 여러 대인 날짜: 차량별 / 전체 합산 지도 선택(calendar.js renderMapVehicleTabs) -->
+    <div id="map-vehicle-tabs" class="ds-tabs map-veh-tabs" role="tablist" hidden></div>
     <div id="map-wrap"><div id="map"></div></div>
 
     <div id="tape-panel">

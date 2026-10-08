@@ -1461,6 +1461,7 @@ async function computeZoneCoverageCells(zoneName,options){
     cells,
     dateFrom:dateFilter.fromDate||'',
     dateTo:dateFilter.toDate||'',
+    vehicle:dateFilter.vehicle||'',
     // 지도 데이터(건물/도로)를 못 받아 대체값으로 만든 Geometry였거나 수동 셀을 못 읽었으면
     // 임시 결과다 — 다음에 누적 지도에 들어올 때 버리고 다시 계산한다.
     cacheable:!geometry.degraded&&committedManualCellsByZone.has(zoneName),
@@ -1720,6 +1721,8 @@ function coverageCalcKey(zoneName){
     zone:zoneName,
     dateFrom:normalizeAccumDate(accumDateFrom),
     dateTo:normalizeAccumDate(accumDateTo),
+    // 차량 탭이 다르면 방문한 칸도 다르다
+    vehicle:accumVehicleFilter,
     polygonRevision:polygonRevision(ZONE_POLYGONS[zoneName]),
     dataRevision:coverageDataRevision,
     manualOverrideRevision:coverageZoneRevisions[zoneName]||0,
@@ -1748,7 +1751,7 @@ function coverageZonesInView(){
 
 // 지금 누적 지도에 "무엇이 그려져 있어야 하는지"를 나타내는 키
 function accumViewKey(){
-  const base=[showCoverageGaps?'coverage':'density',accumZoneFilter,accumDateFrom,accumDateTo,coverageDataRevision,ACTIVE_ZONE_NAMES.join('|'),currentIssueFilter()];
+  const base=[showCoverageGaps?'coverage':'density',accumZoneFilter,accumDateFrom,accumDateTo,accumVehicleFilter,coverageDataRevision,ACTIVE_ZONE_NAMES.join('|'),currentIssueFilter()];
   if(!showCoverageGaps) return JSON.stringify(base);
   return JSON.stringify(base.concat([showCoverageDepth,showExclusionDebug,depthTierSignature(),coverageZonesInView().map(coverageCalcKey)]));
 }
@@ -1812,11 +1815,11 @@ async function calculateCoverage(zoneName){
 }
 
 // 추천 주행(recommend-view.js)이 쓰는 구역별 Coverage 요약을 저장한다. 전체 기간으로 계산한 결과만 —
-// 날짜 필터가 걸린 계산은 그 구역의 전체 Coverage 가 아니다. 도로·건물 데이터나 수동 셀을 못 읽은 임시
+// 날짜 필터·차량 탭이 걸린 계산은 그 구역의 전체 Coverage 가 아니다. 도로·건물 데이터나 수동 셀을 못 읽은 임시
 // 결과(cacheable=false)는 provisional 로 표시해서 저장한다(추천 신뢰도에서 낮춤).
 // 저장소가 저장 시점의 데이터·경계·수동 셀 지문을 같이 적어서, 그 뒤 무엇이 바뀌면 추천에서 "오래됨"으로 뺀다.
 function saveCoverageSnapshotFor(zoneName,result){
-  if(!result||result.dateFrom||result.dateTo||!Array.isArray(result.cells)) return;
+  if(!result||result.dateFrom||result.dateTo||result.vehicle||!Array.isArray(result.cells)) return;
   if(typeof RouteDB==='undefined'||typeof RouteDB.saveCoverageSnapshot!=='function') return;
   let total=0,visited=0;
   result.cells.forEach(c=>{ if(c.state!=='valid') return; total++; if(c.visits>0) visited++; });
@@ -1927,22 +1930,54 @@ function hideCoveragePanels(){
 let accumZoneFilter='all';
 let accumCells=[]; // renderAccumView가 만든 격자 셀 목록 — 원 그리기와 호버 툴팁이 "같은" 이 데이터를 공유한다
 
+// 차량 탭(차량별 / 전체 누적) — 'all' 이면 모든 차량. 밀도 지도·통계·Coverage 방문 집계에 같이 걸린다.
+let accumVehicleFilter='all';
+
 // 현재 구역 필터를 DB 조회 조건으로
 function accumFilter(){
   const filter=accumZoneFilter==='all' ? {} : {zone:accumZoneFilter};
   if(accumDateFrom) filter.fromDate=accumDateFrom;
   if(accumDateTo) filter.toDate=accumDateTo;
+  if(accumVehicleFilter!=='all') filter.vehicle=accumVehicleFilter;
   if(issueFilterActive()) filter.issueFilter=currentIssueFilter();
   return filter;
 }
 
-// Coverage 방문 집계용 — 구역은 폴리곤으로 따로 자르므로 날짜와 데이터 상태만 넘긴다
+// Coverage 방문 집계용 — 구역은 폴리곤으로 따로 자르므로 날짜·차량·데이터 상태만 넘긴다
 function accumDateFilter(){
   const filter={};
   if(accumDateFrom) filter.fromDate=accumDateFrom;
   if(accumDateTo) filter.toDate=accumDateTo;
+  if(accumVehicleFilter!=='all') filter.vehicle=accumVehicleFilter;
   if(issueFilterActive()) filter.issueFilter=currentIssueFilter();
   return filter;
+}
+
+// 차량 탭 — 기록이 있는 차량마다 한 칸 + 맨 끝 "전체 누적". 차량이 하나뿐이면 숨긴다.
+function renderAccumVehicleTabs(){
+  const bar=document.getElementById('accum-vehicle-tabs');
+  if(!bar) return;
+  const names=knownVehicleNames();
+  if(accumVehicleFilter!=='all'&&!names.includes(accumVehicleFilter)) accumVehicleFilter='all';
+  if(names.length<2&&accumVehicleFilter==='all'){ bar.hidden=true; bar.innerHTML=''; return; }
+  const tab=(value,label,swatch,color)=>{
+    const on=value===accumVehicleFilter;
+    return `<button type="button" role="tab" class="ds-tab${value==='all'?' total':''}${on?' active':''}" data-vehicle="${escapeHtml(value)}" aria-selected="${on}"${color?` style="--tab-c:${color}"`:''}>${swatch}${escapeHtml(label)}</button>`;
+  };
+  const sw=v=>`<span class="veh-swatch" style="background:${vehicleColor(v)}"></span>`;
+  bar.innerHTML='<span class="map-veh-title">차량</span>'
+    +names.map(v=>tab(v,v,sw(v),vehicleColor(v))).join('')
+    +tab('all','전체 누적',names.map(sw).join(''),'');
+  bar.querySelectorAll('.ds-tab').forEach(btn=>{ btn.onclick=()=>setAccumVehicle(btn.dataset.vehicle); });
+  bar.hidden=false;
+}
+
+function setAccumVehicle(vehicle){
+  const next=vehicle||'all';
+  if(next===accumVehicleFilter) return;
+  accumVehicleFilter=next;
+  renderAccumVehicleTabs();
+  renderAccumView();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2125,7 +2160,7 @@ function accumMapModeLabel(){
 
 function buildMapCaptureFileName(now){
   return MapCapture.buildCaptureFileName({
-    zone:accumZoneFilter==='all'?'전체구역':accumZoneFilter,
+    zone:(accumZoneFilter==='all'?'전체구역':accumZoneFilter)+(accumVehicleFilter!=='all'?'-'+accumVehicleFilter:''),
     dateFrom:accumDateFrom,
     dateTo:accumDateTo,
     mode:accumMapModeLabel(),
@@ -2498,6 +2533,7 @@ function refreshAccumUI(){
   normalizeAccumZoneFilter();
   renderFilterButtons('zone-filter-buttons',ACTIVE_ZONE_NAMES.map(z=>({value:z,label:z})),'zone',setAccumZone,false);
   styleZoneButtons('zone-filter-group',accumZoneFilter);
+  renderAccumVehicleTabs();
   renderIssueFilterButtons('accum-issue-filter');
   updateBoundaryUI();
   updateAccumDateFilterUI();
@@ -2657,7 +2693,8 @@ async function renderAccumViewInner(token){
 
   if(cells.length){
     const maxN=Math.max(...cells.map(c=>c.n),1);
-    const dotColor=accumZoneFilter!=='all'&&ZONE_COLORS[accumZoneFilter] ? ZONE_COLORS[accumZoneFilter] : '#4fd8c7';
+    const dotColor=accumVehicleFilter!=='all' ? vehicleColor(accumVehicleFilter)
+      : accumZoneFilter!=='all'&&ZONE_COLORS[accumZoneFilter] ? ZONE_COLORS[accumZoneFilter] : '#4fd8c7';
     let issueCells=0;
     const showIssueGray=currentIssueFilter()!=='clean';
     cells.forEach(c=>{

@@ -256,6 +256,33 @@ function renderFilterButtons(containerId,items,dataAttr,onSelect,includeAll){
   (items||[]).forEach(it=>el.appendChild(mk(it.value,it.label)));
 }
 
+// ── 차량 색(달력 날짜 상세 · 누적 지도 공용) ─────────────────────
+// 차량 순서는 저장된 날짜 요약에 나온 차량 이름 전체를 정렬한 것 — 그래서 같은 차량은
+// 어느 화면·어느 날짜에서 봐도 같은 색이다. 시작(초록)·종료/점프(빨강)·공백(주황)과 겹치지 않는 색만.
+// [설정] 차량 관리에서 색을 정해 둔 차량은 그 색(statistics.js VEHICLE_COLORS — 통계 탭과 같은 색).
+const VEHICLE_PALETTE=['#4fd8c7','#5b9cff','#ff7eb6','#b48cff','#e6d35a','#7fe0ff'];
+const NO_VEHICLE_COLOR='#8a94a8';
+function compareVehicleNames(a,b){
+  return (a===''?1:0)-(b===''?1:0)||String(a).localeCompare(String(b),'ko',{numeric:true});
+}
+// 기록이 있는 차량 이름(정렬) — 달력이 읽어 둔 날짜 요약(calendar.js dateSummaryIndex)에서 모은다
+function knownVehicleNames(){
+  const set=new Set();
+  if(typeof dateSummaryIndex!=='undefined') dateSummaryIndex.forEach(sum=>{
+    (sum&&sum.vehicles||[]).forEach(([v])=>{ if(v) set.add(String(v)); });
+  });
+  return [...set].sort(compareVehicleNames);
+}
+function vehicleColor(name){
+  const v=name?String(name):'';
+  if(!v) return NO_VEHICLE_COLOR;
+  if(typeof VEHICLE_COLORS!=='undefined'&&VEHICLE_COLORS&&VEHICLE_COLORS[v]) return VEHICLE_COLORS[v];
+  const names=knownVehicleNames();
+  let i=names.indexOf(v);
+  if(i<0) i=names.length; // 아직 요약에 없는 차량 — 마지막 다음 색
+  return VEHICLE_PALETTE[i%VEHICLE_PALETTE.length];
+}
+
 function calGoToday(){ calMonth=new Date(); renderCalendarGrid(); }
 function calShiftMonth(delta){
   calMonth=new Date(calMonth.getFullYear(),calMonth.getMonth()+delta,1);

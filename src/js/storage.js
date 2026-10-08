@@ -326,6 +326,7 @@
       if (filter.fromDate && !(v.date >= filter.fromDate)) return false;
       if (filter.toDate && !(v.date <= filter.toDate)) return false;
       if (filter.zone && filter.zone !== 'all' && v.zone !== filter.zone) return false;
+      if (filter.vehicle && filter.vehicle !== 'all' && String(v.vehicle || '') !== filter.vehicle) return false;
       if (filter.vehicleLike && String(v.vehicle || '').indexOf(filter.vehicleLike) < 0) return false;
       return true;
     }

@@ -62,17 +62,26 @@ function renderConsole(){
   setTimeout(()=>map.invalidateSize(),60);
 
   routeLayer.clearLayers();
+  // 날짜 상세에서 차량이 여러 대인 날은 차량마다 색을 나눈다(calendar.js 차량 탭과 같은 색)
+  const multiVehicle=typeof dayIsMultiVehicle==='function'&&dayIsMultiVehicle();
+  if(typeof renderMapVehicleTabs==='function') renderMapVehicleTabs();
+  const routeColor=p=>multiVehicle?dayVehicleColor(p.vehicle):'#4fd8c7';
   const latlngs=points.map(p=>[p.lat,p.lng]);
   buildReplayRouteSegments(points).forEach(segment=>{
-    L.polyline(segment.map(p=>[p.lat,p.lng]),{color:'#4fd8c7',weight:4,opacity:.85}).addTo(routeLayer);
+    L.polyline(segment.map(p=>[p.lat,p.lng]),{color:routeColor(segment[0]),weight:4,opacity:.85}).addTo(routeLayer);
   });
   addVehicleStorageMarker(map,routeLayer);
 
   const start=points[0], end=points[points.length-1];
-  L.circleMarker([start.lat,start.lng],{radius:8,color:'#5fd88a',fillColor:'#5fd88a',fillOpacity:1,weight:2})
-    .bindPopup(`시작 · ${start.time||'—'}${start.place?('<br/>'+start.place):''}`).addTo(routeLayer);
-  L.circleMarker([end.lat,end.lng],{radius:8,color:'#ff6b6b',fillColor:'#ff6b6b',fillOpacity:1,weight:2})
-    .bindPopup(`종료 · ${end.time||'—'}${end.place?('<br/>'+end.place):''}`).addTo(routeLayer);
+  // 시작·종료 표시도 차량마다 — 여러 대를 같이 보면 차량별 첫 기록·마지막 기록에 찍고 테두리를 차량 색으로
+  for(const part of vehicleIndexPartitions(points)){
+    const s=points[part[0]], e=points[part[part.length-1]];
+    const who=multiVehicle?`${escapeHtml(s.vehicle||'차량 정보 없음')} · `:'';
+    L.circleMarker([s.lat,s.lng],{radius:8,color:multiVehicle?routeColor(s):'#5fd88a',fillColor:'#5fd88a',fillOpacity:1,weight:multiVehicle?3:2})
+      .bindPopup(`${who}시작 · ${s.time||'—'}${s.place?('<br/>'+s.place):''}`).addTo(routeLayer);
+    L.circleMarker([e.lat,e.lng],{radius:8,color:multiVehicle?routeColor(e):'#ff6b6b',fillColor:'#ff6b6b',fillOpacity:1,weight:multiVehicle?3:2})
+      .bindPopup(`${who}종료 · ${e.time||'—'}${e.place?('<br/>'+e.place):''}`).addTo(routeLayer);
+  }
 
   playheadMarker=L.marker([start.lat,start.lng],{
     icon:L.divIcon({className:'playhead-icon',iconSize:[16,16]})
