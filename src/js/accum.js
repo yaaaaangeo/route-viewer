@@ -1845,7 +1845,10 @@ function onRouteDataChanged(evt){
     invalidateCoverage('manual-cells',args[0]);
   }else if(method==='setSettings'){
     // 교통 시간대·일출/일몰 범위만 바꾼 저장은 Coverage 와 무관하다 — 무거운 재계산을 일으키지 않는다
-    if(!(typeof TimeConditions!=='undefined'&&TimeConditions.isClassificationOnlyPatch(args[0]))) invalidateCoverage('settings');
+    // 접근 권한 명단(allowedUsers)만 바꾼 저장도 지도와 무관하다
+    const keys=Object.keys(args[0]||{});
+    const accessOnly=keys.length>0&&keys.every(k=>k==='allowedUsers');
+    if(!accessOnly&&!(typeof TimeConditions!=='undefined'&&TimeConditions.isClassificationOnlyPatch(args[0]))) invalidateCoverage('settings');
   }
   // saveZonePolygons/saveZone/setZoneActive 는 따로 무효화하지 않는다 — 경계 모양(polygon
   // 해시)과 활성 구역 목록이 이미 캐시 키/화면 키에 들어 있어서 바뀐 구역만 새로 계산된다.

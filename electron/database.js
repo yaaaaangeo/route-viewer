@@ -299,6 +299,11 @@ class RouteDatabase {
       issue_created_at: "TEXT NOT NULL DEFAULT ''",
       issue_updated_at: "TEXT NOT NULL DEFAULT ''",
       issue_conflict_json: "TEXT NOT NULL DEFAULT ''",
+      // 어디서 들어왔는지('' 직접 불러오기 · 'auto' 폴더 자동 가져오기)와 "사람이 아직 안 봤다" 표시.
+      // 직접 불러오기는 저장 전 확인 창에서 사람이 이슈 여부를 답하므로 0, 자동 가져오기는 1 로 들어오고
+      // 이슈를 등록·수정하거나 [검토 완료]를 누르면 0 이 된다. 이슈 마스크(필터)와는 무관한 표시다.
+      import_source: "TEXT NOT NULL DEFAULT ''",
+      needs_review: 'INTEGER NOT NULL DEFAULT 0',
     });
     // 이슈 컬럼을 추가한 뒤에 인덱스를 만든다(예전 DB 는 이 컬럼이 없어서 먼저 만들 수 없다)
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_imports_issue ON imports(has_issue, issue_status);');
@@ -329,6 +334,40 @@ class RouteDatabase {
         );
       `);
     });
+
+    // 주행기록 자동 가져오기(electron/auto-import.js) — 감시 폴더의 파일별 처리 이력.
+    // 원본 파일 경로(대소문자 무시 키)마다 한 줄. 내용 지문(content_hash)은 imports.file_hash 와 같은
+    // SHA-1 이라 "같은 내용이면 이름·경로가 달라도 다시 넣지 않는다"를 수동 불러오기 이력까지 포함해 판정한다.
+    // 공유 폴더에서 파일이 사라져도 이 행과 주행 기록은 지우지 않고 missing 만 표시한다.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS auto_import_files (
+        path_key        TEXT PRIMARY KEY,
+        folder          TEXT NOT NULL DEFAULT '',
+        rel_path        TEXT NOT NULL DEFAULT '',
+        name            TEXT NOT NULL DEFAULT '',
+        size            INTEGER NOT NULL DEFAULT 0,
+        mtime_ms        REAL NOT NULL DEFAULT 0,
+        content_hash    TEXT NOT NULL DEFAULT '',
+        status          TEXT NOT NULL DEFAULT '',
+        reason          TEXT NOT NULL DEFAULT '',
+        retryable       INTEGER NOT NULL DEFAULT 0,
+        retry_requested INTEGER NOT NULL DEFAULT 0,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        import_id       INTEGER,
+        duplicate_of    TEXT NOT NULL DEFAULT '',
+        dates           TEXT NOT NULL DEFAULT '',
+        vehicles        TEXT NOT NULL DEFAULT '',
+        total_records   INTEGER NOT NULL DEFAULT 0,
+        inserted        INTEGER NOT NULL DEFAULT 0,
+        duplicates      INTEGER NOT NULL DEFAULT 0,
+        first_seen_at   TEXT NOT NULL DEFAULT '',
+        last_seen_at    TEXT NOT NULL DEFAULT '',
+        processed_at    TEXT NOT NULL DEFAULT '',
+        missing         INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_aif_folder ON auto_import_files(folder, status);
+      CREATE INDEX IF NOT EXISTS idx_aif_hash   ON auto_import_files(content_hash);
+    `);
 
     // 예전 DB 에 issue_mask 컬럼을 새로 붙였으면 한 번만 전부 계산해 둔다
     if (this._ensureColumns('driving_records', { issue_mask: 'INTEGER NOT NULL DEFAULT 0' }).added.length) {
@@ -588,11 +627,13 @@ class RouteDatabase {
         `INSERT INTO imports
            (filename, file_hash, imported_at, imported_by, dates, vehicle, distance_km,
             total_records, inserted_records, duplicate_records, conflict_records, conflicts_json,
-            has_issue, issue_note, issue_status, issue_created_at, issue_updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            has_issue, issue_note, issue_status, issue_created_at, issue_updated_at,
+            import_source, needs_review)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [filename, fileHash, importedAt, importedBy, [...dates].sort().join(','), vehicle, distanceKm,
           normalized.length, inserted, duplicates, conflicts.length, JSON.stringify(conflicts.slice(0, 500)),
-          issue.hasIssue ? 1 : 0, issue.issueNote, issue.issueStatus, issueAt, issue.hasIssue ? (meta.issueUpdatedAt || issueAt) : '']
+          issue.hasIssue ? 1 : 0, issue.issueNote, issue.issueStatus, issueAt, issue.hasIssue ? (meta.issueUpdatedAt || issueAt) : '',
+          String(meta.importSource || ''), meta.needsReview ? 1 : 0]
       );
       importId = (this.db.get('SELECT last_insert_rowid() AS id') || {}).id;
       // 출처 관계 — 중복이라 새로 넣지 않은 레코드도 "이 파일에서도 나왔다"를 남긴다.
@@ -616,9 +657,12 @@ class RouteDatabase {
       throw err;
     }
 
-    // 영향 받은 날짜의 요약만 다시 계산
-    const classification = this._classificationConfig();
-    for (const d of dates) this._rebuildDateSummary(d, classification);
+    // 영향 받은 날짜의 요약만 다시 계산. 여러 파일을 한 번에 넣는 쪽(자동 가져오기)은
+    // deferSummaries 로 미뤄 두고 배치가 끝난 뒤 rebuildDateSummaries 로 날짜마다 한 번만 만든다.
+    if (!meta.deferSummaries) {
+      const classification = this._classificationConfig();
+      for (const d of dates) this._rebuildDateSummary(d, classification);
+    }
 
     const duplicates = normalized.length - inserted;
     return {
@@ -665,6 +709,14 @@ class RouteDatabase {
                                        summary_json = excluded.summary_json`,
       [date, rows.length, JSON.stringify(summary)]
     );
+  }
+
+  // 주어진 날짜들의 요약만 다시 만든다(중복 날짜는 한 번만)
+  rebuildDateSummaries(dates) {
+    const list = [...new Set((dates || []).filter(Boolean))].sort();
+    const classification = this._classificationConfig();
+    for (const d of list) this._rebuildDateSummary(d, classification);
+    return list;
   }
 
   rebuildAllSummaries() {
@@ -1609,7 +1661,8 @@ class RouteDatabase {
               duplicate_records AS duplicates, conflict_records AS conflicts,
               has_issue AS hasIssue, issue_note AS issueNote, issue_status AS issueStatus,
               issue_created_at AS issueCreatedAt, issue_updated_at AS issueUpdatedAt,
-              issue_conflict_json AS issueConflictJson
+              issue_conflict_json AS issueConflictJson,
+              import_source AS importSource, needs_review AS needsReview
               ${o.withRelatedRecords ? ', (SELECT COUNT(*) FROM record_sources rs WHERE rs.import_id = imports.id) AS relatedRecords' : ''}
          FROM imports ${clause} ORDER BY id DESC LIMIT ?`,
       [...params, limit]
@@ -1633,8 +1686,10 @@ class RouteDatabase {
     });
     const now = new Date().toISOString();
     const createdAt = next.hasIssue ? (row.issueCreatedAt || now) : row.issueCreatedAt; // 이슈가 있었던 사실은 지우지 않는다
+    // 사람이 이 파일의 이슈를 등록·수정·해제했거나 [검토 완료]({reviewed:true})를 눌렀다 — 검토 전 표시를 내린다
     this.db.run(
-      `UPDATE imports SET has_issue = ?, issue_note = ?, issue_status = ?, issue_created_at = ?, issue_updated_at = ?
+      `UPDATE imports SET has_issue = ?, issue_note = ?, issue_status = ?, issue_created_at = ?, issue_updated_at = ?,
+              needs_review = 0
         WHERE id = ?`,
       [next.hasIssue ? 1 : 0, next.issueNote, next.issueStatus, createdAt || '', now, importId]
     );
@@ -1651,6 +1706,7 @@ class RouteDatabase {
               has_issue AS hasIssue, issue_note AS issueNote, issue_status AS issueStatus,
               issue_created_at AS issueCreatedAt, issue_updated_at AS issueUpdatedAt,
               issue_conflict_json AS issueConflictJson,
+              import_source AS importSource, needs_review AS needsReview,
               (SELECT COUNT(*) FROM record_sources rs WHERE rs.import_id = imports.id) AS relatedRecords
          FROM imports WHERE id = ?`, [importId]);
     return rows.length ? normalizeImportRow(rows[0]) : null;
@@ -1673,7 +1729,8 @@ class RouteDatabase {
       `SELECT i.id AS id, i.filename AS filename, i.imported_at AS importedAt, i.imported_by AS importedBy,
               i.vehicle AS vehicle, i.has_issue AS hasIssue, i.issue_note AS issueNote, i.issue_status AS issueStatus,
               i.issue_created_at AS issueCreatedAt, i.issue_updated_at AS issueUpdatedAt,
-              i.issue_conflict_json AS issueConflictJson, COUNT(*) AS recordCount
+              i.issue_conflict_json AS issueConflictJson,
+              i.import_source AS importSource, i.needs_review AS needsReview, COUNT(*) AS recordCount
          FROM record_sources rs
          JOIN driving_records dr ON dr.record_hash = rs.record_hash
          JOIN imports i ON i.id = rs.import_id
@@ -1806,6 +1863,125 @@ class RouteDatabase {
   // 이 값들은 server.js 를 띄운 주소를 기억해뒀다가, "지금 동기화"를
   // 누르면(또는 시작할 때 자동으로) 서버와 기록을 주고받는 데 쓴다.
   // 같은 주소는 앱 자동 업데이트 배포 주소로도 함께 쓰인다(<주소>/updates).
+  // ══════════════════════════════════════════════════════
+  //  주행기록 자동 가져오기 — 설정과 파일별 처리 이력(electron/auto-import.js 가 쓴다)
+  // ══════════════════════════════════════════════════════
+  getAutoImportConfig() {
+    try { return JSON.parse(this.getMeta('auto_import_config', '{}')) || {}; } catch (_) { return {}; }
+  }
+
+  setAutoImportConfig(patch) {
+    const next = { ...this.getAutoImportConfig(), ...(patch || {}) };
+    this.setMeta('auto_import_config', JSON.stringify(next));
+    return next;
+  }
+
+  getAutoImportFile(pathKey) {
+    return this.db.get('SELECT * FROM auto_import_files WHERE path_key = ?', [pathKey]) || null;
+  }
+
+  // 행 하나를 통째로 쓴다(없으면 추가). row 의 키는 테이블 컬럼 이름 그대로.
+  saveAutoImportFile(row) {
+    const cols = ['path_key', 'folder', 'rel_path', 'name', 'size', 'mtime_ms', 'content_hash', 'status', 'reason',
+      'retryable', 'retry_requested', 'attempts', 'import_id', 'duplicate_of', 'dates', 'vehicles',
+      'total_records', 'inserted', 'duplicates', 'first_seen_at', 'last_seen_at', 'processed_at', 'missing'];
+    const prev = this.getAutoImportFile(row.path_key) || {};
+    const merged = { ...prev, ...row };
+    const values = cols.map(c => {
+      const v = merged[c];
+      if (c === 'import_id') return v == null ? null : Number(v);
+      if (v === undefined || v === null) return ['size', 'mtime_ms', 'retryable', 'retry_requested', 'attempts',
+        'total_records', 'inserted', 'duplicates', 'missing'].includes(c) ? 0 : '';
+      return typeof v === 'boolean' ? (v ? 1 : 0) : v;
+    });
+    this.db.run(
+      `INSERT INTO auto_import_files (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})
+       ON CONFLICT(path_key) DO UPDATE SET ${cols.slice(1).map(c => `${c} = excluded.${c}`).join(', ')}`,
+      values
+    );
+    return this.getAutoImportFile(row.path_key);
+  }
+
+  listAutoImportFiles(folder, limit = 300) {
+    return this.db.all(
+      `SELECT f.*, i.needs_review AS needs_review, i.has_issue AS has_issue, i.issue_status AS issue_status
+         FROM auto_import_files f LEFT JOIN imports i ON i.id = f.import_id
+        WHERE f.folder = ?
+        ORDER BY CASE f.status WHEN 'failed' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                 COALESCE(NULLIF(f.processed_at, ''), f.last_seen_at) DESC, f.rel_path
+        LIMIT ?`, [folder, limit]);
+  }
+
+  autoImportCounts(folder) {
+    const out = { imported: 0, already: 0, failed: 0, pending: 0, baseline: 0, missing: 0, total: 0 };
+    this.db.all(
+      `SELECT status, missing, COUNT(*) AS n FROM auto_import_files WHERE folder = ? GROUP BY status, missing`, [folder]
+    ).forEach(r => {
+      out.total += r.n;
+      if (r.missing) { out.missing += r.n; return; }
+      if (r.status in out) out[r.status] += r.n;
+    });
+    return out;
+  }
+
+  // Google Drive 폴더에서 "어느 날짜 주행분까지 들어와 있나" — 반영/이미 처리된 파일들의 가장 늦은 주행 날짜와
+  // 마지막으로 새 파일을 반영한 시각. 폴더에서 사라진 파일도 기록은 DB 에 있으므로 포함한다.
+  autoImportLatest(folder) {
+    const rows = this.db.all(
+      `SELECT name, dates, status, processed_at AS processedAt FROM auto_import_files
+        WHERE folder = ? AND status IN ('imported', 'already')`, [folder]);
+    let latestDate = null, latestDateFile = null, lastNewFileAt = null, lastNewFileName = null;
+    rows.forEach(r => {
+      String(r.dates || '').split(',').forEach(d => {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d) && (!latestDate || d > latestDate)) { latestDate = d; latestDateFile = r.name; }
+      });
+      if (r.status === 'imported' && r.processedAt && (!lastNewFileAt || r.processedAt > lastNewFileAt)) {
+        lastNewFileAt = r.processedAt; lastNewFileName = r.name;
+      }
+    });
+    return { latestDate, latestDateFile, lastNewFileAt, lastNewFileName };
+  }
+
+  // 이번 스캔에서 본 파일은 missing 을 내리고, 못 본 파일은 올린다(행·기록은 지우지 않는다)
+  markAutoImportSeen(folder, seenKeys) {
+    const seen = new Set(seenKeys || []);
+    const rows = this.db.all('SELECT path_key, missing FROM auto_import_files WHERE folder = ?', [folder]);
+    let missing = 0;
+    this.db.run('BEGIN');
+    try {
+      rows.forEach(r => {
+        const want = seen.has(r.path_key) ? 0 : 1;
+        if (want) missing++;
+        if (want !== r.missing) this.db.run('UPDATE auto_import_files SET missing = ? WHERE path_key = ?', [want, r.path_key]);
+      });
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    return missing;
+  }
+
+  // 실패한 파일을 다음 확인 때 다시 읽게 표시한다(pathKeys 를 안 주면 그 폴더의 실패 파일 전부)
+  requestAutoImportRetry(folder, pathKeys) {
+    if (Array.isArray(pathKeys) && pathKeys.length) {
+      pathKeys.forEach(k => this.db.run(
+        "UPDATE auto_import_files SET retry_requested = 1 WHERE path_key = ? AND status = 'failed'", [k]));
+    } else {
+      this.db.run("UPDATE auto_import_files SET retry_requested = 1 WHERE folder = ? AND status = 'failed'", [folder]);
+    }
+    return this.autoImportCounts(folder);
+  }
+
+  // 같은 내용(파일 SHA-1)을 이미 넣었나 — 수동 불러오기·자동 가져오기 이력 모두에서 찾는다
+  findProcessedFileHash(fileHash) {
+    if (!fileHash) return null;
+    return this.db.get(
+      'SELECT id AS importId, filename, imported_at AS importedAt FROM imports WHERE file_hash = ? ORDER BY id LIMIT 1',
+      [fileHash]
+    ) || null;
+  }
+
   getSyncConfig() {
     try { return JSON.parse(this.getMeta('sync_config', '{}')) || {}; } catch (_) { return {}; }
   }
@@ -1978,12 +2154,13 @@ class RouteDatabase {
           this.db.run(
             `INSERT INTO imports (filename, file_hash, imported_at, imported_by, dates, vehicle, distance_km,
                total_records, inserted_records, duplicate_records, conflict_records, conflicts_json,
-               has_issue, issue_note, issue_status, issue_created_at, issue_updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+               has_issue, issue_note, issue_status, issue_created_at, issue_updated_at, import_source, needs_review)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [filename, fileHash, importedAt, String(im.importedBy || ''), String(im.dates || ''), String(im.vehicle || ''),
               Number(im.distanceKm) || 0, Number(im.total) || 0, Number(im.inserted) || 0, Number(im.duplicates) || 0,
               Number(im.conflicts) || 0, '[]',
-              incoming.hasIssue ? 1 : 0, incoming.issueNote, incoming.issueStatus, incoming.issueCreatedAt, incoming.issueUpdatedAt]);
+              incoming.hasIssue ? 1 : 0, incoming.issueNote, incoming.issueStatus, incoming.issueCreatedAt, incoming.issueUpdatedAt,
+              String(im.importSource || ''), im.needsReview ? 1 : 0]);
           importId = (this.db.get('SELECT last_insert_rowid() AS id') || {}).id;
           added++;
         } else {
@@ -2060,6 +2237,8 @@ function normalizeImportRow(r) {
     issueUpdatedAt: r.issueUpdatedAt || null,
     issueConflict,
     relatedRecords: r.relatedRecords != null ? r.relatedRecords : null,
+    importSource: r.importSource || '',
+    needsReview: !!r.needsReview,
   };
 }
 

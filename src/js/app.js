@@ -131,9 +131,12 @@ async function startRouteViewer(){
     console.error('[경로뷰어] 저장소 연결 실패:',err);
     setStorageBadge('저장 실패','저장소를 열지 못했어요');
     showError('저장소를 열지 못했어요. ('+err.message+')');
+    await loadAllowedUsers();
     switchTab('upload');
     return;
   }
+  // 접근 권한 명단(설정 › 접근 권한)을 읽고 나서 로그인 여부를 판단한다
+  await loadAllowedUsers();
 
   await loadZonePolygonsFromDb();
   await Promise.all([refreshZoneCache(),refreshVehicleCache(),refreshSettingsCache()]);

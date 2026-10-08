@@ -369,6 +369,14 @@ function refreshViewsForIssueFilter(){
 }
 
 // 이슈 상태 배지 한 조각 (달력·데이터 관리·통계 공용)
+// Import 한 건의 이슈 배지 — 자동 가져오기로 들어와 아직 아무도 보지 않은 파일은 "이슈 없음"이 아니라
+// "검토 전"으로 보여준다(사람이 확인하지 않은 파일을 정상 확인으로 보이게 하지 않는다)
+function importIssueBadgeHtml(im){
+  if(im&&im.hasIssue) return issueBadgeHtml(im.issueStatus);
+  if(im&&im.needsReview) return '<span class="issue-badge review" title="자동 가져오기로 들어온 파일 — 아직 이슈 여부를 확인하지 않았어요">자동 · 검토 전</span>';
+  return '<span class="issue-badge resolved">이슈 없음</span>';
+}
+
 function issueBadgeHtml(status,text){
   const cls=status==='resolved'?'resolved':'open';
   const label=text||IssueFilter.statusLabel(status);

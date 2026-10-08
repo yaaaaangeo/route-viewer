@@ -428,12 +428,13 @@ function dayIssueItemHTML(im){
       <button class="btn ghost" type="button" onclick="startDayIssueEdit(${im.id})">${im.hasIssue?'메모 수정':'이슈 등록'}</button>
       ${im.hasIssue?`<button class="btn ghost" type="button" onclick="toggleDayIssueStatus(${im.id})">${im.issueStatus==='resolved'?'확인 필요로 되돌리기':'확인 완료로 변경'}</button>`:''}
       ${im.hasIssue?`<button class="btn ghost" type="button" onclick="clearDayIssue(${im.id})" title="이슈 표시를 지웁니다(기록은 그대로)">이슈 해제</button>`:''}
+      ${!im.hasIssue&&im.needsReview?`<button class="btn ghost" type="button" onclick="applyImportIssueChange(${im.id},{reviewed:true})" title="자동으로 가져온 파일을 확인했고 이슈가 없어요">검토 완료(이슈 없음)</button>`:''}
     </div>`;
   return `
     <div class="issue-item ${cls}">
       <div class="issue-item-head">
         <span class="imp-name" title="${escapeHtml(im.filename||'')}">${escapeHtml(im.filename||'(파일명 없음)')}</span>
-        ${im.hasIssue?issueBadgeHtml(im.issueStatus):'<span class="issue-badge resolved">이슈 없음</span>'}
+        ${importIssueBadgeHtml(im)}
       </div>
       <div class="issue-item-meta mono">
         <span>기록 ${fmtNum(im.recordCount||0)}개</span>

@@ -12,6 +12,7 @@
 
 async function renderSettingsView(){
   await Promise.all([refreshVehicleCache(),refreshZoneCache(),refreshSettingsCache()]);
+  renderAllowedUserSettings();
   await renderVehicleSettingsList();
   await renderZoneSettingsList();
   // HD Map 우선 구축 구역 ①~⑫ 의 경계 상태·넣는 방법 — 통계 화면은 현황 확인만 하고
@@ -21,6 +22,57 @@ async function renderSettingsView(){
   if(typeof renderPriorityPolicySettings==='function') await renderPriorityPolicySettings();
   renderDepthTierSettings();
   await renderClassificationSettings();
+}
+
+// ── 접근 권한(이름 명단) ──────────────────────────────
+// 저장·검증은 auth.js(saveAllowedUsers). 최소 한 명은 남아야 하고, 내 이름을 빼면 바로 로그인 화면으로 간다.
+function renderAllowedUserSettings(){
+  const el=document.getElementById('settings-user-list');
+  if(!el) return;
+  const me=userNameKey(currentUserName());
+  const users=getAllowedUsers();
+  el.innerHTML=users.map((u,i)=>`
+    <div class="settings-row">
+      <span class="settings-row-name">${escapeHtml(u)}${userNameKey(u)===me?' <span class="settings-row-status active">나</span>':''}</span>
+      <span class="settings-row-status active">접근 가능</span>
+      <button type="button" class="btn ghost settings-row-btn" onclick="removeAllowedUserAt(${i})" ${users.length<=1?'disabled title="최소 한 명은 남아 있어야 해요"':''}>권한 해제</button>
+    </div>`).join('');
+}
+
+async function addAllowedUserFromInput(){
+  const input=document.getElementById('settings-user-input');
+  const name=normalizeUserName(input&&input.value);
+  if(!name){ if(input) input.focus(); return; }
+  if(name.length>USER_NAME_MAX){ showError(`이름은 ${USER_NAME_MAX}자까지 쓸 수 있어요.`); return; }
+  if(isAllowedUser(name)){ showToast(`${name} 님은 이미 명단에 있어요.`); return; }
+  try{
+    await saveAllowedUsers([...getAllowedUsers(),name]);
+    if(input) input.value='';
+    renderAllowedUserSettings();
+    showToast(`${name} 님에게 접근 권한을 줬어요.`);
+  }catch(err){ showError('접근 권한을 저장하지 못했어요. ('+err.message+')'); }
+}
+
+async function removeAllowedUserAt(i){
+  const users=getAllowedUsers();
+  const name=users[i];
+  if(!name) return;
+  if(users.length<=1){ showError('최소 한 명은 남아 있어야 해요.'); return; }
+  const isMe=userNameKey(name)===userNameKey(currentUserName());
+  const ok=await confirmDialog({
+    title:'접근 권한 해제',
+    message:`${name} 님의 접근 권한을 해제할까요?`,
+    detail:(isMe?'지금 들어와 있는 내 이름이에요. 해제하면 바로 로그인 화면으로 돌아가고 다시 들어올 수 없어요.\n\n':'')
+      +'그 사람이 넣은 주행 기록과 Import 이력은 지워지지 않아요. 언제든 다시 추가할 수 있어요.',
+    confirmLabel:'권한 해제',
+    danger:true,
+  });
+  if(!ok) return;
+  try{
+    await saveAllowedUsers(users.filter((_,j)=>j!==i));
+    renderAllowedUserSettings();
+    if(!isMe) showToast(`${name} 님의 접근 권한을 해제했어요.`);
+  }catch(err){ showError('접근 권한을 저장하지 못했어요. ('+err.message+')'); }
 }
 
 // ── 차량 관리 ─────────────────────────────────────────

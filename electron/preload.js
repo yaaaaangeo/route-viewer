@@ -107,6 +107,21 @@ contextBridge.exposeInMainWorld('routeAPI', {
   syncSetConfig: config => call('sync:setConfig', config),
   syncRun: () => call('sync:run'),
 
+  // ── 주행기록 자동 가져오기(동기화 폴더) ──
+  autoImportStatus: () => call('autoImport:getStatus'),
+  autoImportPickFolder: () => call('autoImport:pickFolder'),
+  autoImportPreview: () => call('autoImport:preview'),
+  autoImportConfirmInitial: mode => call('autoImport:confirmInitial', mode),
+  autoImportSetEnabled: on => call('autoImport:setEnabled', on),
+  autoImportRunNow: () => call('autoImport:runNow'),
+  autoImportRetry: pathKeys => call('autoImport:retry', pathKeys),
+  autoImportBaseline: () => call('autoImport:importBaseline'),
+  autoImportRevealFolder: () => call('autoImport:revealFolder'),
+  // name: 'changed'(새 파일 반영 — 화면 갱신) | 'status'(확인 시작·끝)
+  onAutoImport: (name, handler) => {
+    ipcRenderer.on('autoImport:' + name, (_evt, payload) => handler(payload));
+  },
+
   // ── 메뉴에서 오는 신호 ──
   onMenu: (name, handler) => {
     ipcRenderer.on('menu:' + name, () => handler());

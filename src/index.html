@@ -103,6 +103,8 @@
       <div class="cp-head">
         <span class="cp-title">전체 데이터 수집 현황</span>
         <span id="cp-latest" class="cp-latest mono">최근 데이터: 없음</span>
+        <!-- Google Drive 자동 가져오기가 몇 년 몇 월 며칠 주행분까지 가져왔는지 — js/auto-import-view.js -->
+        <span id="cp-drive" class="cp-drive" style="display:none;"></span>
       </div>
       <div class="cp-table-wrap">
         <table class="cp-table">
@@ -268,6 +270,9 @@
     <div id="data-status"></div>
     <div id="data-summary"></div>
 
+    <!-- ── 주행기록 자동 가져오기(Google Drive 동기화 폴더) — 데스크톱 앱에서만 보임 · js/auto-import-view.js ── -->
+    <div id="auto-import-panel" class="sync-panel auto-import-panel"></div>
+
     <!-- ── 서버 동기화 — 데스크톱 앱에서만 보임 ─────────── -->
     <div id="sync-panel" class="sync-panel">
       <div class="sync-head">
@@ -311,7 +316,16 @@
 
   <!-- ── 설정 — 차량 관리 · 지역 관리 · Coverage Depth 기준(요구사항 13~16) ── -->
   <div id="settings-view">
-    <div class="stats-section-title">차량 관리</div>
+    <!-- 접근 권한 — 이름 출입 명단(js/auth.js 저장 · js/settings.js 화면) -->
+    <div class="stats-section-title">접근 권한 (이름 명단)</div>
+    <div class="ir-note" style="margin:0;">여기 있는 이름만 경로 뷰어에 들어올 수 있어요. 비밀번호가 아니라 이름 확인용 출입 명단이에요. 권한을 해제해도 그 사람이 넣은 기록·Import 이력은 그대로 남아요.</div>
+    <div id="settings-user-list" class="settings-list"></div>
+    <div class="settings-form-row" style="margin:0;">
+      <input type="text" id="settings-user-input" class="sync-input" maxlength="30" placeholder="권한을 줄 이름 (예: 홍길동)" autocomplete="off" onkeydown="if(event.key==='Enter') addAllowedUserFromInput()"/>
+      <button class="btn ghost" type="button" onclick="addAllowedUserFromInput()">+ 권한 추가</button>
+    </div>
+
+    <div class="stats-section-title" style="margin-top:8px;">차량 관리</div>
     <div id="settings-vehicle-list" class="settings-list"></div>
     <button class="btn ghost" type="button" onclick="openAddVehicleModal()">+ 차량 추가</button>
 
@@ -475,6 +489,7 @@
 <script src="js/importer.js"></script>
 <script src="js/backup.js"></script>
 <script src="js/sync.js"></script>
+<script src="js/auto-import-view.js"></script>
 <script src="js/datamanager.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/kpi-history.js"></script>

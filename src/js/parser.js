@@ -13,7 +13,11 @@
 // ══════════════════════════════════════════════════════════
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('xlsx'));
+    // 개발 환경은 devDependency 'xlsx', 설치된 앱(메인 프로세스 자동 가져오기)은 node_modules 에
+    // xlsx 가 없으므로 화면과 같은 vendor 사본을 쓴다(같은 0.18.5).
+    let XLSX;
+    try { XLSX = require('xlsx'); } catch (_) { XLSX = require('../../vendor/xlsx/xlsx.full.min.js'); }
+    module.exports = factory(XLSX);
   } else {
     root.RouteParser = factory(root.XLSX);
   }

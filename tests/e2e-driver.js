@@ -28,6 +28,15 @@ function section(t) { console.log(`\n== ${t}`); }
 module.exports = function run({ app, mainWindow, dbFilePath }) {
   const win = mainWindow;
 
+  // 이 테스트는 기록을 넣고 날짜를 지운다 — 임시 폴더 DB 가 아니면 아무것도 하지 않고 끝낸다
+  const tmpRoot = path.resolve(require('os').tmpdir()).toLowerCase();
+  if (!path.resolve(dbFilePath()).toLowerCase().startsWith(tmpRoot + path.sep)) {
+    console.error(`\n중단: 실제 DB 로 보이는 경로에서는 E2E 를 돌리지 않아요 — ${dbFilePath()}`);
+    app.exit(2);
+    return;
+  }
+  console.log(`  테스트 DB: ${dbFilePath()}`);
+
   win.webContents.on('console-message', (_e, level, message, line, source) => {
     // level 3 = error
     if (level >= 2) {
@@ -144,15 +153,15 @@ async function main(win, dbFilePath) {
   check('로그인 화면이 먼저 뜬다',
     await js(win, `!document.getElementById('login-screen').classList.contains('hidden')`));
   check('등록되지 않은 이름은 막힌다',
-    await js(win, `(()=>{
+    await js(win, `(async()=>{
       document.getElementById('login-name-input').value='아무개';
-      updateLoginButton(); submitLogin();
+      updateLoginButton(); await submitLogin();   // 저장된 접근 권한 명단을 읽은 뒤 판단한다(auth.js)
       return document.getElementById('login-error').style.display==='block';
     })()`));
   check('허용된 이름은 통과한다',
-    await js(win, `(()=>{
+    await js(win, `(async()=>{
       document.getElementById('login-name-input').value='양은규';
-      updateLoginButton(); submitLogin();
+      updateLoginButton(); await submitLogin();
       return document.getElementById('login-screen').classList.contains('hidden');
     })()`));
   check('사용자 이름이 표시된다',

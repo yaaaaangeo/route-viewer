@@ -13,14 +13,28 @@ const path = require('path');
 const fs = require('fs');
 
 const { RouteDatabase } = require('./database.js');
+const { AutoImporter } = require('./auto-import.js');
+const RouteParser = require('../src/js/parser.js');
 const MapCapture = require('../src/js/map-capture.js');
 const { applyOsmTileUserAgent } = require('./osm-tile-ua.js');
 
 const APP_ID = 'com.navapp.routeviewer';
+
+// 자동 테스트(ROUTE_VIEWER_E2E)는 화면을 조작하며 기록을 넣고 날짜를 지운다 — 실제 주행 DB 를 절대 쓰지 않게,
+// userData 가 임시 폴더 안이 아니면(--user-data-dir 을 빠뜨린 경우 등) 여기서 새 임시 폴더로 바꾼다.
+if (process.env.ROUTE_VIEWER_E2E) {
+  const os = require('os');
+  const tmpRoot = path.resolve(os.tmpdir()).toLowerCase();
+  if (!path.resolve(app.getPath('userData')).toLowerCase().startsWith(tmpRoot + path.sep)) {
+    app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'rv-e2e-')));
+  }
+}
+
 let mainWindow = null;
 let db = null;
 let updateCheckIsManual = false;
 let autoUpdater = null;
+let autoImporter = null;
 
 function dbFilePath() {
   return path.join(app.getPath('userData'), 'database', 'route-viewer.db');
@@ -157,6 +171,25 @@ async function triggerUpdateCheck(manual) {
   } catch (err) {
     console.warn('[route-viewer] 업데이트 확인 실패:', err);
   }
+}
+
+// ══════════════════════════════════════════════════════════
+//  주행기록 자동 가져오기 — Google Drive 데스크톱 앱이 동기화한 로컬 폴더를 주기적으로 훑는다.
+//  처리는 메인 프로세스에서 하고(화면이 꺼져 있어도 같은 DB), 새로 반영한 게 있으면 화면에 알린다.
+// ══════════════════════════════════════════════════════════
+function sendToWindow(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+function getAutoImporter() {
+  if (autoImporter) return autoImporter;
+  autoImporter = new AutoImporter({
+    db: openDatabase(),
+    parseBuffer: RouteParser.parseBuffer,
+    onBatch: result => sendToWindow('autoImport:changed', result),
+    onStatus: () => sendToWindow('autoImport:status', autoImporter.status()),
+  });
+  return autoImporter;
 }
 
 // ── 창 ────────────────────────────────────────────────
@@ -453,6 +486,32 @@ function registerIpc() {
     return { canceled: false, filePath, width: size.width, height: size.height, bytes: png.length };
   });
 
+  // ── 주행기록 자동 가져오기 ─────────────────────────────
+  handle('autoImport:getStatus', () => getAutoImporter().status());
+  // 폴더는 선택 대화상자로만 받는다(Drive 웹 주소를 붙여 넣는 경로가 없다). 고른 뒤 최초 연결 미리보기를 돌려준다.
+  handle('autoImport:pickFolder', async () => {
+    const cur = getAutoImporter().config().folder;
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: '주행기록 자동 가져오기 폴더 선택 (Google Drive 동기화 폴더)',
+      defaultPath: cur || undefined,
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths.length) return null;
+    const preview = await getAutoImporter().setFolder(res.filePaths[0]);
+    return { preview, status: getAutoImporter().status() };
+  });
+  handle('autoImport:confirmInitial', mode => getAutoImporter().confirmInitial(mode));
+  handle('autoImport:preview', () => getAutoImporter().preview());
+  handle('autoImport:setEnabled', on => getAutoImporter().setEnabled(on));
+  handle('autoImport:runNow', () => getAutoImporter().runOnce('manual'));
+  handle('autoImport:retry', pathKeys => getAutoImporter().retryFailed(pathKeys));
+  handle('autoImport:importBaseline', () => getAutoImporter().importBaseline());
+  handle('autoImport:revealFolder', () => {
+    const folder = getAutoImporter().config().folder;
+    if (folder) shell.openPath(folder);
+    return !!folder;
+  });
+
   // ══════════════════════════════════════════════════════
   //  서버 동기화 — server.js 를 하나 띄워두면 여러 데스크톱 앱이
   //  같은 주소로 "지금 동기화"를 눌러 서로의 기록을 합칠 수 있다.
@@ -532,6 +591,10 @@ if (!app.requestSingleInstanceLock()) {
     configureAutoUpdater();
     createWindow();
 
+    // 자동 가져오기 — 화면이 다 뜬 뒤 첫 확인(앱 시작 시), 이후 설정 간격(기본 60초)마다.
+    // 화면이 먼저 DB 를 읽고 변경 알림을 받을 준비가 된 다음에 돌도록 did-finish-load 를 기다린다.
+    mainWindow.webContents.once('did-finish-load', () => getAutoImporter().start());
+
     // 시작하고 몇 초 뒤 조용히 한 번 확인 — 주소가 설정돼 있을 때만, 실패해도 알림 없음
     setTimeout(() => triggerUpdateCheck(false).catch(() => {}), 4000);
 
@@ -552,6 +615,7 @@ if (!app.requestSingleInstanceLock()) {
 
   // node-sqlite3-wasm 은 수동으로 닫아줘야 한다
   app.on('will-quit', () => {
+    if (autoImporter) { autoImporter.stop(); autoImporter = null; }
     if (db) { db.close(); db = null; }
   });
 }

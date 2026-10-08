@@ -44,6 +44,7 @@ async function renderDataView(){
   statusEl.innerHTML=`저장 위치 <code>${where}</code>`+
     (info?` <button class="btn ghost" type="button" style="margin-left:8px;padding:4px 10px;font-size:11px;" onclick="revealDatabaseFolder()">폴더 열기</button>`:'');
 
+  await renderAutoImportPanel();
   await renderSyncPanel();
 
   const summaries=await refreshDateIndex();
@@ -93,7 +94,7 @@ async function renderDataView(){
          <div class="dm-import">
            <div class="dm-import-row1">
              <span class="dm-import-file" title="${escapeHtml(im.filename)}">${escapeHtml(im.filename||'—')}</span>
-             ${im.hasIssue?issueBadgeHtml(im.issueStatus):''}
+             ${im.hasIssue?issueBadgeHtml(im.issueStatus):(im.needsReview?importIssueBadgeHtml(im):'')}
              <span class="mono dm-import-nums">
                <span class="ir-add">+${fmtNum(im.inserted)}</span>
                ${im.duplicates?`<span class="ir-dup">중복 ${fmtNum(im.duplicates)}</span>`:''}
@@ -289,12 +290,13 @@ function issueAdminRowHTML(im){
       <button class="btn ghost" type="button" onclick="startIssueAdminEdit(${im.id})">${im.hasIssue?'메모 수정':'이슈 등록'}</button>
       ${im.hasIssue?`<button class="btn ghost" type="button" onclick="toggleIssueAdminStatus(${im.id})">${im.issueStatus==='resolved'?'확인 필요로 되돌리기':'확인 완료로 변경'}</button>`:''}
       ${im.hasIssue?`<button class="btn ghost" type="button" onclick="clearIssueAdmin(${im.id})" title="이슈 표시만 지워요. GPS 기록은 그대로 남아요">이슈 해제</button>`:''}
+      ${!im.hasIssue&&im.needsReview?`<button class="btn ghost" type="button" onclick="markIssueAdminReviewed(${im.id})" title="자동으로 가져온 파일을 확인했고 이슈가 없어요">검토 완료(이슈 없음)</button>`:''}
     </div>`;
   return `
     <div class="issue-item ${cls}">
       <div class="issue-item-head">
         <span class="imp-name" title="${escapeHtml(im.filename||'')}">${escapeHtml(im.filename||'(파일명 없음)')}</span>
-        ${im.hasIssue?issueBadgeHtml(im.issueStatus):'<span class="issue-badge resolved">이슈 없음</span>'}
+        ${importIssueBadgeHtml(im)}
       </div>
       <div class="issue-item-meta mono">
         <span>${escapeHtml(im.dates||'')}</span>
@@ -344,6 +346,10 @@ async function toggleIssueAdminStatus(importId){
   const im=(issueAdminImports||[]).find(x=>x.id===importId);
   if(!im) return;
   await applyIssueAdminChange(importId,{issueStatus:im.issueStatus==='resolved'?'open':'resolved'});
+}
+
+async function markIssueAdminReviewed(importId){
+  await applyIssueAdminChange(importId,{reviewed:true});
 }
 
 async function clearIssueAdmin(importId){
