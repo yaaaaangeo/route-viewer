@@ -14,6 +14,8 @@ const fs = require('fs');
 
 const { RouteDatabase } = require('./database.js');
 const { AutoImporter } = require('./auto-import.js');
+const UpdateFolder = require('./update-folder.js');
+const { spawn } = require('child_process');
 const RouteParser = require('../src/js/parser.js');
 const MapCapture = require('../src/js/map-capture.js');
 const { applyOsmTileUserAgent } = require('./osm-tile-ua.js');
@@ -127,7 +129,102 @@ function configureAutoUpdater() {
   });
 }
 
+// ══════════════════════════════════════════════════════════
+//  업데이트 폴더 — 서버 없이 "새 버전이 있어요" 안내 (electron/update-folder.js)
+//  기본 폴더는 빌드한 PC 의 route-viewer\release (tools/release.js 가 package.json 의 updateFolder 로 넣는다).
+//  [도움말 › 업데이트 폴더 설정…] 으로 바꿀 수 있다(예: Google Drive 공유 폴더 → 여러 PC 가 같은 설치 파일로 업데이트).
+//  설치는 그 폴더의 설치 파일을 조용히(/S) 실행하고 끝나면 앱을 다시 연다 — 데이터(%APPDATA%)는 그대로다.
+// ══════════════════════════════════════════════════════════
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+let promptedUpdateVersion = null;   // 이번 실행에서 이미 물어본 버전(나중에 → 다음 실행 때 다시 묻는다)
+let pendingUpdate = null;           // 창이 숨어 있을 때 찾은 업데이트 — 창을 열면 묻는다
+
+function defaultUpdateFolder() {
+  try { return require('../package.json').updateFolder || ''; } catch (_) { return ''; }
+}
+
+function updateFolder() {
+  return openDatabase().getMeta('update_folder', '') || defaultUpdateFolder();
+}
+
+async function chooseUpdateFolder() {
+  const cur = updateFolder();
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: '업데이트 폴더 선택 (새 버전 설치 파일과 latest.yml 이 있는 폴더)',
+    defaultPath: cur || undefined,
+    properties: ['openDirectory'],
+  });
+  if (res.canceled || !res.filePaths.length) return;
+  openDatabase().setMeta('update_folder', res.filePaths[0]);
+  promptedUpdateVersion = null;
+  triggerUpdateCheck(true);
+}
+
+async function promptFolderUpdate(update, manual) {
+  if (!manual && promptedUpdateVersion === update.version) return;
+  // 트레이에 숨어 있으면 알림만 띄우고, 창을 열 때 묻는다
+  if (!mainWindow || !mainWindow.isVisible()) {
+    pendingUpdate = update;
+    if (tray && tray.displayBalloon) {
+      tray.displayBalloon({ iconType: 'info', title: `새 버전 ${update.version} 이 있어요`, content: '경로 뷰어를 열면 바로 설치할 수 있어요.' });
+    }
+    return;
+  }
+  pendingUpdate = null;
+  promptedUpdateVersion = update.version;
+  const res = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '업데이트',
+    message: `새 버전 ${update.version} 이 있어요. 지금 설치할까요?`,
+    detail: `지금 버전 ${update.currentVersion}\n설치 파일 ${update.installer}\n\n`
+      + '설치하는 동안 앱이 잠깐 닫혔다가 자동으로 다시 열려요.\n주행 기록·설정·Drive 연결은 그대로 남아요.',
+    buttons: ['나중에', '지금 설치'],
+    defaultId: 1,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (res.response === 1) await installFolderUpdate(update);
+}
+
+async function installFolderUpdate(update) {
+  const check = await UpdateFolder.verifyInstaller(update);
+  if (!check.ok) {
+    promptedUpdateVersion = null;
+    dialog.showMessageBox(mainWindow, { type: 'warning', title: '업데이트', message: '지금은 설치할 수 없어요.', detail: check.message, buttons: ['확인'] });
+    return;
+  }
+  // electron-updater 와 같은 방식 — NSIS 설치 파일을 조용히 실행하고, 끝나면 앱을 다시 띄운다(--force-run)
+  const child = spawn(update.installer, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' });
+  child.unref();
+  quitting = true;
+  setTimeout(() => app.quit(), 300);
+}
+
+async function checkFolderUpdate(manual) {
+  const res = await UpdateFolder.checkUpdateFolder(updateFolder(), app.getVersion());
+  if (res.status === 'newer') { await promptFolderUpdate(res, manual); return true; }
+  if (manual) {
+    const folderLine = `업데이트 폴더: ${res.folder || updateFolder() || '(없음)'}`;
+    if (res.status === 'latest') {
+      dialog.showMessageBox(mainWindow, { type: 'info', title: '업데이트 확인', message: `이미 최신 버전이에요 (${app.getVersion()}).`, detail: folderLine, buttons: ['확인'] });
+    } else if (!normalizeServerUrl(openDatabase().getSyncConfig().serverUrl)) {
+      // 서버 주소도 없으면 폴더 문제를 그대로 알려준다(서버가 있으면 이어서 서버를 확인한다)
+      dialog.showMessageBox(mainWindow, {
+        type: 'info', title: '업데이트 확인', message: res.message || '새 버전을 찾지 못했어요.',
+        detail: `${folderLine}\n\n[도움말 › 업데이트 폴더 설정…] 에서 폴더를 바꿀 수 있어요.`, buttons: ['확인'],
+      });
+    }
+  }
+  return res.status === 'latest';
+}
+
 async function triggerUpdateCheck(manual) {
+  // 1) 업데이트 폴더(서버 없이) — 설치된 앱에서만. 새 버전을 찾았거나 최신이면 여기서 끝.
+  if (app.isPackaged) {
+    try { if (await checkFolderUpdate(manual)) return; }
+    catch (err) { console.warn('[route-viewer] 업데이트 폴더 확인 실패:', err); }
+  }
+  // 2) 서버 동기화 주소(<주소>/updates) — 예전 방식 그대로
   if (!autoUpdater) {
     if (manual) {
       dialog.showMessageBox(mainWindow, {
@@ -152,18 +249,7 @@ async function triggerUpdateCheck(manual) {
   }
   const cfg = openDatabase().getSyncConfig();
   const base = normalizeServerUrl(cfg.serverUrl);
-  if (!base) {
-    if (manual) {
-      dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: '업데이트 확인',
-        message: '먼저 [데이터 관리] 탭에서 서버 동기화 주소를 입력해주세요.',
-        detail: '같은 주소에서 새 버전도 함께 확인해요.',
-        buttons: ['확인'],
-      });
-    }
-    return;
-  }
+  if (!base) return;   // 서버를 안 쓰면 업데이트 폴더만 본다(위에서 이미 안내했다)
   updateCheckIsManual = !!manual;
   autoUpdater.setFeedURL({ provider: 'generic', url: `${base}/updates` });
   try {
@@ -306,6 +392,11 @@ function createWindow() {
     return { action: 'deny' };
   });
 
+  // 트레이에 숨어 있는 동안 찾은 업데이트는 창을 다시 열 때 묻는다
+  mainWindow.on('show', () => {
+    if (pendingUpdate) { const u = pendingUpdate; setTimeout(() => promptFolderUpdate(u, false), 500); }
+  });
+
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
@@ -366,6 +457,10 @@ function buildMenu() {
           label: '업데이트 확인',
           click: () => triggerUpdateCheck(true),
         },
+        {
+          label: '업데이트 폴더 설정…',
+          click: () => chooseUpdateFolder(),
+        },
         { type: 'separator' },
         {
           label: 'Route Viewer 정보',
@@ -379,6 +474,7 @@ function buildMenu() {
                 `저장된 날짜 ${stats.days}일\n` +
                 `GPS 포인트 ${stats.points.toLocaleString('ko-KR')}개\n` +
                 `Import 이력 ${stats.imports}건\n\n` +
+                `업데이트 폴더\n${updateFolder() || '(없음)'}\n\n` +
                 `데이터베이스\n${stats.dbPath}\n` +
                 `(${(stats.dbBytes / 1024 / 1024).toFixed(1)} MB)`,
               buttons: ['확인'],
@@ -687,6 +783,8 @@ if (!app.requestSingleInstanceLock()) {
 
     // 시작하고 몇 초 뒤 조용히 한 번 확인 — 주소가 설정돼 있을 때만, 실패해도 알림 없음
     setTimeout(() => triggerUpdateCheck(false).catch(() => {}), 4000);
+    // 켜 둔 채로 지내도 새 버전을 알 수 있게 30분마다 조용히 다시 확인(트레이 상주 포함)
+    setInterval(() => triggerUpdateCheck(false).catch(() => {}), UPDATE_CHECK_INTERVAL_MS).unref();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

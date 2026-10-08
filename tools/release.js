@@ -7,10 +7,13 @@
 //    npm.cmd run release -- 3.5.0     원하는 버전으로
 //    ... -- --no-build                버전만 바꾸고 빌드는 안 함
 //    ... -- --dry-run                 무엇이 바뀔지 보여주기만(파일을 고치지 않음)
+//    node tools/release.js --build-only   버전은 그대로 두고 빌드만(npm run dist)
 //
 //  바꾸는 곳: package.json · package-lock.json · src/js/core.js(APP_VERSION 배지) · README.md(제목·버전 줄)
 //  빌드: electron-builder --win nsis portable --x64 → release\RouteViewer-<버전>-win-x64.exe + 포터블 + latest.yml
 //  버전을 올려야 이미 설치된 앱의 자동 업데이트가 새 버전으로 알아본다.
+//  빌드할 때 이 PC 의 release 폴더를 설치판의 업데이트 폴더 기본값(package.json updateFolder)으로 넣는다 —
+//  그래서 설치한 앱이 다음 npm.cmd run release 결과를 알아서 찾아 "새 버전이 있어요"를 띄운다.
 // ══════════════════════════════════════════════════════════
 'use strict';
 
@@ -22,13 +25,33 @@ const ROOT = path.join(__dirname, '..');
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const noBuild = args.includes('--no-build');
+const buildOnly = args.includes('--build-only');
 const bump = args.find(a => !a.startsWith('--')) || 'patch';
+
+function build(version) {
+  console.log('\n빌드 중… (64비트 설치판 + 포터블, 몇 분 걸려요)');
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;   // VS Code 터미널이 물려주면 빌드 중 electron 이 node 로 돈다
+  const builder = path.join(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder');
+  const updateFolder = path.join(ROOT, 'release');
+  const res = spawnSync(`"${builder}"`, ['--win', 'nsis', 'portable', '--x64', '--publish', 'never',
+    `"--config.extraMetadata.updateFolder=${updateFolder}"`],
+  { cwd: ROOT, env, stdio: 'inherit', shell: true });
+  if (res.status !== 0) {
+    console.error(`\n빌드 실패(종료 코드 ${res.status}).${buildOnly ? '' : ` 버전 숫자는 이미 ${version} 로 바뀌어 있어요 — 고친 뒤 npm.cmd run dist 로 다시 빌드하면 돼요.`}`);
+    process.exit(res.status || 1);
+  }
+  console.log(`\n완료 — release\\RouteViewer-${version}-win-x64.exe (설치판) · release\\RouteViewer-portable-${version}-x64.exe`);
+  console.log(`설치된 앱은 업데이트 폴더(${updateFolder})에서 이 버전을 찾아 "새 버전이 있어요" 안내를 띄워요.`);
+}
 
 const pkgPath = path.join(ROOT, 'package.json');
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
 const cur = pkg.version;
 const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(cur);
 if (!m) { console.error(`package.json 버전 형식을 읽지 못했어요: ${cur}`); process.exit(1); }
+
+if (buildOnly) { build(pkg.version); process.exit(0); }
 
 let next;
 if (bump === 'patch') next = `${m[1]}.${m[2]}.${+m[3] + 1}`;
@@ -73,14 +96,4 @@ if (dryRun || noBuild) {
   process.exit(0);
 }
 
-console.log('\n빌드 중… (64비트 설치판 + 포터블, 몇 분 걸려요)');
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;   // VS Code 터미널이 물려주면 빌드 중 electron 이 node 로 돈다
-const builder = path.join(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder');
-const res = spawnSync(builder, ['--win', 'nsis', 'portable', '--x64', '--publish', 'never'],
-  { cwd: ROOT, env, stdio: 'inherit', shell: process.platform === 'win32' });
-if (res.status !== 0) {
-  console.error(`\n빌드 실패(종료 코드 ${res.status}). 버전 숫자는 이미 ${next} 로 바뀌어 있어요 — 고친 뒤 npm.cmd run dist 로 다시 빌드하면 돼요.`);
-  process.exit(res.status || 1);
-}
-console.log(`\n완료 — release\\RouteViewer-${next}-win-x64.exe (설치판) · release\\RouteViewer-portable-${next}-x64.exe`);
+build(next);

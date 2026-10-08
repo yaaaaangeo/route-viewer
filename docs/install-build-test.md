@@ -12,7 +12,9 @@
 | NSIS 설치 프로그램 (x64) | `RouteViewer-${version}-${os}-${arch}.exe` → `RouteViewer-3.1.2-win-x64.exe` |
 | 포터블 (x64) | `RouteViewer-portable-${version}-${arch}.exe` → `RouteViewer-portable-3.1.2-x64.exe` |
 
-마지막으로 빌드한 설치 파일은 3.1.2 입니다. 버전 올리기·빌드 방법은 [SHARED_STORAGE.md](../SHARED_STORAGE.md#새-버전-만들기--배포하기-자동-업데이트) 참고.
+빌드할 때 이 PC 의 `release` 폴더가 설치판의 **업데이트 폴더** 기본값으로 들어가서(`package.json` 의 `updateFolder`, 빌드 때만 추가),
+설치된 앱이 다음 빌드를 찾아 "새 버전이 있어요"를 띄웁니다. 버전 올리기·빌드·업데이트 안내는
+[SHARED_STORAGE.md](../SHARED_STORAGE.md#새-버전-만들기--배포하기-자동-업데이트) 참고.
 데이터는 `%APPDATA%\Route Viewer\database\route-viewer.db`에 따로 저장되므로 앱을 다시 설치해도 남습니다.
 
 ---
@@ -26,10 +28,11 @@ powershell -ExecutionPolicy Bypass -File tools\setup-node.ps1
 $env:Path = "$PWD\tooling\node-v24.19.0-win-x64;" + $env:Path
 
 npm install
-npm start          # 데스크톱 앱 개발 실행 (SQLite) — VS Code 터미널에서는 .un 이 더 간단
+npm start          # 데스크톱 앱 개발 실행 (SQLite) — VS Code 터미널에서는 .
+un 이 더 간단
 npm test           # 단위/통합 테스트 (아래 표의 npm test 항목 전부)
 npm run pack       # release/win-unpacked 만 생성
-npm run dist       # release/ 에 설치 파일 + 포터블 생성 (64비트, 지금 버전 그대로)
+npm run dist       # release/ 에 설치 파일 + 포터블 생성 (64비트, 지금 버전 그대로 · tools/release.js --build-only)
 npm run release    # 버전 +1 (patch) 후 빌드 — minor / major / 1.2.3 도 가능, --dry-run 으로 미리 보기
 node server.js     # 브라우저 모드(IndexedDB) + 서버 동기화 서버 → http://localhost:8080/src/index.html
 npm run test:browser-capture   # 브라우저 모드 지도 캡처 E2E (Electron 창을 브라우저로 사용, 인터넷 필요)
