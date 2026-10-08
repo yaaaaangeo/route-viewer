@@ -26,7 +26,7 @@ function makeElement(id) {
       contains: c => classes.has(c),
       toggle: (c, on) => { const v = on === undefined ? !classes.has(c) : !!on; if (v) classes.add(c); else classes.delete(c); return v; },
     },
-    addEventListener() {}, appendChild() {}, click() {},
+    addEventListener() {}, appendChild() {}, click() {}, querySelectorAll: () => [],
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
     clientWidth: 800, clientHeight: 600, offsetWidth: 160, offsetHeight: 50,
   };
@@ -124,6 +124,9 @@ async function createAccumHarness() {
     fmtNum: n => String(n),
     dstr: d => d.toISOString().slice(0, 10),
     renderFilterButtons: () => {},
+    // core.js 차량 색·차량 목록 — 차량 탭은 달력의 날짜 요약에서 차량을 모으는데, 이 하네스엔 달력이 없다
+    knownVehicleNames: () => [],
+    vehicleColor: () => '#4fd8c7',
     currentIssueFilter: () => issueFilterValue,
     issueFilterActive: () => issueFilterValue !== 'all',
     issueFilterLabel: v => IssueFilter.filterLabel(v === undefined ? issueFilterValue : v),

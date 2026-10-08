@@ -1762,7 +1762,7 @@ function invalidateCoverage(reason,zone){
   lastCoverageInvalidation={reason:reason||'unknown',zone:zone||null};
   if(zone) coverageZoneRevisions[zone]=(coverageZoneRevisions[zone]||0)+1;
   else if(reason==='settings') coverageSettingsRevision++;
-  else coverageDataRevision++;
+  else{ coverageDataRevision++; accumBundleCache.clear(); accumTotalStatsCache=null; }
   for(const [key,entry] of coverageCache){
     if(!zone||entry.zone===zone) coverageCache.delete(key);
   }
@@ -2589,6 +2589,40 @@ function markAccumViewRendered(token,viewKey,complete){
 
 // 그리는 중(accumRendering)에는 지도 캡처 버튼을 막는다 — 날짜를 바꾼 직후 이전 지도를
 // 찍지 않도록, 최신 렌더가 끝났을 때만 다시 연다.
+// ── 누적 지도 집계 결과 캐시 ─────────────────────────────
+// getAccumBundle 은 브라우저 모드(IndexedDB)에서 저장된 기록 전체를 훑어서, 기록이 30만 개쯤 되면
+// 한 번에 6~9초 걸린다. 조건(구역·날짜·차량·데이터 상태)이 같고 데이터가 그대로면 결과도 같으므로
+// 기억해 두고 다시 쓴다 — 커버리지 갭 켜고 끄기, 이미 본 차량 탭·구역으로 돌아가기가 바로 된다.
+// 데이터가 바뀌면(import·삭제·복원·동기화·이슈 변경) onRouteDataChanged 가 coverageDataRevision 을
+// 올리므로 키가 달라져 새로 읽는다. 전체 기록 수(RouteDB.stats)도 같은 리비전으로 기억한다.
+const ACCUM_BUNDLE_CACHE_MAX=12;
+const accumBundleCache=new Map(); // 키 → bundle (LRU)
+let accumTotalStatsCache=null;    // {revision, stats}
+const accumBundleStats={hits:0,misses:0};
+
+async function getAccumBundleCached(filter){
+  const key=JSON.stringify([coverageDataRevision,ACCUM_CELL,filter]);
+  if(accumBundleCache.has(key)){
+    const hit=accumBundleCache.get(key);
+    accumBundleCache.delete(key); accumBundleCache.set(key,hit); // 최근 사용으로
+    accumBundleStats.hits++;
+    return hit;
+  }
+  accumBundleStats.misses++;
+  const bundle=await RouteDB.getAccumBundle(filter,ACCUM_CELL);
+  accumBundleCache.set(key,bundle);
+  while(accumBundleCache.size>ACCUM_BUNDLE_CACHE_MAX) accumBundleCache.delete(accumBundleCache.keys().next().value);
+  return bundle;
+}
+
+async function getAccumTotalStatsCached(){
+  if(accumTotalStatsCache&&accumTotalStatsCache.revision===coverageDataRevision) return accumTotalStatsCache.stats;
+  const revision=coverageDataRevision;
+  const stats=await RouteDB.stats();
+  accumTotalStatsCache={revision,stats};
+  return stats;
+}
+
 async function renderAccumView(){
   const token=++accumRenderToken; // 빠르게 필터를 바꿔도 늦게 온 결과가 화면을 덮지 않게
   accumRendering=true;
@@ -2619,7 +2653,7 @@ async function renderAccumViewInner(token){
   // 같은 스캔에서 나온 값이라 따로 더 드는 비용이 없다).
   let bundle;
   try{
-    bundle=await RouteDB.getAccumBundle(accumFilter(),ACCUM_CELL);
+    bundle=await getAccumBundleCached(accumFilter());
   }catch(err){
     console.warn('[경로뷰어] 누적 지도 집계 실패:',err);
     showError('누적 지도를 계산하지 못했어요. ('+err.message+')');
@@ -2628,7 +2662,7 @@ async function renderAccumViewInner(token){
   if(token!==accumRenderToken) return;
   const overview=bundle.overview;
 
-  const totalStats=await RouteDB.stats();
+  const totalStats=await getAccumTotalStatsCached();
   if(token!==accumRenderToken) return;
 
   if(!totalStats.points){

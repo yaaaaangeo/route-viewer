@@ -301,6 +301,42 @@ async function harnessTests() {
   check('밀도 지도: 최종 화면은 09-01 결과(20점: 기존 10 + import 10)',
     h.eval('accumDateFrom') === '2026-09-01' && dLatest.points === 20 && dLatest.cellPoints === 20 && dLatest.label === '표시 기간: 2026-09-01',
     `points=${dLatest.points} cells=${dLatest.cells}`);
+
+  section('A-6. 차량 탭 · 누적 지도 집계 결과 캐시');
+  // 하네스엔 달력이 없어서 차량 목록을 직접 준다(core.js knownVehicleNames 는 날짜 요약에서 모은다)
+  h.eval("knownVehicleNames=()=>['토레스 1호','토레스 2호']");
+  h.eval('showCoverageGaps=false');
+  await applyRange(h, '', '');
+  const allV = densityState(h); // 31점 + A-4 에서 import 한 10점
+  h.eval("setAccumVehicle('토레스 2호')"); await h.waitRendered();
+  const v2 = densityState(h);
+  check('차량 탭: 그 차량 기록만(토레스 2호 = 날짜미상 1점)', v2.points === 1 && v2.cellPoints === 1, `points=${v2.points}`);
+  h.eval("setAccumVehicle('토레스 1호')"); await h.waitRendered();
+  const v1 = densityState(h);
+  check('차량 탭: 토레스 1호 + 토레스 2호 = 전체 누적', v1.points + v2.points === allV.points && v1.points > 0,
+    `${v1.points} + ${v2.points} / 전체 ${allV.points}`);
+  check('… Coverage 캐시 키에도 차량이 들어 있다', JSON.parse(h.eval("coverageCalcKey('판교')")).vehicle === '토레스 1호');
+  let misses = h.eval('accumBundleStats.misses');
+  h.eval("setAccumVehicle('all')"); await h.waitRendered();
+  const backAll = densityState(h);
+  h.eval("setAccumVehicle('토레스 1호')"); await h.waitRendered();
+  check('이미 본 차량 탭·전체 누적으로 돌아가면 기록을 다시 읽지 않는다(같은 결과)',
+    h.eval('accumBundleStats.misses') === misses && backAll.points === allV.points && densityState(h).points === v1.points,
+    `다시 읽은 횟수 ${h.eval('accumBundleStats.misses') - misses}`);
+  h.eval("setAccumVehicle('all')"); await h.waitRendered();
+  misses = h.eval('accumBundleStats.misses');
+  h.eval('toggleCoverageGaps()'); await h.waitRendered();
+  h.eval('toggleCoverageGaps()'); await h.waitRendered();
+  check('커버리지 갭 켜고 끄기 → 기록을 다시 읽지 않는다',
+    h.eval('accumBundleStats.misses') === misses && densityState(h).points === allV.points,
+    `다시 읽은 횟수 ${h.eval('accumBundleStats.misses') - misses}`);
+  await h.eval(`RouteDB.importRecords(${JSON.stringify(drive('2026-09-07', 127.1125))},{filename:'more-2.xlsx'})`);
+  h.eval("switchTab('stats')"); h.eval("switchTab('accum')");
+  await h.waitRendered();
+  const afterImport = densityState(h);
+  check('기록 import → 기억해 둔 결과를 버리고 새로 읽는다(+10점, 누적 일수 +1)',
+    h.eval('accumBundleStats.misses') > misses && afterImport.points === allV.points + 10 && afterImport.days === allV.days + 1,
+    `points ${allV.points}→${afterImport.points} · days ${allV.days}→${afterImport.days}`);
 }
 
 async function parityTests() {
