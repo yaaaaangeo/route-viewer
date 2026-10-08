@@ -28,7 +28,8 @@ async function renderSettingsView(){
 // 저장·검증은 auth.js(saveAllowedUsers). 최소 한 명은 남아야 하고, 내 이름을 빼면 바로 로그인 화면으로 간다.
 function renderAllowedUserSettings(){
   const el=document.getElementById('settings-user-list');
-  if(!el) return;
+  // 명단 저장·판단은 auth.js 몫 — 그 스크립트 없이 설정 화면만 불러온 경우(테스트 등)에는 건너뛴다
+  if(!el||typeof getAllowedUsers!=='function') return;
   const me=userNameKey(currentUserName());
   const users=getAllowedUsers();
   el.innerHTML=users.map((u,i)=>`

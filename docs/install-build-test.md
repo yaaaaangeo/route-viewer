@@ -4,15 +4,15 @@
 
 ## 설치 파일
 
-`npm run dist`(electron-builder)가 `release/`에 만듭니다. `package.json` 설정상 파일명 규칙:
+`npm.cmd run release`(버전 올리기 + 빌드) 또는 `npm.cmd run dist`(지금 버전 그대로 빌드)가 `release/`에 만듭니다.
+64비트만 만듭니다(예전엔 32비트까지 같이 만들어 오래 걸렸음). 파일명 규칙:
 
 | 대상 | 파일명 규칙 |
 |---|---|
-| NSIS 설치 프로그램 (x64 + ia32) | `RouteViewer-${version}-${os}-${arch}.exe` |
-| 포터블 (x64 + ia32) | `RouteViewer-portable-${version}-${arch}.exe` |
+| NSIS 설치 프로그램 (x64) | `RouteViewer-${version}-${os}-${arch}.exe` → `RouteViewer-3.1.2-win-x64.exe` |
+| 포터블 (x64) | `RouteViewer-portable-${version}-${arch}.exe` → `RouteViewer-portable-3.1.2-x64.exe` |
 
-이번 작업에서는 `npm run dist`를 실행하지 않았습니다. 지금 `release/`에 들어 있는 마지막 산출물은 3.1.1
-(`RouteViewer-3.1.1-win-x64.exe`, `RouteViewer-portable-3.1.1.exe` 등)입니다.
+마지막으로 빌드한 설치 파일은 3.1.2 입니다. 버전 올리기·빌드 방법은 [SHARED_STORAGE.md](../SHARED_STORAGE.md#새-버전-만들기--배포하기-자동-업데이트) 참고.
 데이터는 `%APPDATA%\Route Viewer\database\route-viewer.db`에 따로 저장되므로 앱을 다시 설치해도 남습니다.
 
 ---
@@ -26,10 +26,11 @@ powershell -ExecutionPolicy Bypass -File tools\setup-node.ps1
 $env:Path = "$PWD\tooling\node-v24.19.0-win-x64;" + $env:Path
 
 npm install
-npm start          # 데스크톱 앱 개발 실행 (SQLite)
+npm start          # 데스크톱 앱 개발 실행 (SQLite) — VS Code 터미널에서는 .un 이 더 간단
 npm test           # 단위/통합 테스트 (아래 표의 npm test 항목 전부)
 npm run pack       # release/win-unpacked 만 생성
-npm run dist       # release/ 에 설치 파일 + 포터블 생성
+npm run dist       # release/ 에 설치 파일 + 포터블 생성 (64비트, 지금 버전 그대로)
+npm run release    # 버전 +1 (patch) 후 빌드 — minor / major / 1.2.3 도 가능, --dry-run 으로 미리 보기
 node server.js     # 브라우저 모드(IndexedDB) + 서버 동기화 서버 → http://localhost:8080/src/index.html
 npm run test:browser-capture   # 브라우저 모드 지도 캡처 E2E (Electron 창을 브라우저로 사용, 인터넷 필요)
 ```

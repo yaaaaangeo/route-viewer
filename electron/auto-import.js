@@ -32,6 +32,8 @@ const crypto = require('crypto');
 
 const ROUTE_EXTENSIONS = new Set(['.xlsx', '.xls', '.csv']);
 const DEFAULT_INTERVAL_SEC = 60;
+const MIN_INTERVAL_SEC = 15;
+const MAX_INTERVAL_SEC = 3600;
 const AUTO_IMPORTED_BY = '자동 가져오기';
 // 처리가 끝난 상태 — 크기·수정 시각이 그대로면 다시 보지 않는다
 const SETTLED_STATUSES = new Set(['imported', 'already', 'baseline']);
@@ -139,6 +141,15 @@ class AutoImporter {
     return preview;
   }
 
+  // 확인 간격(초) — 너무 잦거나 드물지 않게 15초~1시간으로 자른다. 바로 다음 확인부터 적용.
+  setIntervalSec(sec) {
+    const n = Math.round(Number(sec));
+    if (!Number.isFinite(n)) throw new Error('확인 간격을 숫자로 골라주세요.');
+    this.db.setAutoImportConfig({ intervalSec: Math.min(MAX_INTERVAL_SEC, Math.max(MIN_INTERVAL_SEC, n)) });
+    this._reschedule();
+    return this.status();
+  }
+
   setEnabled(on) {
     this.db.setAutoImportConfig({ enabled: !!on });
     this._reschedule();
@@ -209,6 +220,7 @@ class AutoImporter {
       needsDecision: !!cfg.folder && !cfg.initialMode,
       counts: cfg.folder ? this.db.autoImportCounts(folderKey) : null,
       latest: cfg.folder ? this.db.autoImportLatest(folderKey) : null,
+      reviewPending: this.db.countPendingReview(),
       files: cfg.folder ? this.db.listAutoImportFiles(folderKey).map(publicRow) : [],
     };
   }
@@ -518,4 +530,4 @@ function publicRow(r) {
   };
 }
 
-module.exports = { AutoImporter, isRouteFileName, looksLikeUrl, AUTO_IMPORTED_BY, DEFAULT_INTERVAL_SEC };
+module.exports = { AutoImporter, isRouteFileName, looksLikeUrl, AUTO_IMPORTED_BY, DEFAULT_INTERVAL_SEC, MIN_INTERVAL_SEC, MAX_INTERVAL_SEC };

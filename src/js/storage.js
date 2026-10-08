@@ -62,8 +62,18 @@
     return diffs;
   }
 
+  // 기록 정렬 — 시각은 초 단위까지라 nav-app 이 1초에 여러 번 찍은 점은 시각이 같다. 그때는 저장한 순서(seq =
+  // 파일에 적힌 행 순서)를 쓴다. SQLite 의 ORDER BY timestamp, id 와 같은 규칙이다(seq 가 없으면 예전처럼 그대로 둔다).
+  // 이게 없으면 같은 초 안의 점이 key(위도) 순으로 섞여 재생 경로·진행 방향이 앞뒤로 튄다.
+  function compareByTime(a, b) {
+    return (a.timestamp || '').localeCompare(b.timestamp || '') || ((a.seq || 0) - (b.seq || 0));
+  }
+  function compareByVehicleTime(a, b) {
+    return String(a.vehicle || '').localeCompare(String(b.vehicle || '')) || compareByTime(a, b);
+  }
+
   function fileDistanceKm(list) {
-    const sorted = [...list].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    const sorted = [...list].sort(compareByTime);
     let distM = 0;
     for (let i = 1; i < sorted.length; i++) {
       distM += haversine(sorted[i - 1].lat, sorted[i - 1].lng, sorted[i].lat, sorted[i].lng);
@@ -158,6 +168,7 @@
       setRecommendationState: (id, state) => api.setRecommendationState(id, state),
       getImport: id => api.getImport(id),
       updateImportIssue: (id, patch) => api.updateImportIssue(id, patch),
+      reviewAllPendingImports: () => api.reviewAllPendingImports(),
       listDateImports: date => api.listDateImports(date),
       getIssueOverview: filter => api.getIssueOverview(filter || {}),
       restoreImports: imports => api.restoreImports(imports),
@@ -355,7 +366,7 @@
       // IndexedDB 트랜잭션은 그 사이에 await 하면 비활성화돼서 put 이 영영 끝나지 않는다.
       let payload = null;
       if (rows.length) {
-        rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+        rows.sort(compareByTime);
         // 조건 칸에 이슈 마스크를 넣는다(SQLite 의 ISSUE_MASK_SQL 과 같은 값)
         const index = await issueIndex();
         const withIssue = rows.map(r => ({ ...r, issueMask: maskOf(index, r.key) }));
@@ -596,6 +607,8 @@
         meta = meta || {};
         const importedAt = meta.importedAt || new Date().toISOString();
         const importedBy = meta.importedBy || '';
+        // 저장 순서 번호 — 같은 초 안의 점 순서를 지키는 데 쓴다(compareByTime)
+        let seq = Number(await metaGet('record_seq', 0)) || 0;
         const normalized = [];
         let skipped = 0;
         for (const raw of records || []) {
@@ -636,7 +649,7 @@
           let existing = representative.get(key);
           if (existing === undefined) existing = existingRows.get(key) || null;
           if (!existing) {
-            toPut.push({ key, ...rec, sourceFile: meta.filename || '', importedAt });
+            toPut.push({ key, ...rec, seq: ++seq, sourceFile: meta.filename || '', importedAt });
             inserted++;
             representative.set(key, comparable);
           } else {
@@ -656,6 +669,7 @@
           const store = t.objectStore('records');
           toPut.forEach(row => store.put(row));
           await done(t);
+          await metaSet('record_seq', seq);
         }
 
         const duplicates = normalized.length - inserted;
@@ -717,7 +731,7 @@
       async getRecordsByDate(date) {
         const rows = [];
         await scan({ date }, r => rows.push(r));
-        rows.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+        rows.sort(compareByTime);
         const config = await classificationConfig();
         const index = await issueIndex();
         return rows.map(r => {
@@ -1248,11 +1262,11 @@
           if (box && !matches(r, box, issueIdx)) return; // 날짜 범위/구역/차량 — database.js getCellVisitCounts 와 같은 조건
           const key = (r.date || '') + '|' + (r.vehicle || '');
           if (!groups.has(key)) groups.set(key, []);
-          groups.get(key).push({ lat: r.lat, lng: r.lng, timestamp: r.timestamp || '' });
+          groups.get(key).push({ lat: r.lat, lng: r.lng, timestamp: r.timestamp || '', seq: r.seq || 0 });
         });
         const visits = new Map();
         groups.forEach(list => {
-          list.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+          list.sort(compareByTime);
           CoverageGrid.accumulatePartitionVisits(list, latDeg, lngDeg, visits);
         });
         return [...visits.entries()].map(([k, v]) => {
@@ -1288,6 +1302,9 @@
       },
 
       // 이슈 메모·상태 수정 — 원본 기록과 Import 이력은 그대로 두고, 그 파일이 관여한 날짜 요약만 다시 만든다
+      // 자동 가져오기는 데스크톱 전용이라 브라우저 저장소에는 "검토 전" 파일이 없다
+      async reviewAllPendingImports() { return { updated: 0 }; },
+
       async updateImportIssue(importId, patch) {
         const db = await ready();
         const existing = await (async () => { const t = db.transaction(['imports'], 'readonly'); return reqp(t.objectStore('imports').get(importId)); })();
@@ -1486,7 +1503,7 @@
         }
         return jobs.map(({ sz, bounds, rows }) => {
           if (!bounds) return { id: sz.id, recordCount: 0, conditions: [], roads: [], match: { segments: 0, note: '경계가 없어 집계할 수 없어요.' } };
-          rows.sort((a, b) => String(a.vehicle || '').localeCompare(String(b.vehicle || '')) || String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+          rows.sort(compareByVehicleTime);
           const roadSegments = o.withRoads === false ? []
             : global.SubZones.roadSegmentsIn(sz.polygon, this.hdmapLinesFor(sz.parentZone), { subZoneId: sz.id });
           return global.SubZones.aggregateSubZone(sz, rows, { classification, roadSegments });
@@ -1570,7 +1587,7 @@
             if (bounds && (r.lat < bounds.minLat || r.lat > bounds.maxLat || r.lng < bounds.minLng || r.lng > bounds.maxLng)) return;
             rows.push({ ...r, issueMask: maskOf(index, r.key) });
           });
-          rows.sort((a, b) => String(a.vehicle || '').localeCompare(String(b.vehicle || '')) || String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+          rows.sort(compareByVehicleTime);
           const agg = global.SubZones.aggregateSegments(rows, segments, { classification: await classificationConfig() });
           segmentStats = agg.stats;
           match = agg.match;
@@ -1774,7 +1791,7 @@
   }
 
   function stripInternal(r) {
-    const { key, sourceFile, importedAt, ...rest } = r;
+    const { key, sourceFile, importedAt, seq, ...rest } = r;
     return rest;
   }
 
@@ -1830,7 +1847,7 @@
     'getBackupHistory', 'setBackupHistory', 'buildBackupPayload', 'restoreBackupPayload',
     'getClassificationStatus', 'reclassifySummaries',
     'saveCoverageSnapshot', 'listCoverageSnapshots', 'listRecommendationStates', 'setRecommendationState',
-    'getImport', 'updateImportIssue', 'listDateImports', 'getIssueOverview', 'restoreImports',
+    'getImport', 'updateImportIssue', 'reviewAllPendingImports', 'listDateImports', 'getIssueOverview', 'restoreImports',
     'getStatsBundle', 'getAccumBundle',
     'listSubZones', 'getSubZone', 'saveSubZone', 'setSubZoneActive', 'deleteSubZone', 'getSubZoneStats',
     'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',

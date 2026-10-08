@@ -254,6 +254,8 @@ function paintIssueAdmin(){
       <span>이슈 파일 ${fmtNum(ov.issueImportCount||0)}개</span>
       <span class="issue-badge open">확인 필요 ${fmtNum(ov.openCount||0)}</span>
       <span class="issue-badge resolved">확인 완료 ${fmtNum(ov.resolvedCount||0)}</span>
+      ${ov.needsReviewCount?`<span class="issue-badge review" title="자동 가져오기로 들어와 아직 이슈 여부를 확인하지 않은 파일">검토 전 ${fmtNum(ov.needsReviewCount)}</span>
+        <button class="btn ghost dm-review-all" type="button" onclick="reviewAllPendingImports()">모두 검토 완료</button>`:''}
       <span>이슈 데이터 ${fmtNum(counts.issue_all||0)}개 / 전체 ${fmtNum(counts.all||0)}개</span>
       ${ov.conflictCount?`<span class="rec-bad">동기화 충돌 정리 ${fmtNum(ov.conflictCount)}건</span>`:''}
     </div>
@@ -346,6 +348,27 @@ async function toggleIssueAdminStatus(importId){
   const im=(issueAdminImports||[]).find(x=>x.id===importId);
   if(!im) return;
   await applyIssueAdminChange(importId,{issueStatus:im.issueStatus==='resolved'?'open':'resolved'});
+}
+
+// "검토 전" 파일 전부를 검토 완료(이슈 없음)로 — 이슈를 등록한 파일·GPS 기록은 그대로다
+async function reviewAllPendingImports(){
+  const n=(issueAdminOverview&&issueAdminOverview.needsReviewCount)
+    ||(typeof autoImportStatus!=='undefined'&&autoImportStatus&&autoImportStatus.reviewPending)||0;
+  if(!n) return;
+  const ok=await confirmDialog({
+    title:'모두 검토 완료',
+    message:`검토 전 파일 ${n}개를 모두 "검토 완료(이슈 없음)"로 바꿀까요?`,
+    detail:'자동 가져오기로 들어온 파일 중 이슈를 등록하지 않은 것만 바뀌어요. 주행 기록은 그대로이고,\n나중에 그 파일에 이슈를 등록할 수도 있어요.',
+    confirmLabel:'모두 검토 완료',
+  });
+  if(!ok) return;
+  try{
+    const res=await RouteDB.reviewAllPendingImports();
+    await refreshDateIndex();          // 달력·일자 요약의 Import 색인(검토 전 표시)을 다시 읽는다
+    await renderIssueAdmin();
+    if(typeof renderAutoImportPanel==='function') await renderAutoImportPanel();
+    showToast(`${fmtNum(res.updated||0)}개 파일을 검토 완료로 바꿨어요.`);
+  }catch(err){ showError('검토 완료로 바꾸지 못했어요. ('+err.message+')'); }
 }
 
 async function markIssueAdminReviewed(importId){

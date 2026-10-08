@@ -762,3 +762,9 @@
 .ai-latest b,.cp-drive b{color:var(--teal);}
 .ai-warn{color:var(--amber);}
 .cp-drive{font-size:11px;color:var(--text-dim);width:100%;}
+.ai-veh-line{margin-top:2px;font-size:11px;line-height:1.7;}
+.ai-veh{white-space:nowrap;}
+.ai-veh b{color:var(--teal);}
+.ai-veh.behind,.ai-veh.behind b{color:var(--amber);}
+.ai-veh small{font-size:10px;}
+.dm-review-all{padding:2px 9px;font-size:10.5px;}

@@ -8,7 +8,7 @@
 // ══════════════════════════════════════════════════════════
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session, Tray, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -122,7 +122,7 @@ function configureAutoUpdater() {
       cancelId: 0,
       noLink: true,
     }).then(res => {
-      if (res.response === 1) autoUpdater.quitAndInstall();
+      if (res.response === 1) { quitting = true; autoUpdater.quitAndInstall(); }
     });
   });
 }
@@ -192,6 +192,76 @@ function getAutoImporter() {
   return autoImporter;
 }
 
+// ══════════════════════════════════════════════════════════
+//  데스크톱 실행 옵션 — Windows 시작 시 자동 실행 · 창을 닫으면 트레이로 숨기기
+//  자동 가져오기는 앱이 켜져 있어야 돈다. 창을 닫아도 트레이에 남아 있으면 계속 확인한다.
+//  · 로그인 시 자동 실행은 설치판에서만 등록한다(개발 실행은 electron.exe 를 등록하게 되므로)
+//  · 자동 실행으로 켜질 때는 --hidden 으로 창 없이 트레이에서 시작한다
+// ══════════════════════════════════════════════════════════
+const START_HIDDEN_ARG = '--hidden';
+const startHidden = process.argv.includes(START_HIDDEN_ARG);
+let tray = null;
+let quitting = false;
+let trayHintShown = false;
+
+function iconPath() { return path.join(__dirname, '..', 'build', 'icon.ico'); }
+
+function storedDesktopPrefs() {
+  try { return { closeToTray: false, ...JSON.parse(openDatabase().getMeta('desktop_prefs', '{}')) }; }
+  catch (_) { return { closeToTray: false }; }
+}
+
+function getDesktopPrefs() {
+  const login = app.isPackaged ? app.getLoginItemSettings({ args: [START_HIDDEN_ARG] }) : null;
+  return {
+    closeToTray: !!storedDesktopPrefs().closeToTray,
+    openAtLogin: !!(login && login.openAtLogin),
+    canOpenAtLogin: app.isPackaged,
+  };
+}
+
+function setDesktopPrefs(patch) {
+  const p = patch || {};
+  if ('closeToTray' in p) {
+    openDatabase().setMeta('desktop_prefs', JSON.stringify({ ...storedDesktopPrefs(), closeToTray: !!p.closeToTray }));
+    if (p.closeToTray) ensureTray(); else if (mainWindow && mainWindow.isVisible()) destroyTray();
+  }
+  if ('openAtLogin' in p) {
+    if (!app.isPackaged) throw new Error('Windows 시작 시 자동 실행은 설치한 앱에서만 켤 수 있어요.');
+    app.setLoginItemSettings({ openAtLogin: !!p.openAtLogin, args: [START_HIDDEN_ARG] });
+    // 자동 실행으로 켜지면 창 없이 트레이에서 시작하므로, 창을 닫아도 꺼지지 않게 트레이 옵션도 같이 켠다
+    if (p.openAtLogin && !storedDesktopPrefs().closeToTray) setDesktopPrefs({ closeToTray: true });
+  }
+  return getDesktopPrefs();
+}
+
+function showMainWindow() {
+  if (!mainWindow) { createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function ensureTray() {
+  if (tray) return tray;
+  let image = nativeImage.createFromPath(iconPath());
+  if (image.isEmpty()) image = nativeImage.createEmpty();
+  tray = new Tray(image);
+  tray.setToolTip('경로 뷰어 — 주행기록 자동 가져오기 중');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '경로 뷰어 열기', click: showMainWindow },
+    { label: '지금 확인 (자동 가져오기)', click: () => { getAutoImporter().runOnce('manual').catch(() => {}); } },
+    { type: 'separator' },
+    { label: '종료', click: () => { quitting = true; app.quit(); } },
+  ]));
+  tray.on('click', showMainWindow);
+  return tray;
+}
+
+function destroyTray() {
+  if (tray) { tray.destroy(); tray = null; }
+}
+
 // ── 창 ────────────────────────────────────────────────
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -202,7 +272,7 @@ function createWindow() {
     backgroundColor: '#0a0e16',
     show: false,
     title: '경로 뷰어',
-    icon: path.join(__dirname, '..', 'build', 'icon.ico'),
+    icon: iconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -211,7 +281,23 @@ function createWindow() {
     },
   });
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  // 로그인 자동 실행(--hidden)으로 켜진 첫 창은 보이지 않게 둔다 — 트레이에서 열 수 있다
+  const hideFirst = startHidden && !tray;
+  mainWindow.once('ready-to-show', () => { if (!hideFirst) mainWindow.show(); });
+
+  // 트레이로 숨기기가 켜져 있으면 [X] 는 앱을 끄지 않고 창만 숨긴다(자동 가져오기는 계속).
+  // 메뉴 [종료] · 트레이 [종료] · 업데이트 설치는 before-quit 으로 quitting 이 켜져 그대로 닫힌다.
+  mainWindow.on('close', e => {
+    if (quitting || !storedDesktopPrefs().closeToTray) return;
+    e.preventDefault();
+    mainWindow.hide();
+    ensureTray();
+    if (!trayHintShown && tray && tray.displayBalloon) {
+      trayHintShown = true;
+      tray.displayBalloon({ iconType: 'info', title: '경로 뷰어는 계속 실행 중이에요',
+        content: '트레이에서 주행기록 자동 가져오기를 계속해요. 완전히 끄려면 트레이 아이콘 › 종료.' });
+    }
+  });
   mainWindow.loadFile(path.join(__dirname, '..', 'src', 'index.html'));
 
   // 외부 링크는 기본 브라우저로 — 앱 창이 지도 타일 사이트로 날아가지 않게
@@ -367,6 +453,7 @@ function registerIpc() {
   handle('db:setRecommendationState', (id, state) => openDatabase().setRecommendationState(id, state));
   handle('db:getImport', id => openDatabase().getImport(id));
   handle('db:updateImportIssue', (id, patch) => openDatabase().updateImportIssue(id, patch));
+  handle('db:reviewAllPendingImports', () => openDatabase().reviewAllPendingImports());
   handle('db:listDateImports', date => openDatabase().listDateImports(date));
   handle('db:getIssueOverview', filter => openDatabase().getIssueOverview(filter));
   handle('db:restoreImports', imports => openDatabase().restoreImports(imports));
@@ -459,6 +546,8 @@ function registerIpc() {
   }));
 
   handle('app:revealDatabase', () => { shell.showItemInFolder(dbFilePath()); return true; });
+  handle('app:getDesktopPrefs', () => getDesktopPrefs());
+  handle('app:setDesktopPrefs', patch => setDesktopPrefs(patch));
   handle('app:checkForUpdates', () => triggerUpdateCheck(true));
 
   // ── 누적 지도 캡처 ─────────────────────────────────────
@@ -503,6 +592,7 @@ function registerIpc() {
   handle('autoImport:confirmInitial', mode => getAutoImporter().confirmInitial(mode));
   handle('autoImport:preview', () => getAutoImporter().preview());
   handle('autoImport:setEnabled', on => getAutoImporter().setEnabled(on));
+  handle('autoImport:setInterval', sec => getAutoImporter().setIntervalSec(sec));
   handle('autoImport:runNow', () => getAutoImporter().runOnce('manual'));
   handle('autoImport:retry', pathKeys => getAutoImporter().retryFailed(pathKeys));
   handle('autoImport:importBaseline', () => getAutoImporter().importBaseline());
@@ -573,12 +663,10 @@ function registerIpc() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-  });
+  // 이미 켜져 있으면(트레이에 숨어 있어도) 그 창을 앞으로 꺼낸다
+  app.on('second-instance', () => showMainWindow());
+
+  app.on('before-quit', () => { quitting = true; });
 
   app.whenReady().then(() => {
     app.setAppUserModelId(APP_ID);
@@ -589,6 +677,8 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc();
     buildMenu();
     configureAutoUpdater();
+    // 로그인 자동 실행으로 숨겨서 켜졌거나 트레이 옵션이 켜져 있으면 트레이 아이콘을 먼저 둔다
+    if (startHidden || storedDesktopPrefs().closeToTray) ensureTray();
     createWindow();
 
     // 자동 가져오기 — 화면이 다 뜬 뒤 첫 확인(앱 시작 시), 이후 설정 간격(기본 60초)마다.
@@ -615,6 +705,7 @@ if (!app.requestSingleInstanceLock()) {
 
   // node-sqlite3-wasm 은 수동으로 닫아줘야 한다
   app.on('will-quit', () => {
+    destroyTray();
     if (autoImporter) { autoImporter.stop(); autoImporter = null; }
     if (db) { db.close(); db = null; }
   });

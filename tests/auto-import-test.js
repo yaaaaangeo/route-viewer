@@ -134,6 +134,8 @@ async function main() {
   const lt = ai.status().latest;
   check('Drive 에서 가져온 마지막 주행 날짜', lt.latestDate === '2026-10-02' && lt.latestDateFile === 'day2.xlsx', JSON.stringify(lt));
   check('마지막 새 파일 반영 시각', !!lt.lastNewFileAt && /day[12]\.xlsx/.test(lt.lastNewFileName));
+  check('차량별 마지막 주행 날짜', JSON.stringify(lt.byVehicle) === JSON.stringify([
+    { vehicle: '토레스 1호차', latestDate: '2026-10-01' }, { vehicle: '토레스 2호차', latestDate: '2026-10-02' }]), JSON.stringify(lt.byVehicle));
 
   // ── C ───────────────────────────────────────────────
   section('C. 재추가 · 이름 변경 · 이동');
@@ -258,6 +260,8 @@ async function main() {
   check('공유 폴더에서 삭제돼도 DB 기록 유지', countRecords() === pts && db.listDateSummaries().some(s => s.date === '2026-10-06'));
   check('삭제된 파일은 "폴더에 없음" 표시', fileRow('zz-good.xlsx').missing === true);
   check('폴더에서 사라진 파일의 날짜도 "몇 일까지"에 포함', ai.status().latest.latestDate === '2026-10-09', ai.status().latest.latestDate);
+  const byV = Object.fromEntries(ai.status().latest.byVehicle.map(v => [v.vehicle, v.latestDate]));
+  check('차량별: 이미 처리(수동으로 넣은 파일)도 포함 · 차량마다 따로', byV['토레스 3호차'] === '2026-10-03' && byV['토레스 2호차'] === '2026-10-09' && byV['토레스 4호차'] === '2026-10-07', JSON.stringify(byV));
 
   // ── I ───────────────────────────────────────────────
   section('I. 폴더 연결 끊김');
@@ -304,6 +308,13 @@ async function main() {
   db.setMeta('auto_import_pending_summary_dates', JSON.stringify(['2026-10-11']));
   ai.initialDelayMs = 60000; ai.start(); ai.stop();
   check('미뤄 둔 날짜 요약 복구', db.listDateSummaries().some(s => s.date === '2026-10-11'));
+  ai.setIntervalSec(300);
+  check('확인 간격 저장(5분)', makeImporter(db).config().intervalSec === 300);
+  ai.setIntervalSec(1); check('너무 짧은 간격은 15초로', ai.config().intervalSec === 15);
+  ai.setIntervalSec(99999); check('너무 긴 간격은 1시간으로', ai.config().intervalSec === 3600);
+  let badInterval = null; try { ai.setIntervalSec('abc'); } catch (e) { badInterval = e; }
+  check('숫자가 아닌 간격 거부', !!badInterval);
+  ai.setIntervalSec(60);
   ai.setEnabled(false);
   check('OFF 저장', makeImporter(db).config().enabled === false);
   ai.setEnabled(true);
@@ -336,8 +347,16 @@ async function main() {
   db.updateImportIssue(fileRow('new1.xlsx').importId, { hasIssue: true, issueNote: '좌표 튐' });
   const imM3 = db.getImport(fileRow('new1.xlsx').importId);
   check('이슈 등록도 검토로 처리', imM3.needsReview === false && imM3.hasIssue && imM3.issueStatus === 'open');
+  const pendingBefore = db.countPendingReview();
+  check('검토 전 개수', pendingBefore > 0 && ai.status().reviewPending === pendingBefore, String(pendingBefore));
+  check('이슈 관리 요약에도 검토 전 개수', db.getIssueOverview({}).needsReviewCount === pendingBefore);
   const backup = db.buildBackupPayload();
   check('백업에 자동/검토 표시 포함', backup.imports.some(i => i.importSource === 'auto' && i.needsReview === true));
+  const issueBefore = db.getImport(fileRow('new1.xlsx').importId);
+  const res = db.reviewAllPendingImports();
+  check('모두 검토 완료 → 검토 전 0', res.updated === pendingBefore && db.countPendingReview() === 0, JSON.stringify(res));
+  const issueAfter = db.getImport(fileRow('new1.xlsx').importId);
+  check('이슈 등록한 파일은 그대로', issueAfter.hasIssue && issueAfter.issueNote === issueBefore.issueNote && issueAfter.issueStatus === 'open');
 
   db.close();
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) { /* 임시 폴더 */ }

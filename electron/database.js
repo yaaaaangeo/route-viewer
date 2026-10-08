@@ -1698,6 +1698,18 @@ class RouteDatabase {
     return this.getImport(importId);
   }
 
+  // "검토 전" 파일을 한 번에 검토 완료(이슈 없음)로 — 이슈를 등록한 파일은 건드리지 않는다.
+  // 이슈 마스크·날짜 요약과는 무관한 표시라 다시 계산할 것이 없다.
+  reviewAllPendingImports() {
+    const n = (this.db.get('SELECT COUNT(*) AS n FROM imports WHERE needs_review = 1 AND has_issue = 0') || { n: 0 }).n;
+    if (n) this.db.run('UPDATE imports SET needs_review = 0 WHERE needs_review = 1 AND has_issue = 0');
+    return { updated: n };
+  }
+
+  countPendingReview() {
+    return (this.db.get('SELECT COUNT(*) AS n FROM imports WHERE needs_review = 1 AND has_issue = 0') || { n: 0 }).n;
+  }
+
   getImport(importId) {
     const rows = this.db.all(
       `SELECT id, filename, file_hash AS fileHash, imported_at AS importedAt, imported_by AS importedBy,
@@ -1939,7 +1951,22 @@ class RouteDatabase {
         lastNewFileAt = r.processedAt; lastNewFileName = r.name;
       }
     });
-    return { latestDate, latestDateFile, lastNewFileAt, lastNewFileName };
+    // 차량별 마지막 주행 날짜 — 그 폴더 파일들에서 실제로 들어온 기록(출처 관계)으로 센다.
+    // "누가 아직 안 올렸나"를 보는 용도라 파일 이름이 아니라 기록의 차량 값을 쓴다.
+    const importIds = this.db.all(
+      `SELECT DISTINCT import_id AS id FROM auto_import_files
+        WHERE folder = ? AND status IN ('imported', 'already') AND import_id IS NOT NULL`, [folder]).map(r => r.id);
+    let byVehicle = [];
+    if (importIds.length) {
+      byVehicle = this.db.all(
+        `SELECT dr.vehicle AS vehicle, MAX(dr.date) AS latestDate
+           FROM record_sources rs JOIN driving_records dr ON dr.record_hash = rs.record_hash
+          WHERE rs.import_id IN (${importIds.map(() => '?').join(',')}) AND ${DATE_ONLY_SQL.replace('date', 'dr.date')}
+          GROUP BY dr.vehicle`, importIds)
+        .map(r => ({ vehicle: r.vehicle || '', latestDate: r.latestDate }))
+        .sort((a, b) => a.vehicle.localeCompare(b.vehicle, 'ko', { numeric: true }));
+    }
+    return { latestDate, latestDateFile, lastNewFileAt, lastNewFileName, byVehicle };
   }
 
   // 이번 스캔에서 본 파일은 missing 을 내리고, 못 본 파일은 올린다(행·기록은 지우지 않는다)

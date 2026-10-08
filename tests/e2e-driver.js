@@ -359,11 +359,11 @@ async function main(win, dbFilePath) {
   await js(win, `setAccumZone('강남'); toggleCoverageGaps()`);
   await sleep(200);
   await waitCoverageIdle(win);
-  check('지역별 Coverage 요약이 보인다(요구사항 10)',
-    (await js(win, `getComputedStyle(document.getElementById('coverage-summary')).display`)) !== 'none');
-  const covSummaryText = await js(win, `document.getElementById('coverage-summary').innerText`);
-  check('요약에 강남 Coverage %가 표시된다', /강남/.test(covSummaryText) && /%/.test(covSummaryText),
-    covSummaryText.replace(/\s+/g, ' '));
+  // 지역별 요약 목록(#coverage-summary)은 2026-09-07 병합 정리(ba87123)에서 빠졌다 — 지금은 선택한 지역의
+  // Coverage %·Cell 수를 상세 패널(#coverage-detail)이 보여준다. 그 패널에 강남 Coverage % 가 나오는지 본다.
+  const covSummaryText = await js(win, `document.getElementById('coverage-detail').innerText`);
+  check('강남 Coverage %가 표시된다(상세 패널)', /강남/.test(covSummaryText) && /%/.test(covSummaryText),
+    covSummaryText.replace(/\s+/g, ' ').slice(0, 60));
   const covDetailText1 = await js(win, `document.getElementById('coverage-detail').innerText`);
   check('선택한 지역의 상세 Coverage %가 보인다(요구사항 9)',
     /Coverage/.test(covDetailText1) && /%/.test(covDetailText1), covDetailText1.replace(/\s+/g, ' ').slice(0, 100));

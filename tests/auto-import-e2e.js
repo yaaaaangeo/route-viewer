@@ -132,6 +132,23 @@ module.exports = ({ mainWindow, dbFilePath }) => {
         await sleep(400);
         await win.webContents.capturePage().then(img => fs.writeFileSync(path.join(TMP, 'data-view.png'), img.toPNG()));
         console.log('  screenshot:', path.join(TMP, 'data-view.png'));
+        // 6) 실행 옵션 — 창을 닫으면 트레이로 · 개발 실행에서는 로그인 자동 실행 불가 · 7) 확인 간격
+        const prefs0 = await js('window.routeAPI.getDesktopPrefs()');
+        check('실행 옵션 기본값(트레이 끔 · 개발 실행은 자동 실행 불가)', prefs0.closeToTray === false && prefs0.canOpenAtLogin === false, JSON.stringify(prefs0));
+        check('패널에 실행 옵션·확인 간격', /창을 닫으면 트레이로/.test(panel) && /Windows 시작 시 자동 실행/.test(panel) && /확인 간격/.test(panel));
+        const loginErr = await js("window.routeAPI.setDesktopPrefs({openAtLogin:true}).then(()=>'ok',e=>e.message)");
+        check('개발 실행에서 자동 실행 켜기는 거부', /설치한 앱에서만/.test(loginErr), loginErr);
+        await js("window.routeAPI.setDesktopPrefs({closeToTray:true})");
+        win.close();
+        await sleep(500);
+        check('트레이 옵션 켜면 [X] 는 창만 숨김(앱·자동 가져오기 계속)', !win.isDestroyed() && !win.isVisible());
+        win.show();
+        await js("window.routeAPI.setDesktopPrefs({closeToTray:false})");
+        const st5 = await js('window.routeAPI.autoImportSetInterval(300)');
+        check('확인 간격 5분 저장', st5.intervalSec === 300);
+        await js('renderAutoImportPanel()');
+        check('패널 문구에 5분마다', /5분마다/.test(await js("document.getElementById('auto-import-panel').innerText")));
+        await js('window.routeAPI.autoImportSetInterval(60)');
         check('화면 콘솔 에러 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
       } catch (err) {
         check('예외 없음', false, err && err.stack);

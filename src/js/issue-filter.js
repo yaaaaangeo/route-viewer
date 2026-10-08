@@ -148,6 +148,8 @@
       openCount: issue.filter(i => i.issueStatus === 'open').length,
       resolvedCount: issue.filter(i => i.issueStatus === 'resolved').length,
       conflictCount: list.filter(i => i && i.issueConflict).length,
+      // 자동 가져오기로 들어와 아직 아무도 이슈 여부를 보지 않은 파일(이슈 없음과 따로 센다)
+      needsReviewCount: list.filter(i => i && i.needsReview && !i.hasIssue).length,
     };
   }
 

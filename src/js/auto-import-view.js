@@ -15,6 +15,15 @@ let autoImportStatus=null;
 let autoImportPreviewInfo=null;   // 최초 연결 결정 전 — 대상 파일 수
 let autoImportShowAll=false;      // 처리 이력을 전부 펼쳐 볼지
 let autoImportVisibleFiles=[];    // 지금 그려진 이력 — [다시 시도] 버튼이 순번으로 찾는다
+let desktopPrefs=null;            // Windows 시작 시 자동 실행 · 창 닫으면 트레이로 (electron/main.js)
+
+// 확인 간격 고르기 — 자동 가져오기는 15초~1시간 사이로 받는다(electron/auto-import.js)
+const AUTO_IMPORT_INTERVALS=[[30,'30초'],[60,'1분'],[300,'5분'],[600,'10분'],[1800,'30분']];
+function intervalLabel(sec){
+  const hit=AUTO_IMPORT_INTERVALS.find(([v])=>v===sec);
+  if(hit) return hit[1];
+  return sec%60===0?`${sec/60}분`:`${sec}초`;
+}
 
 function autoImportAvailable(){ return !!(window.routeAPI&&window.routeAPI.isDesktop&&window.routeAPI.autoImportStatus); }
 
@@ -26,6 +35,9 @@ async function renderAutoImportPanel(){
   try{ autoImportStatus=await window.routeAPI.autoImportStatus(); }
   catch(err){ el.innerHTML=`<div class="ir-note warn">자동 가져오기 상태를 읽지 못했어요. (${escapeHtml(err.message)})</div>`; return; }
   paintDriveBadge();
+  if(window.routeAPI.getDesktopPrefs){
+    try{ desktopPrefs=await window.routeAPI.getDesktopPrefs(); }catch(_){ desktopPrefs=null; }
+  }
   if(autoImportStatus.needsDecision&&!autoImportPreviewInfo){
     try{ autoImportPreviewInfo=await window.routeAPI.autoImportPreview(); }catch(_){ autoImportPreviewInfo=null; }
   }
@@ -56,7 +68,28 @@ function driveLatestHTML(st,compact){
   if(st.lastCheckAt) parts.push(`확인 ${escapeHtml(formatBackupTime(st.lastCheckAt))}`);
   if(!st.enabled) parts.push('자동 가져오기 꺼짐');
   if(err) parts.push('<span class="ai-warn">폴더 연결 안 됨</span>');
-  return `${head}${parts.length?` <span class="ai-dim">· ${parts.join(' · ')}</span>`:''}`;
+  return `${head}${parts.length?` <span class="ai-dim">· ${parts.join(' · ')}</span>`:''}${driveVehicleLineHTML(latest,compact)}`;
+}
+
+// '2026-10-02' 와 '2026-10-08' 사이 날짜 수
+function daysBetween(a,b){
+  const t=d=>Date.UTC(+d.slice(0,4),+d.slice(5,7)-1,+d.slice(8,10));
+  return Math.round((t(b)-t(a))/86400000);
+}
+
+// 차량별 마지막 주행 날짜 — 가장 늦은 날짜보다 뒤처진 차량은 "N일 전"으로 눈에 띄게(아직 안 올렸을 수 있다)
+function driveVehicleLineHTML(latest,compact){
+  const list=(latest&&latest.byVehicle)||[];
+  if(!list.length) return '';
+  const top=latest.latestDate;
+  const items=list.map(v=>{
+    const name=v.vehicle||'차량 정보 없음';
+    const m=/^\d{4}-(\d{2})-(\d{2})$/.exec(v.latestDate||'');
+    const date=compact&&m?`${Number(m[1])}/${Number(m[2])}`:koreanDate(v.latestDate);
+    const behind=top&&v.latestDate&&v.latestDate<top?daysBetween(v.latestDate,top):0;
+    return `<span class="ai-veh${behind?' behind':''}" title="${escapeHtml(name)} — ${escapeHtml(v.latestDate||'')}${behind?` · 가장 최근보다 ${behind}일 이전`:''}">${escapeHtml(name)} <b>${escapeHtml(date)}</b>${behind?` <small>(${behind}일 전)</small>`:''}</span>`;
+  });
+  return `<div class="ai-veh-line">${compact?'':'<span class="ai-dim">차량별 마지막 주행</span> '}${items.join('<span class="ai-dim"> · </span>')}</div>`;
 }
 
 // 달력 맨 위 "전체 데이터 수집 현황" 옆 한 줄
@@ -121,7 +154,7 @@ function paintAutoImportPanel(){
     <div class="sync-head">
       <div class="sync-title">주행기록 자동 가져오기</div>
       <div class="sync-sub">Google Drive 데스크톱 앱이 이 PC 에 동기화한 <b>폴더</b>를 선택하면, 그 안(하위 폴더 포함)의
-        .xlsx · .xls · .csv 파일을 앱 시작 때와 ${fmtNum(st.intervalSec||60)}초마다 확인해서 기존 기록에 <b>추가</b>해요.
+        .xlsx · .xls · .csv 파일을 앱 시작 때와 ${escapeHtml(intervalLabel(st.intervalSec||60))}마다 확인해서 기존 기록에 <b>추가</b>해요.
         Drive 웹 주소가 아니라 파일 탐색기에서 보이는 폴더를 고르세요. 원본 파일은 읽기만 하고 옮기거나 지우지 않아요.</div>
     </div>
     <div class="sync-row">
@@ -133,9 +166,16 @@ function paintAutoImportPanel(){
     <div class="sync-row">
       <label class="sync-checkbox">
         <input type="checkbox" id="auto-import-enabled" ${st.enabled?'checked':''} ${st.folder?'':'disabled'} onchange="setAutoImportEnabled(this.checked)"/>
-        자동 가져오기 켜기 (앱 시작 시 + ${fmtNum(st.intervalSec||60)}초마다)
+        자동 가져오기 켜기 (앱 시작 시 + ${escapeHtml(intervalLabel(st.intervalSec||60))}마다)
+      </label>
+      <label class="sync-checkbox">확인 간격
+        <select class="dm-issue-select" onchange="setAutoImportInterval(this.value)" ${st.folder?'':'disabled'}>
+          ${(AUTO_IMPORT_INTERVALS.some(([v])=>v===(st.intervalSec||60))?AUTO_IMPORT_INTERVALS:[...AUTO_IMPORT_INTERVALS,[st.intervalSec,intervalLabel(st.intervalSec)]])
+            .map(([v,l])=>`<option value="${v}"${v===(st.intervalSec||60)?' selected':''}>${escapeHtml(l)}</option>`).join('')}
+        </select>
       </label>
     </div>
+    ${desktopPrefsRowHTML()}
     ${st.folder?`<div class="ai-latest">${driveLatestHTML(st,false)}</div>`:''}
     ${banner}${folderError}
     <div class="sync-actions">
@@ -143,7 +183,44 @@ function paintAutoImportPanel(){
       ${counts.failed?`<button class="btn ghost" type="button" onclick="retryAutoImport()">실패 파일 다시 시도 (${fmtNum(counts.failed)})</button>`:''}
       <span class="sync-last mono">${escapeHtml(lastText)}</span>
     </div>
-    ${summary}${list}`;
+    ${summary}
+    ${st.reviewPending?`<div class="ai-summary"><span class="issue-badge review">검토 전 ${fmtNum(st.reviewPending)}</span>
+      <span class="ai-dim">이슈 여부를 아직 확인하지 않은 파일 — 아래 이슈 관리에서 하나씩 보거나</span>
+      <button type="button" class="ai-link" onclick="reviewAllPendingImports()">모두 검토 완료</button></div>`:''}
+    ${list}`;
+}
+
+// 앱이 꺼져 있으면 자동 가져오기도 멈춘다 — 계속 돌게 하는 두 가지 실행 옵션
+function desktopPrefsRowHTML(){
+  const p=desktopPrefs;
+  if(!p) return '';
+  return `<div class="sync-row ai-prefs">
+      <label class="sync-checkbox" title="${p.canOpenAtLogin?'PC 를 켜면 창 없이 트레이에서 시작해 자동 가져오기를 해요':'설치한 앱에서만 켤 수 있어요(지금은 개발 버전으로 실행 중)'}">
+        <input type="checkbox" ${p.openAtLogin?'checked':''} ${p.canOpenAtLogin?'':'disabled'} onchange="setDesktopPref('openAtLogin',this.checked)"/>
+        Windows 시작 시 자동 실행 (트레이에서 조용히)${p.canOpenAtLogin?'':' <span class="ai-dim">— 설치판에서만</span>'}
+      </label>
+      <label class="sync-checkbox" title="[X] 를 눌러도 꺼지지 않고 작업 표시줄 트레이에 남아 자동 가져오기를 계속해요. 완전히 끄려면 트레이 아이콘 › 종료">
+        <input type="checkbox" ${p.closeToTray?'checked':''} onchange="setDesktopPref('closeToTray',this.checked)"/>
+        창을 닫으면 트레이로 숨기기 (자동 가져오기 계속)
+      </label>
+    </div>`;
+}
+
+async function setDesktopPref(key,on){
+  try{
+    desktopPrefs=await window.routeAPI.setDesktopPrefs({[key]:!!on});
+    paintAutoImportPanel();
+    if(key==='closeToTray'&&on) showToast('이제 창을 닫아도 트레이에서 자동 가져오기를 계속해요.');
+    if(key==='openAtLogin'&&on) showToast('PC 를 켜면 트레이에서 자동으로 시작해요.');
+  }catch(err){
+    showError('실행 옵션을 바꾸지 못했어요. ('+err.message+')');
+    await renderAutoImportPanel();
+  }
+}
+
+async function setAutoImportInterval(sec){
+  try{ autoImportStatus=await window.routeAPI.autoImportSetInterval(Number(sec)); paintAutoImportPanel(); }
+  catch(err){ showError('확인 간격을 저장하지 못했어요. ('+err.message+')'); }
 }
 
 function autoImportFileRowHTML(f,i){

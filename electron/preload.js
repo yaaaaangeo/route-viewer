@@ -75,6 +75,7 @@ contextBridge.exposeInMainWorld('routeAPI', {
   // Import 이슈(파일별 이슈 여부·한 줄 메모·확인 상태)와 GPS 레코드 출처 관계
   getImport: id => call('db:getImport', id),
   updateImportIssue: (id, patch) => call('db:updateImportIssue', id, patch),
+  reviewAllPendingImports: () => call('db:reviewAllPendingImports'),
   listDateImports: date => call('db:listDateImports', date),
   getIssueOverview: filter => call('db:getIssueOverview', filter),
   restoreImports: imports => call('db:restoreImports', imports),
@@ -97,6 +98,9 @@ contextBridge.exposeInMainWorld('routeAPI', {
   confirm: opts => call('app:confirm', opts),
   info: () => call('app:info'),
   revealDatabase: () => call('app:revealDatabase'),
+  // Windows 시작 시 자동 실행 · 창을 닫으면 트레이로 숨기기
+  getDesktopPrefs: () => call('app:getDesktopPrefs'),
+  setDesktopPrefs: patch => call('app:setDesktopPrefs', patch),
   checkForUpdates: () => call('app:checkForUpdates'),
   // 누적 지도 캡처 — 지도 영역 좌표와 기본 파일명만 넘긴다. 캡처·저장 위치 선택·쓰기는
   // 메인 프로세스가 하므로 화면 코드는 임의 경로에 파일을 쓸 수 없다.
@@ -113,6 +117,7 @@ contextBridge.exposeInMainWorld('routeAPI', {
   autoImportPreview: () => call('autoImport:preview'),
   autoImportConfirmInitial: mode => call('autoImport:confirmInitial', mode),
   autoImportSetEnabled: on => call('autoImport:setEnabled', on),
+  autoImportSetInterval: sec => call('autoImport:setInterval', sec),
   autoImportRunNow: () => call('autoImport:runNow'),
   autoImportRetry: pathKeys => call('autoImport:retry', pathKeys),
   autoImportBaseline: () => call('autoImport:importBaseline'),

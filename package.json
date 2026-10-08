@@ -10,7 +10,8 @@
   "scripts": {
     "start": "electron .",
     "serve": "node server.js",
-    "dist": "electron-builder --win nsis portable --publish never",
+    "dist": "electron-builder --win nsis portable --x64 --publish never",
+    "release": "node tools/release.js",
     "pack": "electron-builder --win --dir",
     "test": "node tests/maneuver-road-context-test.js && node tests/recommendation-v2-test.js && node tests/run-tests.js && node tests/multi-vehicle-day-test.js && node tests/coverage-grid-test.js && node tests/coverage-gap-healing-test.js && node tests/apartment-shinhyundai-test.js && node tests/apartment-eunma-test.js && node tests/hdmap-data-test.js && node tests/manual-cells-storage-test.js && node tests/coverage-manual-cells-test.js && node tests/accum-date-filter-test.js && node tests/map-capture-test.js && node tests/collection-progress-test.js && node tests/tile-proxy-test.js && node tests/time-conditions-test.js && node tests/time-conditions-storage-test.js && node tests/recommendation-test.js && node tests/recommendation-storage-test.js && node tests/import-issue-test.js && node tests/subzone-recommendation-test.js && node tests/auto-analysis-test.js && node tests/recommendation-ops-test.js && node tests/hdmap-priority-test.js && node tests/career-log-test.js && node tests/auto-import-test.js",
     "test:e2e": "node tests/run-e2e.js",
@@ -37,6 +38,7 @@
       "electron/**/*",
       "src/**/*",
       "vendor/**/*",
+      "build/icon.ico",
       "package.json",
       "node_modules/node-sqlite3-wasm/**/*"
     ],
@@ -56,15 +58,13 @@
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         },
         {
           "target": "portable",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         }
       ],

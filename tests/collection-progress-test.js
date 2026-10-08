@@ -262,11 +262,17 @@ async function storageTests() {
   const perDate = s => s.map(r => `${r.date}:${r.collectionSec}:${r.driveSpanSec}`).join(',');
   const realMin = minutesOf(sSum);
   const realSpan = spanMinutesOf(sSum);
-  const naiveMin = sSum.reduce((acc, r) => acc + (CollectionStats.timeToSec(r.endTime) - CollectionStats.timeToSec(r.startTime)) / 60, 0);
+  // 같은 날 여러 차량이 달리면 주행 시간은 차량마다 "마지막 − 첫 시각"을 따로 재서 더한다(날짜 하나로 재면 차량 사이
+  // 빈 시간까지 들어간다) — 단순 계산도 (날짜, 차량)별로 한다. 실제 주행기록/ 에는 하루 여러 차량인 날이 있다.
+  const naiveMin = realDb.db.all(
+    `SELECT MIN(time) AS s, MAX(time) AS e FROM driving_records WHERE time <> '' GROUP BY date, vehicle`
+  ).reduce((acc, r) => acc + (CollectionStats.timeToSec(r.e) - CollectionStats.timeToSec(r.s)) / 60, 0);
+  const multiVehicleDays = realDb.db.all(
+    'SELECT date FROM driving_records GROUP BY date HAVING COUNT(DISTINCT vehicle) > 1').length;
   check('   실제 기록: 날짜별 수집 시간·주행 시간이 두 저장소에서 같다', perDate(sSum) === perDate(iSum),
     `${files.length}개 파일 · ${sSum.length}일 · 수집 ${Math.round(realMin).toLocaleString('ko-KR')}분 · 주행 ${Math.round(realSpan).toLocaleString('ko-KR')}분`);
-  check('   실제 기록: 주행 시간 합 = 날짜별 "마지막 시각 − 첫 시각" 단순 계산 합(하루 한 차량이라 같다)',
-    Math.round(realSpan) === Math.round(naiveMin), io(`${sSum.length}일`, `${Math.round(naiveMin)}분`, `${Math.round(realSpan)}분`));
+  check('   실제 기록: 주행 시간 합 = (날짜, 차량)별 "마지막 시각 − 첫 시각" 단순 계산 합',
+    Math.round(realSpan) === Math.round(naiveMin), io(`${sSum.length}일 · 여러 차량인 날 ${multiVehicleDays}일`, `${Math.round(naiveMin)}분`, `${Math.round(realSpan)}분`));
   const prog = CollectionStats.collectionProgress(realMin * 60, undefined, realSpan * 60);
   console.log(`         현재 저장소 주행기록 기준 진행률(수집): KPI ${CollectionStats.formatPercent(prog.rows[0].percent)} · 제안 ${CollectionStats.formatPercent(prog.rows[1].percent)}`
     + ` / 주행 기준(참고): KPI ${CollectionStats.formatPercent(prog.rows[0].drivePercent)} · 제안 ${CollectionStats.formatPercent(prog.rows[1].drivePercent)}`);
