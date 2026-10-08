@@ -6,7 +6,7 @@
 // v3.0.0 — 저장소를 SQLite/IndexedDB로 바꾸고, 파일 불러오기를 "추가(merge)"로 변경
 // v3.1.0 — 값 충돌 검사 · Import History 강화 · Coverage %/Depth · 설정(차량/지역)
 // v3.1.1 — 비교 탭을 없애고, 그 정보(거리·기록수·주행시간·GPS공백/점프)를 달력 일자 요약에 통합
-const APP_VERSION='v3.1.2';
+const APP_VERSION='v3.1.3';
 document.getElementById('version-badge').textContent=APP_VERSION;
 
 // 숫자에 천 단위 쉼표 — import 결과·통계 화면에서 공통으로 쓴다
