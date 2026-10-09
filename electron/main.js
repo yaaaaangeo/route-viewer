@@ -176,7 +176,7 @@ async function promptFolderUpdate(update, manual) {
     type: 'info',
     title: '업데이트',
     message: `새 버전 ${update.version} 이 있어요. 지금 설치할까요?`,
-    detail: `지금 버전 ${update.currentVersion}\n설치 파일 ${update.installer}\n\n`
+    detail: `지금 버전 ${update.currentVersion}\n${update.unpacked ? `새 버전 폴더 ${update.unpacked}` : `설치 파일 ${update.installer}`}\n\n`
       + '설치하는 동안 앱이 잠깐 닫혔다가 자동으로 다시 열려요.\n주행 기록·설정·Drive 연결은 그대로 남아요.',
     buttons: ['나중에', '지금 설치'],
     defaultId: 1,
@@ -187,22 +187,54 @@ async function promptFolderUpdate(update, manual) {
 }
 
 async function installFolderUpdate(update) {
+  // 1) 앱 폴더 복사(기본) — 스마트 앱 컨트롤이 서명 없는 설치 프로그램을 막아도 동작한다.
+  //    앱을 끝낸 뒤 cmd 가 release\win-unpacked 를 지금 설치 위치로 덮어쓰고 새 버전을 띄운다.
+  if (update.unpacked) {
+    const exe = process.execPath;
+    // 다른 데이터 폴더(--user-data-dir)로 실행 중이었으면 새 버전도 같은 폴더로 연다
+    const keepArgs = process.argv.slice(1).filter(a => /^--user-data-dir=/.test(a));
+    const cmdLine = UpdateFolder.copyUpdateCommand(update.unpacked, path.dirname(exe), exe, keepArgs);
+    const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${cmdLine}"`],
+      { detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true });
+    child.unref();
+    quitting = true;
+    setTimeout(() => app.quit(), 300);
+    return;
+  }
+  // 2) 설치 프로그램(앱 폴더가 없을 때) — 설치 파일이 latest.yml 과 같은지 먼저 확인
   const check = await UpdateFolder.verifyInstaller(update);
   if (!check.ok) {
     promptedUpdateVersion = null;
     dialog.showMessageBox(mainWindow, { type: 'warning', title: '업데이트', message: '지금은 설치할 수 없어요.', detail: check.message, buttons: ['확인'] });
     return;
   }
-  // electron-updater 와 같은 방식 — NSIS 설치 파일을 조용히 실행하고, 끝나면 앱을 다시 띄운다(--force-run)
+  // electron-updater 와 같은 방식 — NSIS 설치 파일을 조용히 실행하고, 끝나면 앱을 다시 띄운다(--force-run).
+  // 스마트 앱 컨트롤이 막으면 spawn 이 실패한다 — 그때는 앱을 끄지 않고 이유를 알려준다.
   const child = spawn(update.installer, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' });
+  let failed = false;
+  child.once('error', err => {
+    failed = true;
+    promptedUpdateVersion = null;
+    dialog.showMessageBox(mainWindow, {
+      type: 'warning', title: '업데이트', message: 'Windows 가 설치 프로그램 실행을 막았어요.',
+      detail: `${err.message}
+
+스마트 앱 컨트롤이 서명 없는 설치 프로그램을 막는 경우예요. 업데이트 폴더에 win-unpacked 폴더가 함께 있으면 `
+        + '설치 프로그램 없이 앱 폴더를 복사해서 업데이트해요(npm.cmd run release 로 만든 release 폴더에는 들어 있어요).',
+      buttons: ['확인'],
+    });
+  });
   child.unref();
-  quitting = true;
-  setTimeout(() => app.quit(), 300);
+  setTimeout(() => { if (!failed) { quitting = true; app.quit(); } }, 1500);
 }
 
 async function checkFolderUpdate(manual) {
   const res = await UpdateFolder.checkUpdateFolder(updateFolder(), app.getVersion());
-  if (res.status === 'newer') { await promptFolderUpdate(res, manual); return true; }
+  if (res.status === 'newer' || res.status === 'missing-installer') {
+    // 같은 버전의 앱 폴더(win-unpacked)가 있으면 그걸로 업데이트한다 — 설치 프로그램이 없어도 된다
+    res.unpacked = UpdateFolder.findUnpackedApp(res, path.basename(process.execPath));
+    if (res.unpacked || res.status === 'newer') { await promptFolderUpdate(res, manual); return true; }
+  }
   if (manual) {
     const folderLine = `업데이트 폴더: ${res.folder || updateFolder() || '(없음)'}`;
     if (res.status === 'latest') {

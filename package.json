@@ -1,7 +1,7 @@
 {
   "name": "route-viewer",
   "productName": "Route Viewer",
-  "version": "3.1.4",
+  "version": "3.1.5",
   "description": "nav-app 주행기록 리플레이 · 누적 지도 · 통계 데스크톱 앱",
   "main": "electron/main.js",
   "author": "route-viewer",
@@ -42,9 +42,7 @@
       "package.json",
       "node_modules/node-sqlite3-wasm/**/*"
     ],
-    "asarUnpack": [
-      "node_modules/node-sqlite3-wasm/dist/*.wasm"
-    ],
+    "asar": false,
     "publish": [
       {
         "provider": "generic",

@@ -7,10 +7,11 @@
 //    npm.cmd run release -- 3.5.0     원하는 버전으로
 //    ... -- --no-build                버전만 바꾸고 빌드는 안 함
 //    ... -- --dry-run                 무엇이 바뀔지 보여주기만(파일을 고치지 않음)
+//    ... -- --installer               설치판(.exe)·포터블도 만들기(스마트 앱 컨트롤이 켜진 PC 에서는 안 됨)
 //    node tools/release.js --build-only   버전은 그대로 두고 빌드만(npm run dist)
 //
 //  바꾸는 곳: package.json · package-lock.json · src/js/core.js(APP_VERSION 배지) · README.md(제목·버전 줄)
-//  빌드: electron-builder --win nsis portable --x64 → release\RouteViewer-<버전>-win-x64.exe + 포터블 + latest.yml
+//  빌드: electron-builder --win dir --x64 → release\win-unpacked(앱 폴더) + latest.yml(버전 정보)
 //  버전을 올려야 이미 설치된 앱의 자동 업데이트가 새 버전으로 알아본다.
 //  빌드할 때 이 PC 의 release 폴더를 설치판의 업데이트 폴더 기본값(package.json updateFolder)으로 넣는다 —
 //  그래서 설치한 앱이 다음 npm.cmd run release 결과를 알아서 찾아 "새 버전이 있어요"를 띄운다.
@@ -28,21 +29,32 @@ const noBuild = args.includes('--no-build');
 const buildOnly = args.includes('--build-only');
 const bump = args.find(a => !a.startsWith('--')) || 'patch';
 
+// 기본은 앱 폴더(release\win-unpacked)만 만든다 — Windows 11 "스마트 앱 컨트롤"이 서명 없는 설치 프로그램을 막아서
+// (만드는 도중 실행하는 제거 프로그램까지 막힘) 설치판을 못 만들거나 실행할 수 없기 때문이다. 설치된 앱은 이 폴더를
+// 복사해서 업데이트한다(electron/update-folder.js). 스마트 앱 컨트롤이 없는 PC 용 설치판이 필요하면 --installer.
 function build(version) {
-  console.log('\n빌드 중… (64비트 설치판 + 포터블, 몇 분 걸려요)');
+  const withInstaller = args.includes('--installer');
+  console.log(withInstaller ? '\n빌드 중… (앱 폴더 + 64비트 설치판 + 포터블, 몇 분 걸려요)' : '\n빌드 중… (앱 폴더 release\\win-unpacked)');
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;   // VS Code 터미널이 물려주면 빌드 중 electron 이 node 로 돈다
   const builder = path.join(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder');
   const updateFolder = path.join(ROOT, 'release');
-  const res = spawnSync(`"${builder}"`, ['--win', 'nsis', 'portable', '--x64', '--publish', 'never',
+  const targets = withInstaller ? ['nsis', 'portable'] : ['dir'];
+  const res = spawnSync(`"${builder}"`, ['--win', ...targets, '--x64', '--publish', 'never',
     `"--config.extraMetadata.updateFolder=${updateFolder}"`],
   { cwd: ROOT, env, stdio: 'inherit', shell: true });
   if (res.status !== 0) {
     console.error(`\n빌드 실패(종료 코드 ${res.status}).${buildOnly ? '' : ` 버전 숫자는 이미 ${version} 로 바뀌어 있어요 — 고친 뒤 npm.cmd run dist 로 다시 빌드하면 돼요.`}`);
+    if (withInstaller) console.error('설치판은 스마트 앱 컨트롤이 켜진 PC 에서는 만들 수 없어요 — --installer 없이 빌드하세요.');
     process.exit(res.status || 1);
   }
-  console.log(`\n완료 — release\\RouteViewer-${version}-win-x64.exe (설치판) · release\\RouteViewer-portable-${version}-x64.exe`);
-  console.log(`설치된 앱은 업데이트 폴더(${updateFolder})에서 이 버전을 찾아 "새 버전이 있어요" 안내를 띄워요.`);
+  if (!withInstaller) {
+    // 설치된 앱이 읽는 버전 정보 — 설치 파일(path·sha512) 없이 앱 폴더만 있다고 적는다
+    fs.writeFileSync(path.join(updateFolder, 'latest.yml'),
+      `version: ${version}\nappFolder: win-unpacked\nreleaseDate: '${new Date().toISOString()}'\n`, 'utf8');
+  }
+  console.log(`\n완료 — release\\win-unpacked (버전 ${version})${withInstaller ? ` · RouteViewer-${version}-win-x64.exe · RouteViewer-portable-${version}-x64.exe` : ''}`);
+  console.log(`설치된 앱은 업데이트 폴더(${updateFolder})에서 이 버전을 찾아 "새 버전이 있어요" 안내를 띄우고, 앱 폴더를 복사해 업데이트해요.`);
 }
 
 const pkgPath = path.join(ROOT, 'package.json');

@@ -62,9 +62,13 @@ async function checkUpdateFolder(folder, currentVersion) {
   let info;
   try { info = parseLatestYml(await fs.promises.readFile(path.join(folder, 'latest.yml'), 'utf8')); }
   catch (_) { return { status: 'no-info', folder, message: '업데이트 폴더에 latest.yml 이 없어요(아직 빌드한 적 없음).' }; }
-  if (!parseVersion(info.version) || !info.path) return { status: 'no-info', folder, message: 'latest.yml 을 읽지 못했어요.' };
+  if (!parseVersion(info.version)) return { status: 'no-info', folder, message: 'latest.yml 을 읽지 못했어요.' };
   if (compareVersions(info.version, currentVersion) <= 0) {
     return { status: 'latest', folder, version: info.version, currentVersion };
+  }
+  // 설치 파일 없이 앱 폴더(win-unpacked)만 만든 빌드(npm run release 기본) — 호출한 쪽이 findUnpackedApp 으로 앱 폴더를 찾는다
+  if (!info.path) {
+    return { status: 'missing-installer', folder, version: info.version, currentVersion, installer: null, message: `새 버전 ${info.version} 은 설치 파일 없이 앱 폴더로만 있어요.` };
   }
   // 설치 파일 이름은 폴더 안 파일만 허용한다(latest.yml 에 경로가 섞여 있어도 폴더 밖으로 나가지 않게)
   const installer = path.join(folder, path.basename(info.path));
@@ -84,4 +88,41 @@ async function verifyInstaller(update) {
   return { ok: true };
 }
 
-module.exports = { parseLatestYml, compareVersions, checkUpdateFolder, verifyInstaller, sha512Base64 };
+// ── 설치 프로그램 없이 업데이트(앱 폴더 복사) ─────────────────
+// Windows 11 "스마트 앱 컨트롤"은 서명 없는 NSIS 설치 프로그램을 막는다(실행 자체가 안 됨). 앱 본체(Electron 실행 파일)는
+// 막히지 않으므로, 빌드된 앱 폴더(release\win-unpacked)를 설치 위치에 그대로 복사해서 업데이트한다.
+// 복사본의 버전(resources\app\package.json, 예전 빌드는 resources\app.asar\package.json)이 latest.yml 과 같아야 쓴다
+// — 빌드 중이거나 다른 버전이면 안 쓴다.
+// readJson 은 Electron 메인에서는 asar 안을 읽을 수 있는 fs 를, 테스트에서는 평범한 폴더를 읽는다.
+function findUnpackedApp(update, exeName, readJson) {
+  if (!update || !update.folder) return null;
+  const dir = path.join(update.folder, 'win-unpacked');
+  if (!fs.existsSync(path.join(dir, exeName))) return null;
+  const read = readJson || (p => JSON.parse(fs.readFileSync(p, 'utf8')));
+  let pkg = null;
+  for (const sub of ['app', 'app.asar']) {
+    try { pkg = read(path.join(dir, 'resources', sub, 'package.json')); break; } catch (_) { /* 다음 후보 */ }
+  }
+  return pkg && compareVersions(pkg.version, update.version) === 0 ? dir : null;
+}
+
+// 앱이 끝난 뒤 복사하고 다시 여는 cmd 한 줄. Windows 기본 도구(cmd·ping·robocopy)만 쓰고 스크립트 파일을 만들지 않는다.
+//  · ping 으로 3초 기다림(분리 실행이라 timeout 명령은 입력이 없어 바로 끝난다)
+//  · robocopy /E — 덮어쓰기만 하고 설치 폴더에만 있는 파일(제거 프로그램 등)은 지우지 않는다. 잠겨 있으면 1초 간격으로 다시 시도
+//  · 앱 코드(resources\app)는 /MIR 로 맞춰서 새 버전에서 지운 파일이 남지 않게 한다
+//  · 예전 빌드의 resources\app.asar 가 남아 있으면 Electron 이 그쪽을 먼저 읽으므로 지운다(asar 없는 빌드로 바뀐 3.1.5~)
+//  · 끝나면 새 버전을 띄운다
+//  · relaunchArgs: 다시 띄울 때 넘길 인자(예: --user-data-dir=… — 다른 데이터 폴더로 실행 중이었으면 그대로 이어서)
+function copyUpdateCommand(srcDir, destDir, exePath, relaunchArgs) {
+  const q = s => `"${String(s).replace(/"/g, '')}"`;
+  const args = (relaunchArgs || []).map(q).join(' ');
+  const rc = '/R:30 /W:1 /NFL /NDL /NJH /NJS /NP >nul';
+  const srcApp = path.join(srcDir, 'resources', 'app');
+  const dstRes = path.join(destDir, 'resources');
+  const asarCleanup = fs.existsSync(srcApp)
+    ? ` & robocopy ${q(srcApp)} ${q(path.join(dstRes, 'app'))} /MIR ${rc} & del /f /q ${q(path.join(dstRes, 'app.asar'))} >nul 2>&1 & rmdir /s /q ${q(path.join(dstRes, 'app.asar.unpacked'))} >nul 2>&1`
+    : '';
+  return `ping -n 4 127.0.0.1 >nul & robocopy ${q(srcDir)} ${q(destDir)} /E ${rc}${asarCleanup} & start "" ${q(exePath)}${args ? ' ' + args : ''}`;
+}
+
+module.exports = { parseLatestYml, compareVersions, checkUpdateFolder, verifyInstaller, sha512Base64, findUnpackedApp, copyUpdateCommand };

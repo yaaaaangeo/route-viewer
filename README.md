@@ -1,9 +1,9 @@
-# Route Viewer (경로 뷰어) v3.1.4
+# Route Viewer (경로 뷰어) v3.1.5
 
 nav-app 주행기록(.xlsx/.csv)을 **로컬 데이터베이스에 계속 쌓아두고** 달력 · 누적 지도 ·
 Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구입니다.
 
-- 버전: `package.json` 기준 **3.1.4** (화면 좌측 하단 배지 `APP_VERSION`도 v3.1.4)
+- 버전: `package.json` 기준 **3.1.5** (화면 좌측 하단 배지 `APP_VERSION`도 v3.1.5)
 - 저장소: 데스크톱 앱 = **SQLite**, 브라우저로 열면 = **IndexedDB** (화면 코드는 같은 `RouteDB` 인터페이스만 씀)
 
 ---
