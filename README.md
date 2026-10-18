@@ -23,6 +23,7 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
 | 문서 | 내용 |
 |---|---|
 | [Google Drive 자동 가져오기](docs/auto-import.md) | 운전자가 휴대폰으로 Drive 공유 폴더에 올린 엑셀을 PC 가 60초마다 자동 반영 · 연결 방법 |
+| [nav-app 연계 — 추천 수집 주행](docs/collection-loop.md) | 오늘 추천 → 수집 계획 파일 → nav-app TMAP 경로·필수 구간 검증 → 주행 결과 + GPS 원본으로 계획 대비 판정 → 추천 전후 비교 |
 | [달력 · 교통 시간대 · 조도 조건](docs/calendar-conditions.md) | 전체 데이터 수집 현황, 교통 시간대·조도(일출/일몰) 분류 기준과 설정 |
 | [추천 주행](docs/recommendation.md) | 부족한 구역·시간대·조건 조합을 찾아 점수·근거·권장 시간 제시 |
 | [자동 분석 추천](docs/auto-analysis.md) | 상위 구역만 고르면 도로 Segment·세부 구역을 스스로 만들어 추천 |

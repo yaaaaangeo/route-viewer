@@ -1,0 +1,1685 @@
+{
+ "format": "nav-app-collection-plan",
+ "schemaVersion": 1,
+ "canonicalization": "nav-app-c14n-v1",
+ "coordOrder": "lat,lng",
+ "passJudge": "nav-app-pass-v1",
+ "planId": "cp-20260917-95a05117f8",
+ "planVersion": 1,
+ "createdAt": "2026-09-17T01:00:00.000Z",
+ "planDate": "2026-09-17",
+ "region": "강남",
+ "regionCode": "gangnam",
+ "policy": {
+  "policyId": "p-test",
+  "policyName": "시험 정책"
+ },
+ "source": {
+  "app": "route-viewer",
+  "appVersion": "3.1.5",
+  "engine": "segment-recommendation",
+  "dataRevision": "test",
+  "note": "score·deficit 는 Route Viewer 추천 엔진 값 — 받는 쪽에서 다시 계산하지 않는다"
+ },
+ "window": {
+  "start": "09:00",
+  "end": "18:00"
+ },
+ "vehicleCount": 1,
+ "items": [
+  {
+   "itemId": "pi-3",
+   "recommendationId": "강남:서초대로:1jrdjyi|weekend|morning_peak|daylight|both",
+   "segmentId": "강남:서초대로:1jrdjyi",
+   "title": "서초대로 · 구간 #1",
+   "roadName": "서초대로",
+   "parentZone": "강남",
+   "subZoneName": "서초대로 유형 확인 불가 #1",
+   "score": 92.2,
+   "dataNeedScore": 92.2,
+   "priorityLabel": "매우 높음",
+   "confidence": "낮음",
+   "projectPriority": null,
+   "reasons": [
+    {
+     "key": "timePeriod",
+     "label": "시간대 부족도",
+     "value": 100,
+     "contribution": 26.7
+    },
+    {
+     "key": "segmentCoverage",
+     "label": "구간 Coverage 부족도",
+     "value": 95.7,
+     "contribution": 25.5
+    },
+    {
+     "key": "lightCondition",
+     "label": "조도 조건 부족도",
+     "value": 100,
+     "contribution": 13.3
+    }
+   ],
+   "reasonText": "서초대로 서측 구간 #1(유형 확인 불가)의 주말 출근 피크 · 주간 수집은 0분입니다. 점수를 가장 많이 올린 항목은 시간대 부족도(100점 — 0분 / 목표 60분)입니다. 주말 후보 근거: 주말 오후 비피크 0분 · 출근 피크 0분 — 한 칸 목표 60분 미달.",
+   "deficit": {
+    "currentMinutes": 0,
+    "targetMinutes": 60,
+    "additionalMinutes": 60,
+    "currentVisits": 0,
+    "targetVisits": 2,
+    "coveragePercent": 4.3
+   },
+   "target": {
+    "targetMinutes": 60,
+    "currentMinutes": 0,
+    "deficitMinutes": 60,
+    "direction": "both",
+    "currentVisits": 0,
+    "recommendedPasses": 22,
+    "recommendedPassMinutes": 3
+   },
+   "condition": {
+    "weekdayType": "weekend",
+    "trafficPeriod": "morning_peak",
+    "lightCondition": "daylight"
+   },
+   "conditionLabel": "주말 · 출근 피크 · 주간",
+   "timeWindow": {
+    "start": "07:00",
+    "end": "10:00"
+   },
+   "direction": {
+    "id": "both",
+    "label": "양방향"
+   },
+   "directionPlan": {
+    "feasibility": {
+     "forward": {
+      "status": "gps_seen",
+      "basis": "GPS 기록상 이 방향 13건 — 가능성은 있으나 지도로 확인되지 않음 (TMAP 검증으로 확인)"
+     },
+     "backward": {
+      "status": "needs_check",
+      "basis": "HD Map 에 일방통행·분리 차도 정보가 없어 지도만으로 판단할 수 없음 (TMAP 검증으로 확인)"
+     }
+    },
+    "allowed": [
+     "forward",
+     "backward"
+    ],
+    "excluded": [],
+    "note": "HD Map 에 일방통행·분리 차도 정보가 없어 방향 가능 여부는 nav-app TMAP 검증으로 확인합니다"
+   },
+   "passes": 20,
+   "visits": [
+    {
+     "passNo": 1,
+     "direction": "forward"
+    },
+    {
+     "passNo": 2,
+     "direction": "backward"
+    },
+    {
+     "passNo": 3,
+     "direction": "forward"
+    },
+    {
+     "passNo": 4,
+     "direction": "backward"
+    },
+    {
+     "passNo": 5,
+     "direction": "forward"
+    },
+    {
+     "passNo": 6,
+     "direction": "backward"
+    },
+    {
+     "passNo": 7,
+     "direction": "forward"
+    },
+    {
+     "passNo": 8,
+     "direction": "backward"
+    },
+    {
+     "passNo": 9,
+     "direction": "forward"
+    },
+    {
+     "passNo": 10,
+     "direction": "backward"
+    },
+    {
+     "passNo": 11,
+     "direction": "forward"
+    },
+    {
+     "passNo": 12,
+     "direction": "backward"
+    },
+    {
+     "passNo": 13,
+     "direction": "forward"
+    },
+    {
+     "passNo": 14,
+     "direction": "backward"
+    },
+    {
+     "passNo": 15,
+     "direction": "forward"
+    },
+    {
+     "passNo": 16,
+     "direction": "backward"
+    },
+    {
+     "passNo": 17,
+     "direction": "forward"
+    },
+    {
+     "passNo": 18,
+     "direction": "backward"
+    },
+    {
+     "passNo": 19,
+     "direction": "forward"
+    },
+    {
+     "passNo": 20,
+     "direction": "backward"
+    }
+   ],
+   "estimate": {
+    "speedKmh": 20,
+    "passSec": 164,
+    "turnSec": 60,
+    "neededPasses": 22,
+    "fitPasses": 48,
+    "plannedPasses": 20,
+    "windowMinutes": 180,
+    "windowUse": 0.41,
+    "expectedMinutes": 54.7,
+    "deficitMinutes": 60,
+    "shortfallMinutes": 5.3,
+    "limitedBy": "max_passes",
+    "speedSensitivity": [
+     {
+      "speedKmh": 15,
+      "plannedPasses": 17,
+      "expectedMinutes": 62.1,
+      "shortfallMinutes": 0
+     },
+     {
+      "speedKmh": 20,
+      "plannedPasses": 20,
+      "expectedMinutes": 54.7,
+      "shortfallMinutes": 5.3
+     },
+     {
+      "speedKmh": 30,
+      "plannedPasses": 20,
+      "expectedMinutes": 36.7,
+      "shortfallMinutes": 23.3
+     }
+    ],
+    "quantityStatus": "shortfall",
+    "unsuitable": false,
+    "plansNeeded": 2,
+    "basis": "구간 913m ÷ 20km/h = 편도 약 164초 · 필요 22회 · 시간대 180분에 48회",
+    "note": "이번 계획으로 약 54.7분 예상 · 부족분 60분 중 5.3분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)"
+   },
+   "connectivity": {
+    "known": true,
+    "deadEnds": [
+     "end"
+    ],
+    "note": "구간 끝이 다른 도로와 이어지지 않음 — 막다른 길이거나 지도 범위 끝 (돌아 나오기 확인 필요)"
+   },
+   "feasibility": {
+    "status": "shortfall",
+    "label": "목표 미달 예상",
+    "quantityStatus": "shortfall",
+    "unknownDirections": [
+     "backward"
+    ],
+    "reasons": [
+     "이번 계획으로 약 54.7분 예상 · 부족분 60분 중 5.3분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)",
+     "형상 반대 방향: 지도로 주행 가능 여부를 알 수 없음 — nav-app TMAP 검증으로 확인",
+     "구간 끝이 다른 도로와 이어지지 않음 — 막다른 길이거나 지도 범위 끝 (돌아 나오기 확인 필요)"
+    ]
+   },
+   "passMinutes": 3,
+   "estimatedMinutes": 55,
+   "lengthM": 913,
+   "geometry": [
+    [
+     37.496738,
+     127.023406
+    ],
+    [
+     37.496468,
+     127.022528
+    ],
+    [
+     37.496276,
+     127.021907
+    ],
+    [
+     37.49601,
+     127.021042
+    ],
+    [
+     37.49597,
+     127.020914
+    ],
+    [
+     37.495838,
+     127.020485
+    ],
+    [
+     37.495799,
+     127.020358
+    ],
+    [
+     37.495659,
+     127.019896
+    ],
+    [
+     37.495388,
+     127.019006
+    ],
+    [
+     37.495221,
+     127.018457
+    ],
+    [
+     37.495049,
+     127.017893
+    ],
+    [
+     37.494965,
+     127.017618
+    ],
+    [
+     37.494782,
+     127.017014
+    ],
+    [
+     37.494687,
+     127.016703
+    ],
+    [
+     37.494343,
+     127.015572
+    ],
+    [
+     37.493953,
+     127.014291
+    ],
+    [
+     37.493913,
+     127.01416
+    ],
+    [
+     37.493787,
+     127.013751
+    ]
+   ],
+   "mustPass": {
+    "path": [
+     [
+      37.496738,
+      127.023406
+     ],
+     [
+      37.496468,
+      127.022528
+     ],
+     [
+      37.496276,
+      127.021907
+     ],
+     [
+      37.49601,
+      127.021042
+     ],
+     [
+      37.49597,
+      127.020914
+     ],
+     [
+      37.495838,
+      127.020485
+     ],
+     [
+      37.495799,
+      127.020358
+     ],
+     [
+      37.495659,
+      127.019896
+     ],
+     [
+      37.495388,
+      127.019006
+     ],
+     [
+      37.495221,
+      127.018457
+     ],
+     [
+      37.495049,
+      127.017893
+     ],
+     [
+      37.494965,
+      127.017618
+     ],
+     [
+      37.494782,
+      127.017014
+     ],
+     [
+      37.494687,
+      127.016703
+     ],
+     [
+      37.494343,
+      127.015572
+     ],
+     [
+      37.493953,
+      127.014291
+     ],
+     [
+      37.493913,
+      127.01416
+     ],
+     [
+      37.493787,
+      127.013751
+     ]
+    ],
+    "direction": "forward",
+    "toleranceM": 25,
+    "minCoverage": 0.8,
+    "judge": "nav-app-pass-v1",
+    "neighbors": [
+     [
+      [
+       37.494242,
+       127.01562
+      ],
+      [
+       37.494586,
+       127.016751
+      ],
+      [
+       37.494681,
+       127.017063
+      ],
+      [
+       37.494864,
+       127.017666
+      ],
+      [
+       37.494948,
+       127.017941
+      ],
+      [
+       37.49512,
+       127.018505
+      ],
+      [
+       37.495287,
+       127.019055
+      ],
+      [
+       37.495558,
+       127.019944
+      ],
+      [
+       37.495698,
+       127.020406
+      ],
+      [
+       37.495737,
+       127.020534
+      ],
+      [
+       37.49587,
+       127.020963
+      ],
+      [
+       37.495909,
+       127.021091
+      ],
+      [
+       37.496176,
+       127.021956
+      ],
+      [
+       37.496367,
+       127.022577
+      ],
+      [
+       37.496637,
+       127.023454
+      ],
+      [
+       37.496868,
+       127.024202
+      ],
+      [
+       37.496907,
+       127.024329
+      ]
+     ],
+     [
+      [
+       37.496969,
+       127.024154
+      ],
+      [
+       37.496738,
+       127.023406
+      ]
+     ]
+    ],
+    "neighborsKnown": true
+   },
+   "routeHints": {
+    "entry": [
+     37.496738,
+     127.023406
+    ],
+    "exit": [
+     37.493787,
+     127.013751
+    ]
+   },
+   "roadSource": {
+    "type": "hdmap",
+    "basis": [
+     "HD Map 도로 구간",
+     "이 구간 GPS 기록 13건"
+    ]
+   },
+   "alternatives": [],
+   "order": 1
+  },
+  {
+   "itemId": "pi-1",
+   "recommendationId": "강남:강남대로:piel88|weekend|lunch_peak|daylight|both",
+   "segmentId": "강남:강남대로:piel88",
+   "title": "강남대로 · 구간 #4",
+   "roadName": "강남대로",
+   "parentZone": "강남",
+   "subZoneName": "강남대로 유형 확인 불가 #1",
+   "score": 92.7,
+   "dataNeedScore": 92.7,
+   "priorityLabel": "매우 높음",
+   "confidence": "낮음",
+   "projectPriority": null,
+   "reasons": [
+    {
+     "key": "timePeriod",
+     "label": "시간대 부족도",
+     "value": 100,
+     "contribution": 26.7
+    },
+    {
+     "key": "segmentCoverage",
+     "label": "구간 Coverage 부족도",
+     "value": 97.5,
+     "contribution": 26
+    },
+    {
+     "key": "lightCondition",
+     "label": "조도 조건 부족도",
+     "value": 100,
+     "contribution": 13.3
+    }
+   ],
+   "reasonText": "강남대로 북측 구간 #1(유형 확인 불가)의 주말 점심 피크 · 주간 수집은 0분입니다. 점수를 가장 많이 올린 항목은 시간대 부족도(100점 — 0분 / 목표 60분)입니다. 주말 후보 근거: 주말 점심 피크 0분 — 한 칸 목표 60분 미달.",
+   "deficit": {
+    "currentMinutes": 0,
+    "targetMinutes": 60,
+    "additionalMinutes": 60,
+    "currentVisits": 0,
+    "targetVisits": 2,
+    "coveragePercent": 2.5
+   },
+   "target": {
+    "targetMinutes": 60,
+    "currentMinutes": 0,
+    "deficitMinutes": 60,
+    "direction": "both",
+    "currentVisits": 0,
+    "recommendedPasses": 26,
+    "recommendedPassMinutes": 2
+   },
+   "condition": {
+    "weekdayType": "weekend",
+    "trafficPeriod": "lunch_peak",
+    "lightCondition": "daylight"
+   },
+   "conditionLabel": "주말 · 점심 피크 · 주간",
+   "timeWindow": {
+    "start": "11:30",
+    "end": "13:30"
+   },
+   "direction": {
+    "id": "both",
+    "label": "양방향"
+   },
+   "directionPlan": {
+    "feasibility": {
+     "forward": {
+      "status": "needs_check",
+      "basis": "HD Map 에 일방통행·분리 차도 정보가 없어 지도만으로 판단할 수 없음 (TMAP 검증으로 확인)"
+     },
+     "backward": {
+      "status": "needs_check",
+      "basis": "HD Map 에 일방통행·분리 차도 정보가 없어 지도만으로 판단할 수 없음 (TMAP 검증으로 확인)"
+     }
+    },
+    "allowed": [
+     "forward",
+     "backward"
+    ],
+    "excluded": [],
+    "note": "HD Map 에 일방통행·분리 차도 정보가 없어 방향 가능 여부는 nav-app TMAP 검증으로 확인합니다"
+   },
+   "passes": 20,
+   "visits": [
+    {
+     "passNo": 1,
+     "direction": "forward"
+    },
+    {
+     "passNo": 2,
+     "direction": "backward"
+    },
+    {
+     "passNo": 3,
+     "direction": "forward"
+    },
+    {
+     "passNo": 4,
+     "direction": "backward"
+    },
+    {
+     "passNo": 5,
+     "direction": "forward"
+    },
+    {
+     "passNo": 6,
+     "direction": "backward"
+    },
+    {
+     "passNo": 7,
+     "direction": "forward"
+    },
+    {
+     "passNo": 8,
+     "direction": "backward"
+    },
+    {
+     "passNo": 9,
+     "direction": "forward"
+    },
+    {
+     "passNo": 10,
+     "direction": "backward"
+    },
+    {
+     "passNo": 11,
+     "direction": "forward"
+    },
+    {
+     "passNo": 12,
+     "direction": "backward"
+    },
+    {
+     "passNo": 13,
+     "direction": "forward"
+    },
+    {
+     "passNo": 14,
+     "direction": "backward"
+    },
+    {
+     "passNo": 15,
+     "direction": "forward"
+    },
+    {
+     "passNo": 16,
+     "direction": "backward"
+    },
+    {
+     "passNo": 17,
+     "direction": "forward"
+    },
+    {
+     "passNo": 18,
+     "direction": "backward"
+    },
+    {
+     "passNo": 19,
+     "direction": "forward"
+    },
+    {
+     "passNo": 20,
+     "direction": "backward"
+    }
+   ],
+   "estimate": {
+    "speedKmh": 20,
+    "passSec": 142,
+    "turnSec": 60,
+    "neededPasses": 26,
+    "fitPasses": 35,
+    "plannedPasses": 20,
+    "windowMinutes": 120,
+    "windowUse": 0.56,
+    "expectedMinutes": 47.3,
+    "deficitMinutes": 60,
+    "shortfallMinutes": 12.7,
+    "limitedBy": "max_passes",
+    "speedSensitivity": [
+     {
+      "speedKmh": 15,
+      "plannedPasses": 19,
+      "expectedMinutes": 60.2,
+      "shortfallMinutes": 0
+     },
+     {
+      "speedKmh": 20,
+      "plannedPasses": 20,
+      "expectedMinutes": 47.3,
+      "shortfallMinutes": 12.7
+     },
+     {
+      "speedKmh": 30,
+      "plannedPasses": 20,
+      "expectedMinutes": 31.7,
+      "shortfallMinutes": 28.3
+     }
+    ],
+    "quantityStatus": "shortfall",
+    "unsuitable": false,
+    "plansNeeded": 2,
+    "basis": "구간 790m ÷ 20km/h = 편도 약 142초 · 필요 26회 · 시간대 120분에 35회",
+    "note": "이번 계획으로 약 47.3분 예상 · 부족분 60분 중 12.7분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)"
+   },
+   "connectivity": {
+    "known": true,
+    "deadEnds": [],
+    "note": "양 끝이 다른 도로와 이어짐"
+   },
+   "feasibility": {
+    "status": "shortfall",
+    "label": "목표 미달 예상",
+    "quantityStatus": "shortfall",
+    "unknownDirections": [
+     "forward",
+     "backward"
+    ],
+    "reasons": [
+     "이번 계획으로 약 47.3분 예상 · 부족분 60분 중 12.7분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)",
+     "형상 순서 방향·형상 반대 방향: 지도로 주행 가능 여부를 알 수 없음 — nav-app TMAP 검증으로 확인"
+    ]
+   },
+   "passMinutes": 2,
+   "estimatedMinutes": 47,
+   "lengthM": 790,
+   "geometry": [
+    [
+     37.497954,
+     127.02773
+    ],
+    [
+     37.498055,
+     127.027682
+    ],
+    [
+     37.499472,
+     127.026998
+    ],
+    [
+     37.499573,
+     127.026949
+    ],
+    [
+     37.500396,
+     127.026552
+    ],
+    [
+     37.500773,
+     127.02637
+    ],
+    [
+     37.501139,
+     127.026193
+    ],
+    [
+     37.502037,
+     127.025759
+    ],
+    [
+     37.502635,
+     127.02547
+    ],
+    [
+     37.503945,
+     127.024838
+    ],
+    [
+     37.50449,
+     127.024574
+    ],
+    [
+     37.504503,
+     127.024568
+    ],
+    [
+     37.504591,
+     127.024526
+    ]
+   ],
+   "mustPass": {
+    "path": [
+     [
+      37.497954,
+      127.02773
+     ],
+     [
+      37.498055,
+      127.027682
+     ],
+     [
+      37.499472,
+      127.026998
+     ],
+     [
+      37.499573,
+      127.026949
+     ],
+     [
+      37.500396,
+      127.026552
+     ],
+     [
+      37.500773,
+      127.02637
+     ],
+     [
+      37.501139,
+      127.026193
+     ],
+     [
+      37.502037,
+      127.025759
+     ],
+     [
+      37.502635,
+      127.02547
+     ],
+     [
+      37.503945,
+      127.024838
+     ],
+     [
+      37.50449,
+      127.024574
+     ],
+     [
+      37.504503,
+      127.024568
+     ],
+     [
+      37.504591,
+      127.024526
+     ]
+    ],
+    "direction": "forward",
+    "toleranceM": 25,
+    "minCoverage": 0.8,
+    "judge": "nav-app-pass-v1",
+    "neighbors": [
+     [
+      [
+       37.505762,
+       127.023828
+      ],
+      [
+       37.505071,
+       127.024154
+      ],
+      [
+       37.504553,
+       127.024399
+      ],
+      [
+       37.504465,
+       127.024441
+      ],
+      [
+       37.504451,
+       127.024447
+      ]
+     ],
+     [
+      [
+       37.504451,
+       127.024447
+      ],
+      [
+       37.503906,
+       127.024711
+      ],
+      [
+       37.502596,
+       127.025344
+      ],
+      [
+       37.501998,
+       127.025633
+      ],
+      [
+       37.5011,
+       127.026066
+      ],
+      [
+       37.500734,
+       127.026243
+      ],
+      [
+       37.500357,
+       127.026425
+      ],
+      [
+       37.499534,
+       127.026823
+      ],
+      [
+       37.499434,
+       127.026871
+      ],
+      [
+       37.498017,
+       127.027556
+      ],
+      [
+       37.497915,
+       127.027603
+      ]
+     ],
+     [
+      [
+       37.4963,
+       127.028484
+      ],
+      [
+       37.4964,
+       127.028438
+      ],
+      [
+       37.497954,
+       127.02773
+      ]
+     ],
+     [
+      [
+       37.499044,
+       127.030946
+      ],
+      [
+       37.498352,
+       127.028661
+      ],
+      [
+       37.498055,
+       127.027682
+      ],
+      [
+       37.498021,
+       127.027569
+      ],
+      [
+       37.498017,
+       127.027556
+      ]
+     ],
+     [
+      [
+       37.504158,
+       127.023489
+      ],
+      [
+       37.504211,
+       127.023663
+      ],
+      [
+       37.504451,
+       127.024447
+      ],
+      [
+       37.504465,
+       127.024491
+      ],
+      [
+       37.50449,
+       127.024574
+      ]
+     ],
+     [
+      [
+       37.497954,
+       127.02773
+      ],
+      [
+       37.498251,
+       127.02871
+      ],
+      [
+       37.498943,
+       127.030994
+      ]
+     ],
+     [
+      [
+       37.50483,
+       127.025329
+      ],
+      [
+       37.504792,
+       127.025202
+      ],
+      [
+       37.504591,
+       127.024526
+      ],
+      [
+       37.504566,
+       127.024443
+      ],
+      [
+       37.504553,
+       127.024399
+      ]
+     ],
+     [
+      [
+       37.504553,
+       127.024399
+      ],
+      [
+       37.504312,
+       127.023614
+      ],
+      [
+       37.504259,
+       127.023441
+      ]
+     ],
+     [
+      [
+       37.497915,
+       127.027603
+      ],
+      [
+       37.496363,
+       127.02831
+      ]
+     ],
+     [
+      [
+       37.498017,
+       127.027556
+      ],
+      [
+       37.497676,
+       127.026449
+      ],
+      [
+       37.497532,
+       127.025981
+      ]
+     ],
+     [
+      [
+       37.497431,
+       127.026031
+      ],
+      [
+       37.497575,
+       127.026498
+      ],
+      [
+       37.497915,
+       127.027603
+      ],
+      [
+       37.49792,
+       127.027617
+      ],
+      [
+       37.497954,
+       127.02773
+      ]
+     ],
+     [
+      [
+       37.504591,
+       127.024526
+      ],
+      [
+       37.505109,
+       127.024281
+      ],
+      [
+       37.5058,
+       127.023955
+      ]
+     ],
+     [
+      [
+       37.50449,
+       127.024574
+      ],
+      [
+       37.504691,
+       127.025249
+      ]
+     ]
+    ],
+    "neighborsKnown": true
+   },
+   "routeHints": {
+    "entry": [
+     37.497954,
+     127.02773
+    ],
+    "exit": [
+     37.504591,
+     127.024526
+    ]
+   },
+   "roadSource": {
+    "type": "hdmap",
+    "basis": [
+     "HD Map 도로 구간",
+     "이 구간 GPS 기록 1건"
+    ]
+   },
+   "alternatives": [],
+   "order": 2
+  },
+  {
+   "itemId": "pi-2",
+   "recommendationId": "강남:서초대로:1jrdjyi|weekend|afternoon_offpeak|daylight|both",
+   "segmentId": "강남:서초대로:1jrdjyi",
+   "title": "서초대로 · 구간 #1",
+   "roadName": "서초대로",
+   "parentZone": "강남",
+   "subZoneName": "서초대로 유형 확인 불가 #1",
+   "score": 92.2,
+   "dataNeedScore": 92.2,
+   "priorityLabel": "매우 높음",
+   "confidence": "낮음",
+   "projectPriority": null,
+   "reasons": [
+    {
+     "key": "timePeriod",
+     "label": "시간대 부족도",
+     "value": 100,
+     "contribution": 26.7
+    },
+    {
+     "key": "segmentCoverage",
+     "label": "구간 Coverage 부족도",
+     "value": 95.7,
+     "contribution": 25.5
+    },
+    {
+     "key": "lightCondition",
+     "label": "조도 조건 부족도",
+     "value": 100,
+     "contribution": 13.3
+    }
+   ],
+   "reasonText": "서초대로 서측 구간 #1(유형 확인 불가)의 주말 오후 비피크 · 주간 수집은 0분입니다. 점수를 가장 많이 올린 항목은 시간대 부족도(100점 — 0분 / 목표 60분)입니다. 주말 후보 근거: 주말 오후 비피크 0분 · 출근 피크 0분 — 한 칸 목표 60분 미달.",
+   "deficit": {
+    "currentMinutes": 0,
+    "targetMinutes": 60,
+    "additionalMinutes": 60,
+    "currentVisits": 0,
+    "targetVisits": 2,
+    "coveragePercent": 4.3
+   },
+   "target": {
+    "targetMinutes": 60,
+    "currentMinutes": 0,
+    "deficitMinutes": 60,
+    "direction": "both",
+    "currentVisits": 0,
+    "recommendedPasses": 22,
+    "recommendedPassMinutes": 3
+   },
+   "condition": {
+    "weekdayType": "weekend",
+    "trafficPeriod": "afternoon_offpeak",
+    "lightCondition": "daylight"
+   },
+   "conditionLabel": "주말 · 오후 비피크 · 주간",
+   "timeWindow": {
+    "start": "13:30",
+    "end": "17:00"
+   },
+   "direction": {
+    "id": "both",
+    "label": "양방향"
+   },
+   "directionPlan": {
+    "feasibility": {
+     "forward": {
+      "status": "gps_seen",
+      "basis": "GPS 기록상 이 방향 13건 — 가능성은 있으나 지도로 확인되지 않음 (TMAP 검증으로 확인)"
+     },
+     "backward": {
+      "status": "needs_check",
+      "basis": "HD Map 에 일방통행·분리 차도 정보가 없어 지도만으로 판단할 수 없음 (TMAP 검증으로 확인)"
+     }
+    },
+    "allowed": [
+     "forward",
+     "backward"
+    ],
+    "excluded": [],
+    "note": "HD Map 에 일방통행·분리 차도 정보가 없어 방향 가능 여부는 nav-app TMAP 검증으로 확인합니다"
+   },
+   "passes": 20,
+   "visits": [
+    {
+     "passNo": 1,
+     "direction": "forward"
+    },
+    {
+     "passNo": 2,
+     "direction": "backward"
+    },
+    {
+     "passNo": 3,
+     "direction": "forward"
+    },
+    {
+     "passNo": 4,
+     "direction": "backward"
+    },
+    {
+     "passNo": 5,
+     "direction": "forward"
+    },
+    {
+     "passNo": 6,
+     "direction": "backward"
+    },
+    {
+     "passNo": 7,
+     "direction": "forward"
+    },
+    {
+     "passNo": 8,
+     "direction": "backward"
+    },
+    {
+     "passNo": 9,
+     "direction": "forward"
+    },
+    {
+     "passNo": 10,
+     "direction": "backward"
+    },
+    {
+     "passNo": 11,
+     "direction": "forward"
+    },
+    {
+     "passNo": 12,
+     "direction": "backward"
+    },
+    {
+     "passNo": 13,
+     "direction": "forward"
+    },
+    {
+     "passNo": 14,
+     "direction": "backward"
+    },
+    {
+     "passNo": 15,
+     "direction": "forward"
+    },
+    {
+     "passNo": 16,
+     "direction": "backward"
+    },
+    {
+     "passNo": 17,
+     "direction": "forward"
+    },
+    {
+     "passNo": 18,
+     "direction": "backward"
+    },
+    {
+     "passNo": 19,
+     "direction": "forward"
+    },
+    {
+     "passNo": 20,
+     "direction": "backward"
+    }
+   ],
+   "estimate": {
+    "speedKmh": 20,
+    "passSec": 164,
+    "turnSec": 60,
+    "neededPasses": 22,
+    "fitPasses": 56,
+    "plannedPasses": 20,
+    "windowMinutes": 210,
+    "windowUse": 0.36,
+    "expectedMinutes": 54.7,
+    "deficitMinutes": 60,
+    "shortfallMinutes": 5.3,
+    "limitedBy": "max_passes",
+    "speedSensitivity": [
+     {
+      "speedKmh": 15,
+      "plannedPasses": 17,
+      "expectedMinutes": 62.1,
+      "shortfallMinutes": 0
+     },
+     {
+      "speedKmh": 20,
+      "plannedPasses": 20,
+      "expectedMinutes": 54.7,
+      "shortfallMinutes": 5.3
+     },
+     {
+      "speedKmh": 30,
+      "plannedPasses": 20,
+      "expectedMinutes": 36.7,
+      "shortfallMinutes": 23.3
+     }
+    ],
+    "quantityStatus": "shortfall",
+    "unsuitable": false,
+    "plansNeeded": 2,
+    "basis": "구간 913m ÷ 20km/h = 편도 약 164초 · 필요 22회 · 시간대 210분에 56회",
+    "note": "이번 계획으로 약 54.7분 예상 · 부족분 60분 중 5.3분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)"
+   },
+   "connectivity": {
+    "known": true,
+    "deadEnds": [
+     "end"
+    ],
+    "note": "구간 끝이 다른 도로와 이어지지 않음 — 막다른 길이거나 지도 범위 끝 (돌아 나오기 확인 필요)"
+   },
+   "feasibility": {
+    "status": "shortfall",
+    "label": "목표 미달 예상",
+    "quantityStatus": "shortfall",
+    "unknownDirections": [
+     "backward"
+    ],
+    "reasons": [
+     "이번 계획으로 약 54.7분 예상 · 부족분 60분 중 5.3분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)",
+     "형상 반대 방향: 지도로 주행 가능 여부를 알 수 없음 — nav-app TMAP 검증으로 확인",
+     "구간 끝이 다른 도로와 이어지지 않음 — 막다른 길이거나 지도 범위 끝 (돌아 나오기 확인 필요)"
+    ]
+   },
+   "passMinutes": 3,
+   "estimatedMinutes": 55,
+   "lengthM": 913,
+   "geometry": [
+    [
+     37.496738,
+     127.023406
+    ],
+    [
+     37.496468,
+     127.022528
+    ],
+    [
+     37.496276,
+     127.021907
+    ],
+    [
+     37.49601,
+     127.021042
+    ],
+    [
+     37.49597,
+     127.020914
+    ],
+    [
+     37.495838,
+     127.020485
+    ],
+    [
+     37.495799,
+     127.020358
+    ],
+    [
+     37.495659,
+     127.019896
+    ],
+    [
+     37.495388,
+     127.019006
+    ],
+    [
+     37.495221,
+     127.018457
+    ],
+    [
+     37.495049,
+     127.017893
+    ],
+    [
+     37.494965,
+     127.017618
+    ],
+    [
+     37.494782,
+     127.017014
+    ],
+    [
+     37.494687,
+     127.016703
+    ],
+    [
+     37.494343,
+     127.015572
+    ],
+    [
+     37.493953,
+     127.014291
+    ],
+    [
+     37.493913,
+     127.01416
+    ],
+    [
+     37.493787,
+     127.013751
+    ]
+   ],
+   "mustPass": {
+    "path": [
+     [
+      37.496738,
+      127.023406
+     ],
+     [
+      37.496468,
+      127.022528
+     ],
+     [
+      37.496276,
+      127.021907
+     ],
+     [
+      37.49601,
+      127.021042
+     ],
+     [
+      37.49597,
+      127.020914
+     ],
+     [
+      37.495838,
+      127.020485
+     ],
+     [
+      37.495799,
+      127.020358
+     ],
+     [
+      37.495659,
+      127.019896
+     ],
+     [
+      37.495388,
+      127.019006
+     ],
+     [
+      37.495221,
+      127.018457
+     ],
+     [
+      37.495049,
+      127.017893
+     ],
+     [
+      37.494965,
+      127.017618
+     ],
+     [
+      37.494782,
+      127.017014
+     ],
+     [
+      37.494687,
+      127.016703
+     ],
+     [
+      37.494343,
+      127.015572
+     ],
+     [
+      37.493953,
+      127.014291
+     ],
+     [
+      37.493913,
+      127.01416
+     ],
+     [
+      37.493787,
+      127.013751
+     ]
+    ],
+    "direction": "forward",
+    "toleranceM": 25,
+    "minCoverage": 0.8,
+    "judge": "nav-app-pass-v1",
+    "neighbors": [
+     [
+      [
+       37.494242,
+       127.01562
+      ],
+      [
+       37.494586,
+       127.016751
+      ],
+      [
+       37.494681,
+       127.017063
+      ],
+      [
+       37.494864,
+       127.017666
+      ],
+      [
+       37.494948,
+       127.017941
+      ],
+      [
+       37.49512,
+       127.018505
+      ],
+      [
+       37.495287,
+       127.019055
+      ],
+      [
+       37.495558,
+       127.019944
+      ],
+      [
+       37.495698,
+       127.020406
+      ],
+      [
+       37.495737,
+       127.020534
+      ],
+      [
+       37.49587,
+       127.020963
+      ],
+      [
+       37.495909,
+       127.021091
+      ],
+      [
+       37.496176,
+       127.021956
+      ],
+      [
+       37.496367,
+       127.022577
+      ],
+      [
+       37.496637,
+       127.023454
+      ],
+      [
+       37.496868,
+       127.024202
+      ],
+      [
+       37.496907,
+       127.024329
+      ]
+     ],
+     [
+      [
+       37.496969,
+       127.024154
+      ],
+      [
+       37.496738,
+       127.023406
+      ]
+     ]
+    ],
+    "neighborsKnown": true
+   },
+   "routeHints": {
+    "entry": [
+     37.496738,
+     127.023406
+    ],
+    "exit": [
+     37.493787,
+     127.013751
+    ]
+   },
+   "roadSource": {
+    "type": "hdmap",
+    "basis": [
+     "HD Map 도로 구간",
+     "이 구간 GPS 기록 13건"
+    ]
+   },
+   "alternatives": [],
+   "order": 3
+  }
+ ],
+ "excludedItems": [],
+ "travel": [
+  {
+   "fromItemId": "pi-3",
+   "toItemId": "pi-1",
+   "distanceKm": 1.3,
+   "minutes": 3,
+   "method": "straight"
+  },
+  {
+   "fromItemId": "pi-1",
+   "toItemId": "pi-2",
+   "distanceKm": 0.9,
+   "minutes": 2,
+   "method": "straight"
+  }
+ ],
+ "feasibility": {
+  "windows": [
+   {
+    "window": "07:00~10:00",
+    "windowMinutes": 180,
+    "needMinutes": 75,
+    "items": [
+     "pi-3"
+    ]
+   },
+   {
+    "window": "11:30~13:30",
+    "windowMinutes": 120,
+    "needMinutes": 67,
+    "items": [
+     "pi-1"
+    ]
+   },
+   {
+    "window": "13:30~17:00",
+    "windowMinutes": 210,
+    "needMinutes": 75,
+    "items": [
+     "pi-2"
+    ]
+   }
+  ],
+  "warnings": [
+   "서초대로 · 구간 #1: 이번 계획으로 약 54.7분 예상 · 부족분 60분 중 5.3분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)",
+   "강남대로 · 구간 #4: 이번 계획으로 약 47.3분 예상 · 부족분 60분 중 12.7분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)",
+   "서초대로 · 구간 #1: 이번 계획으로 약 54.7분 예상 · 부족분 60분 중 5.3분은 남음 (한 계획 최대 20회 제한 · 같은 조건으로 약 2번 주행해야 채움)"
+  ],
+  "speedKmh": 20,
+  "summary": {
+   "achievable": 0,
+   "conditional": 0,
+   "shortfall": 3,
+   "direction_unknown": 0,
+   "route_failed": 0
+  },
+  "note": "예상은 달성량이 아니다 — 달성은 주행 뒤 GPS 원본으로만. 방향은 nav-app TMAP 검증 전에는 확인 필요"
+ },
+ "totals": {
+  "items": 3,
+  "passes": 60,
+  "collectKm": 52.3,
+  "travelKm": 2.2,
+  "distanceKm": 54.5,
+  "collectMinutes": 157,
+  "travelMinutes": 5,
+  "deficitMinutes": 180,
+  "expectedMinutes": 156.7,
+  "shortfallMinutes": 23.3
+ },
+ "integrity": {
+  "algorithm": "SHA-256",
+  "sha256": "3e400cc67ccc4e139bceb703a09db9664173f18c6c7ff3f9ed2cf2da3ba130d3"
+ }
+}

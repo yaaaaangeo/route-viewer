@@ -618,6 +618,7 @@ function renderTodayView(){
         <div class="rec-today-why">${recEsc(it.whyText)}</div>
         ${it.projectLabel?`<div class="rec-today-project">${recEsc(it.projectLabel)}</div>`:''}
         <div class="rec-today-item-actions">
+          ${typeof planPickCheckbox==='function'?planPickCheckbox(it):''}
           ${it.source==='segment'?`<button class="btn ghost" type="button" onclick="showTodayPickOnMap(${idArg})">지도</button>`:''}
           <button class="btn ghost" type="button" onclick="showTodayPickDetail(${idArg})">근거</button>
           <button class="btn ghost" type="button" onclick="hideRecommendationOnce(${idArg})">숨기기</button>
@@ -644,10 +645,15 @@ function renderTodayView(){
     ${hiddenHTML}
     <div class="rec-today-actions">
       ${picks.source==='segment'&&picks.items.length?`<button class="btn" type="button" onclick="showTodayPickOnMap(null)">지도에서 보기</button>`:''}
+      ${typeof renderSendNavButton==='function'?renderSendNavButton(picks):''}
       ${detailBtn}
       <span class="rec-muted">예상 합계 약 ${fmtNum(picks.totalMinutes)}분 · 후보 ${fmtNum(picks.candidateCount)}개 중 부족도 순 Top ${fmtNum(picks.items.length)}</span>
     </div>`;
+  refreshPlanResultsAfterToday();
 }
+
+// 오늘 추천이 다시 그려질 때 수행 결과 패널도 최신 추천과 견줘 다시 그린다 (nav-app 연계 · plan-loop-view.js)
+function refreshPlanResultsAfterToday(){ if(typeof renderPlanResults==='function') renderPlanResults(false); }
 
 function showTodayPickOnMap(id){
   setRecommendationDetailOpen(true,'rec-auto');

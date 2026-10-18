@@ -1793,6 +1793,9 @@
     maxCandidatesPerSegment: 4,
     resultCount: 12,
     minSegmentM: 60,              // 이보다 짧은 구간은 추천 대상에서 뺀다(교차로 조각)
+    // 수집 1회(편도) 시간 = 구간 길이 ÷ 수집 속도. 예전에는 '최소 6분'으로 잘라(2km 미만 구간이 모두 6분) 목표 60분이면 언제나 10회가 나왔다.
+    collectionSpeedKmh: 20,       // 혼잡 도심 수집 속도 가정 — 결과가 이 값에 따라 얼마나 달라지는지 계획 화면에 함께 보여 준다
+    maxPassesPerPlan: 20,         // 한 번 계획(하루 수집)에 넣는 최대 방문 — 넘으면 '한 계획으로는 부족'
     // 사업 우선도(HD Map 우선 구축구역) — 부족도 점수를 대신하지 않고 "보조"로만 섞는다.
     //   최종 점수 = Data Need Score × (100 − weight)% + Project Priority × weight%
     //   구역별 우선도(0~100)는 여기 두지 않는다 — 날짜별 Priority Policy(priority-policy.js, 설정 데이터)에서 읽는다.
@@ -1821,6 +1824,8 @@
     });
     if (!errors.length && Math.round(sum) !== 100) errors.push(`가중치 합계가 ${Math.round(sum)}% 예요 — 100% 가 되어야 저장할 수 있어요.`);
     if (!(s.targetMinutesPerCell > 0)) errors.push('한 칸 목표 수집 시간은 1분 이상이어야 해요.');
+    if (!(Number(s.collectionSpeedKmh) >= 5 && Number(s.collectionSpeedKmh) <= 80)) errors.push('수집 속도 가정은 5~80km/h 사이여야 해요.');
+    if (!(Number.isInteger(Number(s.maxPassesPerPlan)) && s.maxPassesPerPlan >= 1 && s.maxPassesPerPlan <= 50)) errors.push('한 계획 최대 방문은 1~50회여야 해요.');
     const pw = s.projectPriority.weight;
     // 사업 우선도가 부족도를 넘어서면 "우선지역이라서 1등"이 된다 — 50% 까지만 허용한다
     if (!Number.isFinite(pw) || pw < 0 || pw > 50) errors.push('사업 우선도 비중은 0~50% 사이여야 해요(부족도 점수가 중심이어야 합니다).');
@@ -2276,9 +2281,14 @@
           ? '실제 일출·일몰 시각에 따라 ±30분 조정하세요.' : null,
       };
     })();
+    // 목표 · 현재(GPS 원본에서 이 조건·방향으로 인정된 분) · 부족 — 점수와 별개로 '몇 번 지나야 하나'를 구간 길이로 센다
     const needMinutes = Math.max(0, settings.targetMinutesPerCell - state.minutes);
-    const passMinutes = Math.max(6, Math.round((seg.lengthM / 1000) / 20 * 60));  // 혼잡 구간 20km/h 가정
-    const passes = needMinutes > 0 ? Math.max(1, Math.ceil(needMinutes / passMinutes)) : 0;
+    const speedKmh = Number(settings.collectionSpeedKmh) || 20;
+    const passSec = Math.max(5, Math.round(seg.lengthM / (speedKmh / 3.6)));   // 편도 1회 — 길이 ÷ 속도 (예전 '최소 6분' 바닥 없앰)
+    const passMinutes = Math.round(passSec / 6) / 10;
+    const passes = needMinutes > 0 ? Math.max(1, Math.ceil(needMinutes * 60 / passSec)) : 0;
+    const maxPasses = Number(settings.maxPassesPerPlan) || 20;
+    const plansNeeded = passes ? Math.ceil(passes / maxPasses) : 0;
     const priority = priorityOf(c.score);
     const days = state.lastVisitedAt ? daysBetween(String(state.lastVisitedAt).slice(0, 10), today) : null;
     const confidence = segmentConfidence(c);
@@ -2325,9 +2335,12 @@
         additionalMinutes: needMinutes,
         targetMinutes: settings.targetMinutesPerCell,
         targetVisits: settings.targetVisitsPerCell,
-        passes, passMinutes,
-        estimatedMinutes: passes * passMinutes,
-        text: passes ? `${dir.label} ${passes}회(편도 약 ${passMinutes}분)` : '이 조건은 목표를 채웠어요',
+        passes, passMinutes, passSec, speedKmh, maxPassesPerPlan: maxPasses, plansNeeded,
+        estimatedMinutes: Math.round(passes * passSec / 6) / 10,
+        basis: `구간 ${Math.round(seg.lengthM)}m ÷ ${speedKmh}km/h = 편도 약 ${passSec}초 → 부족 ${needMinutes}분 ÷ 편도 = ${passes}회`,
+        text: passes
+          ? `${dir.label} ${passes}회(편도 약 ${passSec < 90 ? passSec + '초' : passMinutes + '분'})` + (plansNeeded > 1 ? ` — 한 계획 최대 ${maxPasses}회라 약 ${plansNeeded}번 주행일이 필요` : '')
+          : '이 조건은 목표를 채웠어요',
       },
       score: c.score,
       deficitScore: c.deficitScore != null ? c.deficitScore : c.score,

@@ -322,6 +322,8 @@ async function runAutoImportAction(fn,announce){
 
 // ── 새 파일이 반영됐다는 알림 → 필요한 화면만 갱신 ───────────────
 async function onAutoImportChanged(res){
+  // nav-app 주행 결과가 들어왔거나(결과 JSON) GPS 원본이 들어와 결과가 다시 평가됐으면 수행 결과 패널을 새로 읽는다
+  if(typeof renderPlanResults==='function') setTimeout(()=>renderPlanResults(true),0);
   // 수동 불러오기와 같은 신호 — 누적 지도 Coverage·추천·KPI 캐시가 이걸 듣고 무효화한다
   RouteDB.notifyChange('importRecords',[]);
   await refreshDateIndex();

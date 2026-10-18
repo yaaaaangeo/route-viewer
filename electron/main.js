@@ -578,6 +578,20 @@ function registerIpc() {
   handle('db:saveCoverageSnapshot', (zone, snap) => openDatabase().saveCoverageSnapshot(zone, snap));
   handle('db:listCoverageSnapshots', () => openDatabase().listCoverageSnapshots());
   handle('db:listRecommendationStates', () => openDatabase().listRecommendationStates());
+  // nav-app 연계 — 수집 계획 · 주행 결과 · 추천 전후 변화 (src/js/collection-loop.js)
+  handle('db:saveCollectionPlan', plan => openDatabase().saveCollectionPlan(plan));
+  handle('db:listCollectionPlans', limit => openDatabase().listCollectionPlans(limit));
+  handle('db:getCollectionPlan', (id, ver) => openDatabase().getCollectionPlan(id, ver));
+  handle('db:saveDriveResult', (text, meta) => openDatabase().saveDriveResult(text, meta || {}));
+  handle('db:listDriveResults', opts => openDatabase().listDriveResults(opts || {}));
+  handle('db:evaluateAllDriveResults', () => openDatabase().evaluateAllDriveResults());
+  handle('db:saveRecommendationChanges', (planId, changes, sessions) => openDatabase().saveRecommendationChanges(planId, changes, sessions));
+  handle('db:listRecommendationChanges', planId => openDatabase().listRecommendationChanges(planId));
+  handle('db:markPlanExported', (id, ver, name) => openDatabase().markPlanExported(id, ver, name));
+  handle('db:listPlanStatuses', limit => openDatabase().listPlanStatuses(limit));
+  handle('db:listDirectionFeedback', () => openDatabase().listDirectionFeedback());
+  handle('db:saveRouteCheck', text => openDatabase().saveRouteCheck(text));
+  handle('db:recordLinkImportFailure', entry => openDatabase().recordLinkImportFailure(entry || {}));
   handle('db:setRecommendationState', (id, state) => openDatabase().setRecommendationState(id, state));
   handle('db:getImport', id => openDatabase().getImport(id));
   handle('db:updateImportIssue', (id, patch) => openDatabase().updateImportIssue(id, patch));

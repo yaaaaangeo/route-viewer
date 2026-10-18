@@ -31,18 +31,23 @@ const path = require('path');
 const crypto = require('crypto');
 
 const ROUTE_EXTENSIONS = new Set(['.xlsx', '.xls', '.csv']);
+// nav-app 연계 파일 — 주행 결과(DriveResult)·수집 계획(CollectionPlan). 엑셀과 같은 폴더(Torres/<n호차>)에 올라온다.
+const INCOMPLETE_JSON_GRACE_MS = 10 * 60 * 1000;   // 끝나지 않은 JSON 을 '동기화 중'으로 기다리는 시간
+const LINK_EXTENSIONS = new Set(['.json']);
+const CollectionLoop = require('../src/js/collection-loop.js');
 const DEFAULT_INTERVAL_SEC = 60;
 const MIN_INTERVAL_SEC = 15;
 const MAX_INTERVAL_SEC = 3600;
 const AUTO_IMPORTED_BY = '자동 가져오기';
 // 처리가 끝난 상태 — 크기·수정 시각이 그대로면 다시 보지 않는다
-const SETTLED_STATUSES = new Set(['imported', 'already', 'baseline']);
+const SETTLED_STATUSES = new Set(['imported', 'already', 'baseline', 'ignored']);
 const SKIP_DIRS = new Set(['$recycle.bin', 'system volume information']);
 
 function isRouteFileName(name) {
   const n = String(name || '');
   if (!n || n.startsWith('~$') || n.startsWith('.')) return false;   // Excel 잠금/임시 · 숨김(.~lock, ._mac)
-  return ROUTE_EXTENSIONS.has(path.extname(n).toLowerCase());
+  const ext = path.extname(n).toLowerCase();
+  return ROUTE_EXTENSIONS.has(ext) || LINK_EXTENSIONS.has(ext);
 }
 
 // Drive 웹 주소나 URL 은 폴더로 받지 않는다
@@ -338,6 +343,11 @@ class AutoImporter {
     // 배치가 끝난 뒤 바뀐 날짜의 요약만 한 번씩 다시 만든다
     const dates = touchedDates.size ? this.db.rebuildDateSummaries([...touchedDates]) : [];
     this._clearPendingSummaryDates();
+    // 주행 결과 재평가 — GPS 원본(엑셀)이 결과보다 늦게 들어왔어도 여기서 계획 대비 수행이 다시 계산된다
+    let linkEvaluation = null;
+    if (imported.length && typeof this.db.evaluateAllDriveResults === 'function') {
+      try { linkEvaluation = this.db.evaluateAllDriveResults(); } catch (err) { console.warn('[auto-import] 주행 결과 재평가 실패:', err); }
+    }
 
     const counts = this.db.autoImportCounts(folderKey);
     const result = {
@@ -357,6 +367,8 @@ class AutoImporter {
       dates,
       vehicles: [...new Set(imported.flatMap(r => r.vehicles))].sort(),
       insertedRecords: imported.reduce((a, r) => a + r.inserted, 0),
+      driveResults: imported.filter(r => r.kind === 'drive_result').map(r => r.resultId),
+      linkEvaluation,
       files: imported,
     };
     this.db.setAutoImportConfig({ lastCheckAt: at, lastResult: { ...result, files: undefined } });
@@ -403,6 +415,9 @@ class AutoImporter {
     const hash = sha1(buf);
     const fileBase = { size: st2.size, mtime_ms: st2.mtimeMs, content_hash: hash, attempts };
 
+    // nav-app 연계 JSON — 주행 기록이 아니라 결과·계획 문서다. 검증해서 따로 저장한다(주행 기록 테이블은 건드리지 않음).
+    if (LINK_EXTENSIONS.has(path.extname(c.name).toLowerCase())) return this._processLinkFile(c, buf, fileBase, save, at);
+
     // 3) 같은 내용을 이미 넣었나(수동·자동 모두) — 이름이 바뀌었거나 다시 올린 파일
     const prior = this.db.findProcessedFileHash(hash);
     if (prior) {
@@ -445,6 +460,58 @@ class AutoImporter {
       status: 'imported',
       result: { name: c.name, relPath: c.relPath, importId: res.importId, dates: res.dates, vehicles, total: res.total, inserted: res.inserted, duplicates: res.duplicates },
     };
+  }
+
+  /**
+   * DriveResult.json — 스키마·SHA-256 검증 후 저장하고 GPS 원본으로 평가한다.
+   * 엑셀(GPS 원본)이 아직 없으면 "수행 보고 수신 / GPS 미검증"으로 두고, 엑셀이 들어온 배치 끝에 다시 평가한다.
+   * CollectionPlan.json 이 폴더에 있으면 계획으로 저장한다(평가 기준). 그 밖의 JSON 은 건너뛴다(주행기록이 아님).
+   */
+  _processLinkFile(c, buf, fileBase, save, at) {
+    const text = buf.toString('utf8');
+    // 끝나지 않은 JSON — 방금 바뀐 파일이면 아직 동기화 중으로 보고 다음 확인 때 다시 읽는다(pending).
+    // 오래(10분) 지나도 그대로면 깨진 파일로 '실패' — 두 경우 안내를 다르게 한다.
+    let parsed = null, parseErr = null;
+    try { parsed = JSON.parse(text.replace(/^﻿/, '')); } catch (err) { parseErr = err; }
+    if (parseErr && /^\s*[\[{]/.test(text.replace(/^﻿/, ''))) {
+      const ageMs = this.now() - Number(fileBase.mtime_ms || 0);
+      if (ageMs < INCOMPLETE_JSON_GRACE_MS) {
+        return { status: save('pending', { ...fileBase, reason: 'JSON 이 아직 끝나지 않았어요 — 동기화 중일 수 있어 다음 확인 때 다시 읽어요', retryable: 1 }) };
+      }
+      const reason = `JSON 형식이 깨졌어요 (${Math.round(ageMs / 60000)}분 지나도 그대로) — nav-app 에서 결과 파일을 다시 보내 주세요`;
+      if (/^driveresult_/i.test(c.name)) this.db.recordLinkImportFailure({ fileName: c.name, planId: '', reason, kind: 'broken_json', at });
+      return { status: save('failed', { ...fileBase, reason, retryable: 0 }) };   // 파일이 바뀌면(다시 보내면) 다시 읽는다
+    }
+    const kind = CollectionLoop.detectDocument(text);
+    if (kind === 'result') {
+      let res;
+      try { res = this.db.saveDriveResult(text, { source: 'auto', fileName: c.name, receivedAt: at }); } catch (err) {
+        const reason = `주행 결과 파일을 받지 않았어요 — ${errText(err)}`;
+        this.db.recordLinkImportFailure({ fileName: c.name, planId: parsed && parsed.plan && parsed.plan.planId ? String(parsed.plan.planId) : '', reason, kind: 'invalid_result', at });
+        return { status: save('failed', { ...fileBase, reason, retryable: 0 }) };
+      }
+      const r = JSON.parse(text);
+      if (res.status === 'duplicate') {
+        return { status: save('already', { ...fileBase, reason: '같은 주행 결과를 이미 받았어요', retryable: 0, dates: '', vehicles: r.vehicle, processed_at: at }) };
+      }
+      save('imported', { ...fileBase, reason: `주행 결과 ${r.resultId}`, retryable: 0, dates: '', vehicles: r.vehicle,   // 날짜는 엑셀(GPS 원본)로만 센다
+        total_records: 0, inserted: 0, duplicates: 0, processed_at: at });
+      return { status: 'imported', result: { name: c.name, relPath: c.relPath, kind: 'drive_result', resultId: r.resultId, dates: [], vehicles: [r.vehicle], total: 0, inserted: 0, duplicates: 0 } };
+    }
+    if (kind === 'routecheck') {
+      let res;
+      try { res = this.db.saveRouteCheck(text); } catch (err) {
+        return { status: save('failed', { ...fileBase, reason: `탐색 결과 파일을 받지 않았어요 — ${errText(err)}`, retryable: 0 }) };
+      }
+      return { status: save('already', { ...fileBase, reason: `TMAP 탐색 결과 ${res.checks}건 — 다음 계획의 방향 판단에 씀`, retryable: 0, processed_at: at }) };
+    }
+    if (kind === 'plan') {
+      try { this.db.saveCollectionPlan(JSON.parse(text)); } catch (err) {
+        return { status: save('failed', { ...fileBase, reason: `수집 계획 파일을 받지 않았어요 — ${errText(err)}`, retryable: 0 }) };
+      }
+      return { status: save('already', { ...fileBase, reason: '수집 계획 — 평가 기준으로 저장', retryable: 0, processed_at: at }) };
+    }
+    return { status: save('ignored', { ...fileBase, reason: kind === 'package' ? '확정 경로 패키지(주행기록 아님)' : '주행기록·연계 파일이 아닌 JSON', retryable: 0, processed_at: at }) };
   }
 
   // 배치 도중 앱이 꺼져도 날짜 요약이 빠지지 않게, 미뤄 둔 날짜를 적어 뒀다가 다음 시작 때 채운다

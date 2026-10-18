@@ -166,6 +166,19 @@
       listCoverageSnapshots: () => api.listCoverageSnapshots(),
       listRecommendationStates: () => api.listRecommendationStates(),
       setRecommendationState: (id, state) => api.setRecommendationState(id, state),
+      saveCollectionPlan: plan => api.saveCollectionPlan(plan),
+      listCollectionPlans: limit => api.listCollectionPlans(limit),
+      getCollectionPlan: (id, ver) => api.getCollectionPlan(id, ver),
+      saveDriveResult: (text, meta) => api.saveDriveResult(text, meta || {}),
+      listDriveResults: opts => api.listDriveResults(opts || {}),
+      evaluateAllDriveResults: () => api.evaluateAllDriveResults(),
+      saveRecommendationChanges: (planId, changes, sessions) => api.saveRecommendationChanges(planId, changes, sessions),
+      listRecommendationChanges: planId => api.listRecommendationChanges(planId),
+      markPlanExported: (id, ver, name) => api.markPlanExported(id, ver, name),
+      listPlanStatuses: limit => api.listPlanStatuses(limit),
+      listDirectionFeedback: () => api.listDirectionFeedback(),
+      saveRouteCheck: text => api.saveRouteCheck(text),
+      recordLinkImportFailure: entry => api.recordLinkImportFailure(entry),
       getImport: id => api.getImport(id),
       updateImportIssue: (id, patch) => api.updateImportIssue(id, patch),
       reviewAllPendingImports: () => api.reviewAllPendingImports(),
@@ -789,6 +802,133 @@
 
       async listRecommendationStates() {
         return { ...((await metaGet('recommendation_states', {})) || {}) };
+      },
+
+      // ── nav-app 연계 (SQLite 백엔드와 같은 동작 — 저장은 meta 저장소, 평가는 같은 순수 함수) ──
+      async saveCollectionPlan(plan) {
+        const CL = global.CollectionLoop;
+        const v = CL.validateCollectionPlan(plan);
+        if (!v.ok) throw new Error(v.errors.join(', '));
+        const all = (await metaGet('collection_plans', {})) || {};
+        const key = `${plan.planId}|${plan.planVersion}`;
+        // 내보냄 시각은 파일로 실제 저장했을 때만 (markPlanExported)
+        all[key] = { plan, hash: v.hash, exportedAt: (all[key] && all[key].exportedAt) || '' };
+        await metaSet('collection_plans', all);
+        return { planId: plan.planId, planVersion: plan.planVersion, hash: v.hash, code: v.code };
+      },
+      async getCollectionPlan(planId, planVersion) {
+        const all = (await metaGet('collection_plans', {})) || {};
+        const rows = Object.values(all).filter(r => r.plan.planId === planId && (!planVersion || r.plan.planVersion === planVersion));
+        rows.sort((a, b) => b.plan.planVersion - a.plan.planVersion);
+        return rows.length ? rows[0].plan : null;
+      },
+      async listCollectionPlans(limit) {
+        const all = (await metaGet('collection_plans', {})) || {};
+        return Object.values(all).map(r => ({ planId: r.plan.planId, planVersion: r.plan.planVersion, hash: r.hash,
+          planDate: r.plan.planDate, region: r.plan.region, createdAt: r.plan.createdAt, exportedAt: r.exportedAt }))
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, limit || 50);
+      },
+      async saveDriveResult(text, meta) {
+        const CL = global.CollectionLoop;
+        const v = CL.validateDriveResult(text);
+        if (!v.ok) throw new Error(v.errors.join(', '));
+        const r = v.result;
+        const all = (await metaGet('drive_results', {})) || {};
+        const prev = all[r.resultId];
+        if (prev && prev.hash === v.hash) return { resultId: r.resultId, status: 'duplicate', hash: v.hash };
+        all[r.resultId] = { result: r, hash: v.hash, receivedAt: (meta && meta.receivedAt) || new Date().toISOString(),
+          source: (meta && meta.source) || '', fileName: (meta && meta.fileName) || '', fp: '', evaluation: null };
+        // 같은 세션은 나중에 끝난 결과만 남겨 평가한다
+        const same = Object.values(all).filter(x => x.result.sessionId === r.sessionId)
+          .sort((a, b) => String(b.result.endedAt || '').localeCompare(String(a.result.endedAt || '')));
+        same.forEach((x, i) => { x.supersededBy = i === 0 ? '' : same[0].result.resultId; });
+        await metaSet('drive_results', all);
+        await this.evaluateAllDriveResults();
+        return { resultId: r.resultId, status: prev ? 'updated' : 'inserted', hash: v.hash };
+      },
+      async evaluateAllDriveResults() {
+        const CL = global.CollectionLoop;
+        const all = (await metaGet('drive_results', {})) || {};
+        let changed = 0;
+        for (const x of Object.values(all)) {
+          if (x.supersededBy) continue;
+          const w = CL.resultRecordWindow(x.result);
+          const records = (await this.getRecordsByDate(w.date))
+            .filter(rec => rec.vehicle === w.vehicle && rec.time >= w.fromTime && rec.time <= w.toTime)
+            .map((rec, i) => ({ ...rec, id: i + 1 }));
+          const fp = `${records.length}:${records.reduce((a, rec) => a + (Number(rec.issueMask) || 0), 0)}:${CL.PASS_JUDGE_VERSION}`;
+          if (x.fp === fp && x.evaluation) continue;
+          const plan = x.result.plan ? await this.getCollectionPlan(x.result.plan.planId, x.result.plan.planVersion) : null;
+          x.evaluation = plan ? CL.evaluatePlanExecution({ plan, result: x.result, records })
+            : { gpsStatus: records.length ? 'verified' : 'unverified', planMissing: true, items: [], totals: null, gps: { records: records.length },
+                gpsStatusLabel: records.length ? 'GPS 기록 있음 — 계획 파일 없음' : '수행 보고 수신 / GPS 미검증' };
+          x.fp = fp; changed++;
+        }
+        await metaSet('drive_results', all);
+        return { evaluated: Object.keys(all).length, changed };
+      },
+      async listDriveResults(opts) {
+        await this.evaluateAllDriveResults();
+        const all = (await metaGet('drive_results', {})) || {};
+        return Object.values(all).filter(x => (opts && opts.includeSuperseded) || !x.supersededBy).map(x => ({
+          resultId: x.result.resultId, planId: x.result.plan ? x.result.plan.planId : '', planVersion: x.result.plan ? x.result.plan.planVersion : 0,
+          sessionId: x.result.sessionId, packageId: x.result.routePackage ? x.result.routePackage.packageId : '',
+          vehicle: x.result.vehicle, driveDate: x.result.driveDate, startedAt: x.result.startedAt, endedAt: x.result.endedAt || '',
+          endReason: x.result.endReason || '', receivedAt: x.receivedAt, source: x.source, fileName: x.fileName,
+          gpsStatus: x.evaluation ? x.evaluation.gpsStatus : 'unverified', supersededBy: x.supersededBy || '', evaluation: x.evaluation,
+        })).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1)).slice(0, (opts && opts.limit) || 100);
+      },
+      async saveRecommendationChanges(planId, changes, sessionIds) {
+        const all = (await metaGet('recommendation_changes', {})) || {};
+        const sessions = [...new Set(sessionIds || [])].sort().join(',');
+        (changes || []).forEach(c => {
+          all[`${planId}|${c.itemId}|${sessions}`] = { planId, itemId: c.itemId, segmentId: c.segmentId || '', sessionIds: sessions,
+            beforeScore: c.beforeScore, afterScore: c.afterScore, beforeNeed: c.beforeNeedMinutes, afterNeed: c.afterNeedMinutes,
+            needReduced: c.needReducedMinutes, status: c.status, reason: c.reason, recordedAt: new Date().toISOString() };
+        });
+        await metaSet('recommendation_changes', all);
+        return { saved: (changes || []).length };
+      },
+      async markPlanExported(planId, planVersion, fileName) {
+        const all = (await metaGet('collection_plans', {})) || {};
+        const key = `${planId}|${planVersion}`;
+        const at = new Date().toISOString();
+        if (all[key]) { all[key].exportedAt = at; all[key].fileName = String(fileName || ''); await metaSet('collection_plans', all); }
+        return { exportedAt: at };
+      },
+      async recordLinkImportFailure(entry) {
+        const list = ((await metaGet('link_import_failures', [])) || []).filter(f => !(f.fileName === entry.fileName && f.reason === entry.reason));
+        list.unshift({ fileName: String(entry.fileName || ''), planId: entry.planId || '', reason: String(entry.reason || '').slice(0, 300), kind: entry.kind || '', at: entry.at || new Date().toISOString() });
+        await metaSet('link_import_failures', list.slice(0, 200));
+      },
+      async listPlanStatuses(limit) {
+        const CL = global.CollectionLoop;
+        const all = Object.values((await metaGet('collection_plans', {})) || {})
+          .sort((a, b) => (a.plan.createdAt < b.plan.createdAt ? 1 : -1)).slice(0, limit || 30);
+        const results = await this.listDriveResults({ limit: 500 });
+        const failures = (await metaGet('link_import_failures', [])) || [];
+        return {
+          plans: all.map(r => CL.planStatus(r.plan, r.exportedAt ? { exportedAt: r.exportedAt, fileName: r.fileName || '' } : null, results, failures.filter(f => f.planId === r.plan.planId))),
+          unlinkedFailures: failures.filter(f => !f.planId),
+        };
+      },
+      async saveRouteCheck(text) {
+        const v = global.CollectionLoop.validateRouteCheck(text);
+        if (!v.ok) throw new Error(v.errors.join(', '));
+        const all = (await metaGet('route_checks', {})) || {};
+        const dup = !!all[v.doc.checkId];
+        all[v.doc.checkId] = v.doc;
+        await metaSet('route_checks', all);
+        return { checkId: v.doc.checkId, status: dup ? 'duplicate' : 'inserted', checks: v.doc.directionChecks.length };
+      },
+      async listDirectionFeedback() {
+        const all = (await metaGet('drive_results', {})) || {};
+        const checks = (await metaGet('route_checks', {})) || {};
+        return global.CollectionLoop.directionFeedbackFromResults(Object.values(all).filter(x => !x.supersededBy).map(x => x.result).concat(Object.values(checks)));
+      },
+      async listRecommendationChanges(planId) {
+        const all = (await metaGet('recommendation_changes', {})) || {};
+        return Object.values(all).filter(c => c.planId === planId).sort((a, b) => (a.itemId < b.itemId ? -1 : 1));
       },
 
       async setRecommendationState(id, state) {
@@ -1853,6 +1993,10 @@
     'getAutoAnalysis', 'listSubZoneOverrides', 'saveSubZoneOverride', 'deleteSubZoneOverride',
     // Career Log 은 주행 데이터가 아니라서 MUTATING_METHODS(Coverage·추천 캐시 무효화)에 넣지 않는다
     'listCareerItems', 'saveCareerItem', 'deleteCareerItem',
+    // nav-app 연계 — 주행 기록을 바꾸지 않으므로 MUTATING_METHODS(캐시 무효화)에 넣지 않는다
+    'saveCollectionPlan', 'listCollectionPlans', 'getCollectionPlan', 'saveDriveResult', 'listDriveResults',
+    'evaluateAllDriveResults', 'saveRecommendationChanges', 'listRecommendationChanges',
+    'markPlanExported', 'listPlanStatuses', 'listDirectionFeedback', 'recordLinkImportFailure', 'saveRouteCheck',
   ].forEach(name => {
     RouteDB[name] = function (...args) {
       if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');

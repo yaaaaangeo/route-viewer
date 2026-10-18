@@ -250,6 +250,8 @@
     <div id="rec-status" class="ir-note" style="display:none;margin:0;"></div>
     <!-- 오늘 추천 주행(간단 보기) — 어디를·언제·왜 만. 계산은 Recommendation.buildTodayPicks, 그리기 recommend-view.js -->
     <section id="rec-today" class="rec-section rec-today" aria-label="오늘 추천 주행"></section>
+    <!-- nav-app 연계: 보낸 수집 계획 대비 실제 수행 결과 (plan-loop-view.js) -->
+    <section id="rec-plan-results" class="rec-section rec-today" aria-label="추천 계획 수행 결과"></section>
     <!-- 상세 분석 — 기존 화면 그대로. "상세 분석 보기"로 펼친다(접어도 계산·캐시는 그대로) -->
     <div id="rec-detail-wrap">
     <section id="rec-summary" class="rec-section" aria-label="추천 요약"></section>
@@ -457,6 +459,7 @@
 <script src="js/condition-stats.js"></script>
 <!-- 추천 주행 엔진(통계·규칙 기반, 순수 함수) — SQLite/IndexedDB 설정 검증과 추천 탭이 함께 쓴다 -->
 <script src="js/recommendation.js"></script>
+<script src="js/collection-loop.js"></script>
 <script src="js/career-metrics.js"></script>
 <script src="js/core.js"></script>
 <!-- 강남/서초 HD map 도로 데이터 — <script> 태그로 로드해서 각각
@@ -483,6 +486,7 @@
 <script src="js/hdmap-priority-view.js"></script>
 <script src="js/hdmap-priority-editor.js"></script>
 <script src="js/recommend-view.js"></script>
+<script src="js/plan-loop-view.js"></script>
 <script src="js/subzone-view.js"></script>
 <script src="js/auto-analysis-view.js"></script>
 <script src="js/replay.js"></script>

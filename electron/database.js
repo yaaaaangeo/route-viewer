@@ -34,6 +34,7 @@ const Recommendation = require('../src/js/recommendation.js');
 const IssueFilter = require('../src/js/issue-filter.js');
 const HDMapPriority = require('../src/js/hdmap-priority.js');
 const CareerMetrics = require('../src/js/career-metrics.js');
+const CollectionLoop = require('../src/js/collection-loop.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -367,6 +368,63 @@ class RouteDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_aif_folder ON auto_import_files(folder, status);
       CREATE INDEX IF NOT EXISTS idx_aif_hash   ON auto_import_files(content_hash);
+    `);
+
+    // nav-app 연계(src/js/collection-loop.js) — 수집 계획 · 주행 결과 · 추천 전후 변화.
+    // 주행 기록(driving_records)과 따로 둔다: 결과 파일은 "보고"일 뿐이고, 수행 여부는 GPS 원본으로 다시 계산한다.
+    // 예전 DB 는 이 테이블이 없을 뿐이라 새로 생기기만 한다(기존 데이터는 건드리지 않음).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collection_plans (
+        plan_id      TEXT NOT NULL,
+        plan_version INTEGER NOT NULL DEFAULT 1,
+        plan_hash    TEXT NOT NULL DEFAULT '',
+        plan_date    TEXT NOT NULL DEFAULT '',
+        region       TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL DEFAULT '',
+        exported_at  TEXT NOT NULL DEFAULT '',
+        plan_json    TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (plan_id, plan_version)
+      );
+      CREATE TABLE IF NOT EXISTS drive_results (
+        result_id        TEXT PRIMARY KEY,
+        content_hash     TEXT NOT NULL DEFAULT '',
+        plan_id          TEXT NOT NULL DEFAULT '',
+        plan_version     INTEGER NOT NULL DEFAULT 0,
+        session_id       TEXT NOT NULL DEFAULT '',
+        package_id       TEXT NOT NULL DEFAULT '',
+        package_version  INTEGER NOT NULL DEFAULT 0,
+        vehicle          TEXT NOT NULL DEFAULT '',
+        drive_date       TEXT NOT NULL DEFAULT '',
+        started_at       TEXT NOT NULL DEFAULT '',
+        ended_at         TEXT NOT NULL DEFAULT '',
+        end_reason       TEXT NOT NULL DEFAULT '',
+        received_at      TEXT NOT NULL DEFAULT '',
+        source           TEXT NOT NULL DEFAULT '',
+        file_name        TEXT NOT NULL DEFAULT '',
+        result_json      TEXT NOT NULL DEFAULT '{}',
+        gps_status       TEXT NOT NULL DEFAULT 'unverified',
+        gps_fingerprint  TEXT NOT NULL DEFAULT '',
+        evaluation_json  TEXT NOT NULL DEFAULT '',
+        evaluated_at     TEXT NOT NULL DEFAULT '',
+        superseded_by    TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_dr_plan    ON drive_results(plan_id);
+      CREATE INDEX IF NOT EXISTS idx_dr_session ON drive_results(session_id);
+      CREATE TABLE IF NOT EXISTS recommendation_changes (
+        change_key     TEXT PRIMARY KEY,
+        plan_id        TEXT NOT NULL DEFAULT '',
+        item_id        TEXT NOT NULL DEFAULT '',
+        segment_id     TEXT NOT NULL DEFAULT '',
+        session_ids    TEXT NOT NULL DEFAULT '',
+        before_score   REAL,
+        after_score    REAL,
+        before_need    REAL,
+        after_need     REAL,
+        need_reduced   REAL,
+        status         TEXT NOT NULL DEFAULT '',
+        reason         TEXT NOT NULL DEFAULT '',
+        recorded_at    TEXT NOT NULL DEFAULT ''
+      );
     `);
 
     // 예전 DB 에 issue_mask 컬럼을 새로 붙였으면 한 번만 전부 계산해 둔다
@@ -2001,6 +2059,245 @@ class RouteDatabase {
   }
 
   // 같은 내용(파일 SHA-1)을 이미 넣었나 — 수동 불러오기·자동 가져오기 이력 모두에서 찾는다
+  // ══════════════════════════════════════════════════════
+  //  nav-app 연계 — 수집 계획(CollectionPlan) · 주행 결과(DriveResult) · 추천 전후 변화
+  //  규격·규칙: src/js/collection-loop.js · docs/collection-loop.md
+  // ══════════════════════════════════════════════════════
+  // exported_at 은 파일로 실제 저장했을 때만 적는다(markPlanExported) — 저장만 했거나 동기화 폴더에서 다시 읽은 계획은 '내보냄'이 아니다
+  saveCollectionPlan(plan, options = {}) {
+    const v = CollectionLoop.validateCollectionPlan(plan);
+    if (!v.ok) throw new Error(v.errors.join(', '));
+    this.db.run(
+      `INSERT INTO collection_plans(plan_id, plan_version, plan_hash, plan_date, region, created_at, exported_at, plan_json)
+       VALUES(?,?,?,?,?,?,?,?)
+       ON CONFLICT(plan_id, plan_version) DO UPDATE SET
+         exported_at = CASE WHEN excluded.exported_at <> '' THEN excluded.exported_at ELSE collection_plans.exported_at END`,
+      [plan.planId, plan.planVersion, v.hash, plan.planDate || '', plan.region || '', plan.createdAt || '',
+        options.exportedAt || '', JSON.stringify(plan)]);
+    return { planId: plan.planId, planVersion: plan.planVersion, hash: v.hash, code: v.code };
+  }
+
+  /** 계획 파일을 실제로 저장(내보냄)했다 — 전달(nav-app 이 받았는지)은 아니다 */
+  markPlanExported(planId, planVersion, fileName) {
+    const at = new Date().toISOString();
+    this.db.run('UPDATE collection_plans SET exported_at = ? WHERE plan_id = ? AND plan_version = ?', [at, planId, planVersion]);
+    let files = {};
+    try { files = JSON.parse(this.getMeta('collection_plan_export_files', '{}')) || {}; } catch (_) { files = {}; }
+    files[`${planId}|${planVersion}`] = { exportedAt: at, fileName: String(fileName || '').slice(0, 300) };
+    this.setMeta('collection_plan_export_files', JSON.stringify(files));
+    return { exportedAt: at };
+  }
+
+  /** 연계 파일(주행 결과) 가져오기 실패 — 읽을 수 있으면 어느 계획 것인지 함께 적는다 (계획별 상태 표시) */
+  recordLinkImportFailure(entry) {
+    let list = [];
+    try { list = JSON.parse(this.getMeta('link_import_failures', '[]')) || []; } catch (_) { list = []; }
+    list = list.filter(f => !(f.fileName === entry.fileName && f.reason === entry.reason));
+    list.unshift({ fileName: String(entry.fileName || ''), planId: entry.planId || '', reason: String(entry.reason || '').slice(0, 300), kind: entry.kind || '', at: entry.at || new Date().toISOString() });
+    this.setMeta('link_import_failures', JSON.stringify(list.slice(0, 200)));
+  }
+
+  listLinkImportFailures() {
+    try { return JSON.parse(this.getMeta('link_import_failures', '[]')) || []; } catch (_) { return []; }
+  }
+
+  /** 계획별 진행 상태 (계획 생성 · 내보냄 · 전달 · 결과 · GPS 검증 · 가져오기 실패) — 증거 없는 단계는 '확인 불가' */
+  listPlanStatuses(limit = 30) {
+    let files = {};
+    try { files = JSON.parse(this.getMeta('collection_plan_export_files', '{}')) || {}; } catch (_) { files = {}; }
+    const rows = this.db.all('SELECT plan_json AS j, exported_at AS e FROM collection_plans ORDER BY created_at DESC LIMIT ?', [limit]);
+    const results = this.listDriveResults({ limit: 500 });
+    const failures = this.listLinkImportFailures();
+    const statuses = rows.map(row => {
+      let plan; try { plan = JSON.parse(row.j); } catch (_) { return null; }
+      const f = files[`${plan.planId}|${plan.planVersion}`];
+      const exportInfo = row.e ? { exportedAt: row.e, fileName: f ? f.fileName : '' } : null;
+      return CollectionLoop.planStatus(plan, exportInfo, results, failures.filter(x => x.planId === plan.planId));
+    }).filter(Boolean);
+    return { plans: statuses, unlinkedFailures: failures.filter(x => !x.planId) };
+  }
+
+  /**
+   * nav-app TMAP 탐색 결과 파일(routecheck_*.json) — 확정·주행하지 않은 계획의 구간·방향별 탐색 결과도 다음 계획에 쓴다.
+   * 같은 checkId 는 한 번만 둔다.
+   */
+  saveRouteCheck(input) {
+    const v = CollectionLoop.validateRouteCheck(input);
+    if (!v.ok) throw new Error(v.errors.join(', '));
+    let all = {};
+    try { all = JSON.parse(this.getMeta('route_checks', '{}')) || {}; } catch (_) { all = {}; }
+    const dup = !!all[v.doc.checkId];
+    all[v.doc.checkId] = v.doc;
+    const keys = Object.keys(all).sort((a, b) => String(all[b].createdAt || '').localeCompare(String(all[a].createdAt || ''))).slice(0, 200);
+    this.setMeta('route_checks', JSON.stringify(Object.fromEntries(keys.map(k => [k, all[k]]))));
+    return { checkId: v.doc.checkId, status: dup ? 'duplicate' : 'inserted', checks: v.doc.directionChecks.length };
+  }
+
+  /** 방향 피드백 — 주행 결과(뺀 방향·구간·방향별 탐색 결과) + 탐색 결과 파일. 다음 계획의 방향 가능성에 쓴다 */
+  listDirectionFeedback() {
+    const rows = this.db.all("SELECT result_json AS j FROM drive_results WHERE superseded_by = ''");
+    let checks = {};
+    try { checks = JSON.parse(this.getMeta('route_checks', '{}')) || {}; } catch (_) { checks = {}; }
+    return CollectionLoop.directionFeedbackFromResults(rows.map(r => { try { return JSON.parse(r.j); } catch (_) { return null; } }).filter(Boolean)
+      .concat(Object.values(checks)));
+  }
+
+  getCollectionPlan(planId, planVersion) {
+    const row = planVersion
+      ? this.db.get('SELECT plan_json AS j FROM collection_plans WHERE plan_id = ? AND plan_version = ?', [planId, planVersion])
+      : this.db.get('SELECT plan_json AS j FROM collection_plans WHERE plan_id = ? ORDER BY plan_version DESC LIMIT 1', [planId]);
+    try { return row ? JSON.parse(row.j) : null; } catch (_) { return null; }
+  }
+
+  listCollectionPlans(limit = 50) {
+    return this.db.all(
+      `SELECT plan_id AS planId, plan_version AS planVersion, plan_hash AS hash, plan_date AS planDate, region,
+              created_at AS createdAt, exported_at AS exportedAt FROM collection_plans
+        ORDER BY created_at DESC LIMIT ?`, [limit]);
+  }
+
+  /**
+   * 주행 결과 저장 — 같은 resultId·같은 내용이면 아무것도 하지 않는다(중복 가져오기).
+   * 같은 resultId 인데 내용이 다르면(nav-app 이 마무리하며 다시 쓴 파일) 새 내용으로 바꾸고 평가를 다시 한다.
+   * 같은 세션의 다른 resultId 는 따로 남기되, 더 늦게 끝난 쪽이 앞 결과를 대체(superseded_by)한다.
+   */
+  saveDriveResult(input, meta = {}) {
+    const v = CollectionLoop.validateDriveResult(input);
+    if (!v.ok) throw new Error(v.errors.join(', '));
+    const r = v.result;
+    const prev = this.db.get('SELECT content_hash AS h FROM drive_results WHERE result_id = ?', [r.resultId]);
+    if (prev && prev.h === v.hash) return { resultId: r.resultId, status: 'duplicate', hash: v.hash };
+    const at = meta.receivedAt || new Date().toISOString();
+    this.db.run(
+      `INSERT INTO drive_results(result_id, content_hash, plan_id, plan_version, session_id, package_id, package_version,
+         vehicle, drive_date, started_at, ended_at, end_reason, received_at, source, file_name, result_json,
+         gps_status, gps_fingerprint, evaluation_json, evaluated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'unverified','','','')
+       ON CONFLICT(result_id) DO UPDATE SET content_hash = excluded.content_hash, ended_at = excluded.ended_at,
+         end_reason = excluded.end_reason, received_at = excluded.received_at, result_json = excluded.result_json,
+         gps_fingerprint = '', evaluation_json = '', evaluated_at = ''`,
+      [r.resultId, v.hash, (r.plan && r.plan.planId) || '', (r.plan && r.plan.planVersion) || 0, r.sessionId,
+        (r.routePackage && r.routePackage.packageId) || '', (r.routePackage && r.routePackage.routeVersion) || 0,
+        r.vehicle, r.driveDate, r.startedAt, r.endedAt || '', r.endReason || '', at, meta.source || '',
+        meta.fileName || '', JSON.stringify(r)]);
+    // 같은 세션에서 나중에 끝난 결과가 앞 결과를 대체한다 (중간 저장 → 최종 저장)
+    const same = this.db.all('SELECT result_id AS id, ended_at AS e FROM drive_results WHERE session_id = ? ORDER BY ended_at DESC, received_at DESC', [r.sessionId]);
+    same.forEach((row, i) => this.db.run('UPDATE drive_results SET superseded_by = ? WHERE result_id = ?', [i === 0 ? '' : same[0].id, row.id]));
+    this.evaluateDriveResult(r.resultId);
+    return { resultId: r.resultId, status: prev ? 'updated' : 'inserted', hash: v.hash };
+  }
+
+  /**
+   * 계획 평가용 지역 도로 구간 — 자동 분석이 저장해 둔 도로망(GPS 와 무관)을 쓴다. 없으면 한 번 만든다.
+   * 같은 인스턴스에서 1분 동안 재사용한다 (자동 가져오기 배치 한 번에 여러 결과를 평가할 때).
+   */
+  _regionRoadSegments(parentZone) {
+    if (!parentZone) return null;
+    const memo = this._roadSegMemo || (this._roadSegMemo = new Map());
+    const hit = memo.get(parentZone);
+    if (hit && Date.now() - hit.at < 60000) return hit.segments;
+    let segments = null;
+    try {
+      const row = this.db.get('SELECT data_json AS json FROM auto_analysis WHERE parent_zone = ?', [parentZone]);
+      const cached = row ? JSON.parse(row.json) : null;
+      if (cached && Array.isArray(cached.segments) && cached.segments.length) segments = cached.segments;
+      else if ((this.getZonePolygons() || {})[parentZone]) segments = (this.getAutoAnalysis(parentZone, { issueFilter: 'all' }) || {}).segments || null;
+    } catch (_) { segments = null; }
+    segments = segments && segments.map(s => ({ id: s.id, roadName: s.roadName, geometry: s.geometry, lengthM: s.lengthM }));
+    memo.set(parentZone, { at: Date.now(), segments });
+    return segments;
+  }
+
+  /** 결과의 GPS 원본 — 그 차량·날짜·시각 범위의 기록(이슈 여부 포함) */
+  getRecordsForResult(result) {
+    const w = CollectionLoop.resultRecordWindow(result);
+    return this.db.all(
+      `SELECT id, date, time, vehicle, speed, latitude AS lat, longitude AS lng, issue_mask AS issueMask
+         FROM driving_records WHERE vehicle = ? AND date = ? AND time >= ? AND time <= ?
+        ORDER BY vehicle, timestamp, id`, [w.vehicle, w.date, w.fromTime, w.toTime]);
+  }
+
+  /**
+   * 결과 평가 — GPS 원본으로 계획 대비 수행을 계산한다(결과 파일의 요약 수치는 판정에 쓰지 않는다).
+   * 그 범위의 GPS 기록 지문(건수·최대 id·이슈 마스크 합)이 저장값과 같으면 다시 계산하지 않는다 —
+   * 엑셀이 나중에 들어오거나(순서 뒤바뀜) 기록을 지우거나 이슈 표시를 바꾸면 지문이 바뀌어 다시 계산된다.
+   */
+  evaluateDriveResult(resultId, options = {}) {
+    const row = this.db.get('SELECT result_json AS j, plan_id AS planId, plan_version AS planVersion, gps_fingerprint AS fp, evaluation_json AS ev FROM drive_results WHERE result_id = ?', [resultId]);
+    if (!row) return null;
+    let result;
+    try { result = JSON.parse(row.j); } catch (_) { return null; }
+    const records = this.getRecordsForResult(result);
+    // 지문 끝 = 판정 규칙 판(passJudge) — 규칙이 바뀌면 예전 평가를 다시 계산한다
+    const fp = `${records.length}:${records.length ? Math.max(...records.map(r => r.id)) : 0}:${records.reduce((a, r) => a + (Number(r.issueMask) || 0), 0)}:${CollectionLoop.PASS_JUDGE_VERSION}`;
+    const plan = row.planId ? this.getCollectionPlan(row.planId, row.planVersion || undefined) : null;
+    if (!options.force && row.fp === fp && row.ev) {
+      try { return JSON.parse(row.ev); } catch (_) { /* 다시 계산 */ }
+    }
+    // 옆 도로는 계획에 담긴 것(nav-app 과 같은 입력)을 쓰고, 예전 계획처럼 없으면 지역 도로망에서 고른다
+    const needRegion = plan && plan.items.some(it => !(it.mustPass && Array.isArray(it.mustPass.neighbors) && it.mustPass.neighborsKnown !== false));
+    const roadSegments = needRegion ? this._regionRoadSegments(plan.region) : null;
+    const evaluation = plan
+      ? CollectionLoop.evaluatePlanExecution({ plan, result, records, roadSegments })
+      : { gpsStatus: records.length ? 'verified' : 'unverified', planMissing: true, items: [],
+          gpsStatusLabel: records.length ? 'GPS 기록 있음 — 계획 파일 없음' : '수행 보고 수신 / GPS 미검증', totals: null,
+          gps: { records: records.length } };
+    this.db.run('UPDATE drive_results SET gps_status = ?, gps_fingerprint = ?, evaluation_json = ?, evaluated_at = ? WHERE result_id = ?',
+      [evaluation.gpsStatus, fp, JSON.stringify(evaluation), new Date().toISOString(), resultId]);
+    return evaluation;
+  }
+
+  /** 모든 결과를 (필요한 것만) 다시 평가 — 자동 가져오기 배치 뒤·기록 삭제 뒤에 부른다 */
+  evaluateAllDriveResults() {
+    const ids = this.db.all("SELECT result_id AS id FROM drive_results WHERE superseded_by = ''").map(r => r.id);
+    let changed = 0;
+    ids.forEach(id => {
+      const before = this.db.get('SELECT gps_fingerprint AS fp FROM drive_results WHERE result_id = ?', [id]);
+      this.evaluateDriveResult(id);
+      const after = this.db.get('SELECT gps_fingerprint AS fp FROM drive_results WHERE result_id = ?', [id]);
+      if (!before || before.fp !== after.fp) changed++;
+    });
+    return { evaluated: ids.length, changed };
+  }
+
+  listDriveResults(options = {}) {
+    const rows = this.db.all(
+      `SELECT result_id AS resultId, plan_id AS planId, plan_version AS planVersion, session_id AS sessionId,
+              package_id AS packageId, package_version AS packageVersion, vehicle, drive_date AS driveDate,
+              started_at AS startedAt, ended_at AS endedAt, end_reason AS endReason, received_at AS receivedAt,
+              source, file_name AS fileName, gps_status AS gpsStatus, evaluated_at AS evaluatedAt, superseded_by AS supersededBy
+         FROM drive_results ${options.includeSuperseded ? '' : "WHERE superseded_by = ''"}
+        ORDER BY started_at DESC LIMIT ?`, [options.limit || 100]);
+    return rows.map(r => {
+      const ev = this.evaluateDriveResult(r.resultId);
+      return { ...r, evaluation: ev };
+    });
+  }
+
+  /** 추천 전후 변화 저장 — 같은 계획·항목·반영 세션 묶음이면 덮어쓴다 */
+  saveRecommendationChanges(planId, changes, sessionIds) {
+    const at = new Date().toISOString();
+    const sessions = [...new Set(sessionIds || [])].sort().join(',');
+    (changes || []).forEach(c => {
+      this.db.run(
+        `INSERT INTO recommendation_changes(change_key, plan_id, item_id, segment_id, session_ids, before_score, after_score,
+           before_need, after_need, need_reduced, status, reason, recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(change_key) DO UPDATE SET after_score = excluded.after_score, after_need = excluded.after_need,
+           need_reduced = excluded.need_reduced, status = excluded.status, reason = excluded.reason, recorded_at = excluded.recorded_at`,
+        [`${planId}|${c.itemId}|${sessions}`, planId, c.itemId, c.segmentId || '', sessions, c.beforeScore, c.afterScore,
+          c.beforeNeedMinutes, c.afterNeedMinutes, c.needReducedMinutes, c.status, c.reason, at]);
+    });
+    return { saved: (changes || []).length };
+  }
+
+  listRecommendationChanges(planId) {
+    return this.db.all(
+      `SELECT plan_id AS planId, item_id AS itemId, segment_id AS segmentId, session_ids AS sessionIds,
+              before_score AS beforeScore, after_score AS afterScore, before_need AS beforeNeed, after_need AS afterNeed,
+              need_reduced AS needReduced, status, reason, recorded_at AS recordedAt
+         FROM recommendation_changes WHERE plan_id = ? ORDER BY item_id`, [planId]);
+  }
+
   findProcessedFileHash(fileHash) {
     if (!fileHash) return null;
     return this.db.get(
