@@ -12,6 +12,7 @@
 // ══════════════════════════════════════════════════════════
 
 async function renderDataView(){
+  if(typeof renderLoggingRecordsPanel==='function') await renderLoggingRecordsPanel();
   const statusEl=document.getElementById('data-status');
   const summaryEl=document.getElementById('data-summary');
   const listEl=document.getElementById('data-date-list');

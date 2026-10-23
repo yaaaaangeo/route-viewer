@@ -8,6 +8,9 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
+    "test:logging": "node tests/logging-model-db-test.js && node tests/logging-service-test.js && node tests/logging-ipc-test.js",
+    "test:e2e:logging": "node tests/run-logging-e2e.js",
+    "posttest": "npm run test:logging",
     "start": "electron .",
     "serve": "node server.js",
     "dist": "node tools/release.js --build-only",

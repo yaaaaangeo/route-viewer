@@ -1,0 +1,17 @@
+#logging-records-panel{border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:24px;min-width:0}
+#logging-editor{scroll-margin-top:120px}
+#logging-records-panel h2{font-size:18px;margin:0 0 12px}#logging-records-panel h3{font-size:15px;margin:22px 0 10px}
+#logging-records-panel p{font-size:12px;line-height:1.7;color:var(--text-dim)}
+.logging-notice{padding:10px;background:rgba(245,166,35,.1);border-left:3px solid var(--amber);color:var(--amber)!important}
+.logging-tag{color:var(--amber);font-size:10px;border:1px solid var(--amber);padding:2px 4px;margin-right:6px}
+.logging-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.logging-actions label{font-size:12px}
+.logging-scroll{overflow:auto;max-height:360px}#logging-records-panel table{width:100%;border-collapse:collapse;font-size:12px}
+#logging-records-panel th,#logging-records-panel td{padding:9px;border-bottom:1px solid var(--line);text-align:left;overflow-wrap:anywhere}
+.logging-review{display:grid;grid-template-columns:minmax(220px,1fr) minmax(300px,1fr);gap:20px}
+.logging-original{overflow:auto;max-height:800px}.logging-original img,.logging-photo{max-width:100%;height:auto}
+.logging-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}#logging-form label{display:flex;flex-direction:column;gap:5px;font-size:12px;margin-bottom:12px}
+#logging-form input,#logging-form select,#logging-form textarea{width:100%;box-sizing:border-box;padding:8px;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:4px}
+#logging-form input[type=checkbox]{width:auto;align-self:flex-start}#logging-form input[readonly]{opacity:.65}
+#logging-records-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;font-size:11px;background:var(--panel);padding:10px}
+#logging-message,#logging-form-message{color:var(--amber);padding:8px 0;font-size:12px}#logging-records-panel summary{cursor:pointer;margin-top:16px}
+@media(max-width:900px){.logging-review{grid-template-columns:1fr}.logging-fields{grid-template-columns:1fr}}

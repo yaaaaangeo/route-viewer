@@ -1,0 +1,13 @@
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+const root = path.resolve(__dirname, '..');
+const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'rv-loggerd-e2e-'));
+const env = { ...process.env, ROUTE_VIEWER_E2E: path.join(__dirname, 'logging-e2e.js') };
+delete env.ELECTRON_RUN_AS_NODE;
+const child = spawn(require('electron'), [root, `--user-data-dir=${userData}`, '--disable-gpu', '--in-process-gpu'], { cwd: root, env, stdio: 'inherit', windowsHide: true });
+const timeout = setTimeout(() => { child.kill(); console.error('LOGGERD E2E timeout'); process.exitCode = 1; }, 60000);
+child.on('error', e => { clearTimeout(timeout); console.error(e.message); process.exitCode = 1; });
+child.on('exit', code => { clearTimeout(timeout); process.exitCode = code == null ? 1 : code; });

@@ -19,6 +19,17 @@
   'use strict';
 
   const DEDUPE_KEY_FIELDS = ['date', 'time', 'vehicle', 'lat', 'lng'];
+  const LOGGING_METHODS = ['listLoggingAssets', 'listLoggingCandidates', 'getLoggingCandidate', 'confirmLoggingCandidate',
+    'rejectLoggingCandidate', 'listLoggingSessions', 'getLoggingSession', 'updateLoggingSession', 'getLoggingTotals',
+    'getLoggingCapabilities', 'pickLoggingPhotos', 'readLoggingAsset', 'listLoggingJobs', 'retryLoggingJob'];
+  function loggingBackend(api) {
+    return Object.fromEntries(LOGGING_METHODS.map(name => [name, (...args) => {
+      if (api && typeof api[name] === 'function') return api[name](...args);
+      if (name === 'getLoggingCapabilities') return Promise.resolve({ supported: false, reasonCode: 'DESKTOP_ONLY' });
+      const error = new Error('LOGGERD 사진·기록 관리는 데스크톱 앱에서 지원해요.');
+      error.code = 'UNSUPPORTED_PLATFORM'; return Promise.reject(error);
+    }]));
+  }
   // 이 필드가 unique key 밖에서 다르면 "완전 동일"이 아니라 "충돌"로 집계한다
   // (electron/database.js 의 COMPARABLE_FIELDS 와 반드시 같아야 한다 — 백엔드가
   //  달라도(SQLite/IndexedDB) 같은 파일을 넣으면 같은 리포트가 나와야 하기 때문)
@@ -117,6 +128,7 @@
   function makeDesktopBackend(api) {
     return {
       kind: 'sqlite',
+      ...loggingBackend(api),
       label: 'SQLite',
       async init() { await api.stats(); },
       stats: () => api.stats(),
@@ -590,6 +602,7 @@
 
     return {
       kind: 'indexeddb',
+      ...loggingBackend(null),
       label: 'IndexedDB',
 
       async init() { await ready(); await seedDefaultsIfNeeded(); await migrateSummariesIfNeeded(); },
@@ -1968,6 +1981,15 @@
   };
 
   const changeListeners = [];
+  // Independent namespace: these changes must never invalidate GPS Coverage/recommendations/KPI.
+  LOGGING_METHODS.forEach(name => {
+    RouteDB[name] = async function (...args) {
+      if (!this.backend) throw new Error('RouteDB.init() 이 먼저 호출돼야 합니다');
+      const result = await this.backend[name](...args);
+      if (['confirmLoggingCandidate', 'rejectLoggingCandidate', 'updateLoggingSession'].includes(name)) this.notifyChange('logging:changed', []);
+      return result;
+    };
+  });
   const MUTATING_METHODS = new Set([
     'importRecords', 'deleteDate', 'deleteAll', 'saveZonePolygons', 'saveHDMapPriorityPolygon', 'saveZone', 'setZoneActive',
     'saveZoneManualCells', 'setSettings', 'restoreBackupPayload', 'reclassifySummaries',

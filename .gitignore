@@ -1,4 +1,6 @@
 node_modules/
+logging/
+tests/loggerd-output/
 release/
 tooling/
 tests/screenshots/

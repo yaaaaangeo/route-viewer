@@ -138,6 +138,8 @@ async function startRouteViewer(){
   // 접근 권한 명단(설정 › 접근 권한)을 읽고 나서 로그인 여부를 판단한다
   await loadAllowedUsers();
 
+  if(typeof initLoggingRecordsView==='function') initLoggingRecordsView();
+
   await loadZonePolygonsFromDb();
   await Promise.all([refreshZoneCache(),refreshVehicleCache(),refreshSettingsCache()]);
   await updateBackupStatus();

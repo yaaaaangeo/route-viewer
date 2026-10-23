@@ -14,6 +14,7 @@ const fs = require('fs');
 
 const { RouteDatabase } = require('./database.js');
 const { AutoImporter } = require('./auto-import.js');
+const { registerLoggingIpc } = require('./logging-ipc.js');
 const UpdateFolder = require('./update-folder.js');
 const { spawn } = require('child_process');
 const RouteParser = require('../src/js/parser.js');
@@ -532,6 +533,8 @@ function handle(channel, fn) {
 }
 
 function registerIpc() {
+  registerLoggingIpc({ ipcMain, db: openDatabase(), root: path.join(app.getPath('userData'), 'logging'),
+    dialog, nativeImage, getWindow: () => mainWindow });
   handle('db:stats', () => openDatabase().getStats());
   handle('db:importRecords', (records, meta) => openDatabase().importRecords(records, meta));
   handle('db:listDateSummaries', () => openDatabase().listDateSummaries());

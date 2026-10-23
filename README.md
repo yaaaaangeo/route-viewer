@@ -22,6 +22,7 @@ Coverage · 통계 · GPS 리플레이로 보는 데이터 관리/분석 도구�
 
 | 문서 | 내용 |
 |---|---|
+| [LOGGERD 로깅 기록 MVP](docs/loggerd-logging.md) | Electron 사진 보관·Mock 후보 검토·SQLite 기록·단위별 합계·테스트 및 후속 인식기 연결 |
 | [Google Drive 자동 가져오기](docs/auto-import.md) | 운전자가 휴대폰으로 Drive 공유 폴더에 올린 엑셀을 PC 가 60초마다 자동 반영 · 연결 방법 |
 | [nav-app 연계 — 추천 수집 주행](docs/collection-loop.md) | 오늘 추천 → 수집 계획 파일 → nav-app TMAP 경로·필수 구간 검증 → 주행 결과 + GPS 원본으로 계획 대비 판정 → 추천 전후 비교 |
 | [달력 · 교통 시간대 · 조도 조건](docs/calendar-conditions.md) | 전체 데이터 수집 현황, 교통 시간대·조도(일출/일몰) 분류 기준과 설정 |

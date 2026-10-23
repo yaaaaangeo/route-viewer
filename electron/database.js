@@ -35,6 +35,7 @@ const IssueFilter = require('../src/js/issue-filter.js');
 const HDMapPriority = require('../src/js/hdmap-priority.js');
 const CareerMetrics = require('../src/js/career-metrics.js');
 const CollectionLoop = require('../src/js/collection-loop.js');
+const LoggingDatabase = require('./logging-database.js');
 
 const SCHEMA_VERSION = 2;
 
@@ -123,6 +124,7 @@ class RouteDatabase {
     try { this.db.run('PRAGMA journal_mode = WAL'); } catch (_) { /* 기본 저널 사용 */ }
     this.db.run('PRAGMA synchronous = NORMAL');
     this._migrate();
+    LoggingDatabase.migrate(this.db);
     this._migrateSummaries();
   }
 
@@ -2713,4 +2715,5 @@ function dedupeHistory(history) {
     .slice(0, 10);
 }
 
+Object.assign(RouteDatabase.prototype, LoggingDatabase.methods);
 module.exports = { RouteDatabase, buildDaySummary, dedupeHistory, haversine, timeToSec, normalizeRecommendationState };

@@ -1,0 +1,51 @@
+'use strict';
+const assert = require('assert/strict');
+const fs = require('fs/promises');
+const os = require('os');
+const path = require('path');
+const { RouteDatabase } = require('../electron/database');
+const { LoggingService } = require('../electron/logging-service');
+const { MockLoggingRecognizer } = require('../electron/logging-recognizer');
+async function main() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rv-logging-service-'));
+  let db;
+  try {
+    db = new RouteDatabase(path.join(dir, 'test.db'));
+    const photo = path.join(dir, 'photo.png');
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+    await fs.writeFile(photo, bytes);
+    const root = path.join(dir, 'logging');
+    const options = { db, root, validateImage: () => ({ width: 1, height: 1 }) };
+    let service = new LoggingService(options);
+    const [result] = await service.importFiles([photo]);
+    assert.equal(result.state, 'succeeded', JSON.stringify(result));
+    assert.equal(db.listLoggingCandidates().length, 2); assert.equal(db.listLoggingSessions().length, 0);
+    assert.equal(db.listLoggingCandidates()[0].observation.fields.loggingDate, null);
+    console.log('PASS multi-session Mock creates review candidates only; unknown fields not invented');
+    const copy = path.join(dir, 'copy.png'); await fs.copyFile(photo, copy);
+    const [dup] = await service.importFiles([copy]); assert.equal(dup.assetId, result.assetId); assert.equal(dup.duplicate, true);
+    assert.equal(db.listLoggingCandidates().length, 2);
+    await fs.unlink(photo); assert.deepEqual((await service.readAsset(result.assetId)).bytes, bytes);
+    console.log('PASS SHA-256 duplicates independent from file names; original survives source removal');
+    assert.throws(() => service.assetPath('../private'), e => e.code === 'ASSET_CORRUPT');
+    const bad = path.join(dir, 'bad.png'); await fs.writeFile(bad, 'not a photo');
+    assert.equal((await service.importFiles([bad]))[0].error.code, 'INVALID_IMAGE');
+    console.log('PASS invalid images and managed-path traversal rejected');
+    const failing = { id: 'test', version: '1', isMock: false, recognize: async () => { throw new Error('SECRET_KEY private person'); } };
+    service = new LoggingService({ ...options, recognizer: failing });
+    const failed = await service.recognize(result.assetId);
+    assert.equal(failed.state, 'failed'); assert.ok(!JSON.stringify(service.listJobs()).includes('SECRET'));
+    assert.ok(!JSON.stringify(failed).includes('person'));
+    service = new LoggingService({ ...options, recognizer: new MockLoggingRecognizer() });
+    assert.equal((await service.retryJob(failed.jobId)).state, 'succeeded');
+    console.log('PASS replaceable recognizer; safe errors; explicit retry');
+    db.db.run("INSERT INTO logging_jobs VALUES('interrupted',?,'processing','mock','1',1,1,NULL,'x','x')", [result.assetId]);
+    service = new LoggingService(options);
+    assert.equal(service.listJobs().find(j => j.id === 'interrupted').error.code, 'INTERRUPTED');
+    console.log('PASS interrupted jobs recovered without silent provider rerun');
+    const asset = db.listLoggingAssets()[0]; await fs.writeFile(service.assetPath(asset.relative_path), 'corrupt');
+    await assert.rejects(service.readAsset(result.assetId), e => e.code === 'ASSET_CORRUPT');
+    console.log('PASS retained original integrity checked');
+  } finally { if (db) db.close(); await fs.rm(dir, { recursive: true, force: true }); }
+}
+main().catch(e => { console.error(e); process.exitCode = 1; });

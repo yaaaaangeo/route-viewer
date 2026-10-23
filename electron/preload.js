@@ -12,12 +12,27 @@ const { contextBridge, ipcRenderer } = require('electron');
 // 화면에서는 그냥 await 하면 되도록 여기서 풀어준다.
 async function call(channel, ...args) {
   const res = await ipcRenderer.invoke(channel, ...args);
-  if (!res || !res.ok) throw new Error((res && res.error) || `${channel} 실패`);
+  if (!res || !res.ok) {
+    const error = new Error((res && res.error) || `${channel} 실패`);
+    error.code = res && res.errorCode;
+    throw error;
+  }
   return res.value;
 }
 
 contextBridge.exposeInMainWorld('routeAPI', {
   isDesktop: true,
+  ...Object.fromEntries(require('../src/js/logging-records.js').METHODS.map(name => [name, (...args) => call('db:' + name, ...args)])),
+  getLoggingCapabilities: () => call('logging:getCapabilities'),
+  pickLoggingPhotos: () => call('logging:pickPhotos'),
+  readLoggingAsset: assetId => call('logging:readAsset', assetId),
+  listLoggingJobs: () => call('logging:listJobs'),
+  retryLoggingJob: jobId => call('logging:retryJob', jobId),
+  onLoggingChange: handler => {
+    const listener = () => handler();
+    ipcRenderer.on('logging:changed', listener);
+    return () => ipcRenderer.removeListener('logging:changed', listener);
+  },
 
   // ── 저장소 ──
   stats: () => call('db:stats'),
